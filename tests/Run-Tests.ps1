@@ -374,6 +374,75 @@ foreach ($case in @(
     Assert-True (-not (Test-Path -LiteralPath $sentinel)) "$($case.Name) dry run creates no instance data"
 }
 
+Write-Host '== Interactive wizard back navigation ==' -ForegroundColor Cyan
+$wizardInstanceRoot = Join-Path $ProjectRoot '.test-output\wizard-instance-root'
+$wizardArchive = Join-Path $wizardInstanceRoot 'ExampleProvider\RevisedInstance'
+if (Test-Path -LiteralPath $wizardArchive) { throw "Wizard dry-run archive already exists: $wizardArchive" }
+$wizardInputLines = @(
+    'ExampleProvider',
+    'OriginalInstance',
+    'b',                 # return from node name to instance name
+    'RevisedInstance',
+    '',                  # accept regenerated node name
+    '192.0.2.60',
+    '',                  # no IPv6
+    '',                  # default bootstrap SSH port
+    '0',                 # return from authentication menu to SSH port
+    '',
+    '1',                 # password bootstrap
+    '4',                 # MonitorOnly
+    '',                  # default admin user
+    'n',                 # automatic high ports
+    'n',                 # no Komari
+    '2',                 # summary: return to previous active item
+    'n',
+    '1'                  # confirm revised summary
+)
+$wizardInput = ($wizardInputLines -join [Environment]::NewLine) + [Environment]::NewLine
+$pwshPath = (Get-Command pwsh -ErrorAction Stop).Source
+$wizardResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile',
+    '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
+    '-Mode', 'New',
+    '-DryRun',
+    '-InstanceRoot', $wizardInstanceRoot
+) -InputText $wizardInput -TimeoutSeconds 60
+Assert-True ($wizardResult.ExitCode -eq 0) 'interactive wizard completes after multiple back operations'
+Assert-True ($wizardResult.StdOut -match 'RevisedInstance') 'back navigation replaces the earlier instance value'
+Assert-True ($wizardResult.StdOut -match 'bootstrap-port' -and $wizardResult.StdOut -match 'komari-enabled') 'text, numbered menu, and summary back paths are exercised'
+Assert-True (-not (Test-Path -LiteralPath $wizardArchive)) 'interactive wizard dry run writes no plan or archive'
+
+$branchResetRoot = Join-Path $ProjectRoot '.test-output\wizard-branch-reset'
+$branchResetArchive = Join-Path $branchResetRoot 'ExampleProvider\BranchReset'
+$branchInputs = @(
+    'ExampleProvider', 'BranchReset', '', '192.0.2.61', '', '', '1', '1', '', 'n',
+    '1', 'target.example.com', 'y', 'y', 'n', 'n', '2',
+    'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', # Komari -> role
+    '4', '', 'n', 'n', '1'                   # switch to MonitorOnly and confirm
+)
+$branchQueue = [Collections.Generic.Queue[string]]::new()
+$branchInputs | ForEach-Object { $branchQueue.Enqueue($_) }
+$coreModule = Get-Module VpsDeploy.Core
+$branchPlan = & $coreModule {
+    param($InputQueue, $Root, $InstanceRoot)
+    $script:WizardTestInputQueue = $InputQueue
+    function Read-Host {
+        param([string]$Prompt)
+        if ($script:WizardTestInputQueue.Count -eq 0) { throw "Wizard test input exhausted at: $Prompt" }
+        return $script:WizardTestInputQueue.Dequeue()
+    }
+    try { New-VpsInteractivePlan -ProjectRoot $Root -InstanceRoot $InstanceRoot }
+    finally {
+        Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
+        Remove-Variable WizardTestInputQueue -Scope Script -ErrorAction SilentlyContinue
+    }
+} $branchQueue $ProjectRoot $branchResetRoot 6>$null
+Assert-True ($branchPlan.Role -eq 'MonitorOnly') 'back navigation can replace a previously completed role branch'
+Assert-True (-not $branchPlan.Reality.Target -and -not $branchPlan.TrustedTls.Enabled -and -not $branchPlan.AnyTls.Enabled) 'role change clears stale proxy and trusted TLS fields'
+Assert-True ($branchPlan.NetworkTuning.Mode -eq 'BaselineOnly') 'role change clears stale adaptive tuning fields'
+Assert-True ($branchQueue.Count -eq 0) 'branch-reset wizard consumed the expected navigation path'
+Assert-True (-not (Test-Path -LiteralPath $branchResetArchive)) 'in-memory branch-reset test writes no plan or archive'
+
 $testOutputRoot = Join-Path $ProjectRoot '.test-output'
 if (Test-Path -LiteralPath $testOutputRoot) {
     $remainingTestOutput = @(Get-ChildItem -LiteralPath $testOutputRoot -Force)

@@ -1,5 +1,6 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:VpsWizardBackMarker = '__MXH_VPS_WIZARD_BACK__'
 
 function Write-VpsUi {
     [CmdletBinding()]
@@ -35,12 +36,17 @@ function Read-VpsText {
         [string]$Default,
         [scriptblock]$Validate,
         [string]$ValidationMessage = '输入无效，请重新输入。',
-        [switch]$AllowEmpty
+        [switch]$AllowEmpty,
+        [switch]$AllowBack
     )
 
     while ($true) {
         $suffix = if ($Default) { " [$Default]" } else { '' }
-        $value = Read-Host ($Prompt + $suffix)
+        $backHint = if ($AllowBack) { '（输入 b 返回）' } else { '' }
+        $value = Read-Host ($Prompt + $suffix + $backHint)
+        if ($AllowBack -and $value.Trim().Equals('b', [StringComparison]::OrdinalIgnoreCase)) {
+            throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
+        }
         if ([string]::IsNullOrWhiteSpace($value)) {
             $value = $Default
         }
@@ -60,12 +66,17 @@ function Read-VpsYesNo {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Prompt,
-        [bool]$Default = $true
+        [bool]$Default = $true,
+        [switch]$AllowBack
     )
 
     $hint = if ($Default) { '[Y/n]' } else { '[y/N]' }
+    if ($AllowBack) { $hint += ' [b=返回]' }
     while ($true) {
         $answer = (Read-Host "$Prompt $hint").Trim().ToLowerInvariant()
+        if ($AllowBack -and $answer -eq 'b') {
+            throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
+        }
         if (-not $answer) { return $Default }
         if ($answer -in @('y', 'yes', '是', '好', '1')) { return $true }
         if ($answer -in @('n', 'no', '否', '不', '0')) { return $false }
@@ -78,7 +89,8 @@ function Read-VpsMenu {
     param(
         [Parameter(Mandatory)] [string]$Title,
         [Parameter(Mandatory)] [string[]]$Options,
-        [int]$Default = 1
+        [int]$Default = 1,
+        [switch]$AllowBack
     )
 
     Write-Host ''
@@ -86,8 +98,12 @@ function Read-VpsMenu {
     for ($i = 0; $i -lt $Options.Count; $i++) {
         Write-Host ("  {0}. {1}" -f ($i + 1), $Options[$i])
     }
+    if ($AllowBack) { Write-Host '  0. 返回上一步' }
     while ($true) {
         $raw = Read-Host "请选择 [$Default]"
+        if ($AllowBack -and ($raw.Trim() -eq '0' -or $raw.Trim().Equals('b', [StringComparison]::OrdinalIgnoreCase))) {
+            throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
+        }
         if (-not $raw) { return $Default }
         $choice = 0
         if ([int]::TryParse($raw, [ref]$choice) -and $choice -ge 1 -and $choice -le $Options.Count) {
@@ -95,6 +111,11 @@ function Read-VpsMenu {
         }
         Write-VpsUi '请输入列表中的编号。' Warning
     }
+}
+
+function Test-VpsWizardBackError {
+    param([Parameter(Mandatory)] $ErrorRecord)
+    return $ErrorRecord.Exception.Message -eq $script:VpsWizardBackMarker
 }
 
 function ConvertFrom-VpsSecureString {
@@ -370,269 +391,603 @@ function New-VpsInteractivePlan {
     Write-Host ''
     Write-Host 'MXH VPS Deploy - 新部署向导' -ForegroundColor White
     Write-Host '支持初始密码或服务商现有私钥；密码只由 OpenSSH 询问，现有私钥只用于一次性引导。' -ForegroundColor DarkGray
+    Write-Host '普通输入输入 b 可返回；编号菜单输入 0 或 b 可返回。' -ForegroundColor DarkGray
 
-    $provider = Read-VpsText '服务商名称' -Validate ${function:Test-VpsSafePathSegment} `
-        -ValidationMessage '名称不能包含路径分隔符或 Windows 非法字符。'
-    $instance = Read-VpsText '实例名称' -Validate ${function:Test-VpsSafePathSegment} `
-        -ValidationMessage '名称不能包含路径分隔符或 Windows 非法字符。'
-    $suggestedNode = (($provider + '-' + $instance) -replace '[^A-Za-z0-9._-]', '-') -replace '-+', '-'
-    $nodeName = Read-VpsText '客户端节点名称' -Default $suggestedNode `
-        -Validate ${function:Test-VpsNodeName} -ValidationMessage '节点名只允许字母、数字、点、下划线和连字符。'
-    $ipv4 = Read-VpsText '服务器 IPv4' -Validate { param($v) Test-VpsIpAddress $v IPv4 } `
-        -ValidationMessage '请输入有效的公网 IPv4 地址。'
-    $ipv6 = Read-VpsText '服务器 IPv6（没有则直接回车）' -AllowEmpty `
-        -Validate { param($v) -not $v -or (Test-VpsIpAddress $v IPv6) } `
-        -ValidationMessage '请输入有效 IPv6，或留空。'
-    $bootstrapPort = [int](Read-VpsText '服务商当前 SSH 端口' -Default '22' `
-        -Validate { param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 65535 })
-    $bootstrapAuthChoice = Read-VpsMenu '服务商初始 root 登录方式' @(
-        '密码登录（由 OpenSSH 直接询问）',
-        '现有私钥登录（DMIT 等仅密钥模板）'
-    ) 1
-    $bootstrapAuth = if ($bootstrapAuthChoice -eq 2) { 'ExistingKey' } else { 'Password' }
-    $bootstrapKeyPath = $null
-    if ($bootstrapAuth -eq 'ExistingKey') {
-        $bootstrapKeyInput = Read-VpsText '现有服务商私钥文件的完整路径' -Validate {
-            param($v)
-            $candidate = $v.Trim().Trim('"')
-            Test-Path -LiteralPath $candidate -PathType Leaf
-        } -ValidationMessage '找不到该私钥文件，请输入文件本身而不是目录。'
-        $bootstrapKeyPath = (Resolve-Path -LiteralPath $bootstrapKeyInput.Trim().Trim('"')).Path
-        Write-VpsUi '该私钥只用于写入新的实例专用公钥；不会复制进源码仓库或上传 GitHub。' Info
+    $wizard = [ordered]@{
+        Provider = $null
+        Instance = $null
+        NodeName = $null
+        IPv4 = $null
+        IPv6 = $null
+        BootstrapPort = 22
+        BootstrapAuth = 'Password'
+        BootstrapKeyPath = $null
+        Role = 'RealityEntry'
+        AdminUser = 'admin'
+        ManualPorts = $false
+        PortBasis = $null
+        AutoSshPrimary = $null
+        AutoSshRescue = $null
+        AutoXrayBackup = $null
+        AutoLandingPort = $null
+        SshPrimary = $null
+        SshRescue = $null
+        XrayBackup = $null
+        LandingPort = $null
+        TargetMode = 'ExternalAudited'
+        Target = $null
+        RealityServerName = $null
+        RealityTargetAddress = $null
+        LocalHttpsPort = 8443
+        ForceIpv4 = $true
+        AnyTlsServerName = $null
+        EchPublicName = $null
+        AnyTlsPaddingScheme = @()
+        CloudflareZoneName = $null
+        CertbotEmail = $null
+        CloudflareTokenFile = $null
+        AllowlistInput = $null
+        TrustedEntryIps = [ordered]@{ IPv4 = @(); IPv6 = @() }
+        ClientTransitTag = 'US-West Entry'
+        SecondaryIpv6Enabled = $false
+        SecondaryIpv6Address = $null
+        SecondaryBindInterface = $null
+        NetworkAdaptive = $null
+        BandwidthMbps = $null
+        ReferenceRttMs = $null
+        EnableKomari = $null
+        KomariEndpoint = [string]$versions.komari_agent.endpoint_default
     }
 
-    $roleChoice = Read-VpsMenu '这台 VPS 的部署角色' @(
-        'Reality 入口节点（推荐）',
-        'AnyTLS + 可信 TLS + ECH 入口节点',
-        'Shadowsocks 2022 纯落地节点',
-        '仅 SSH/防火墙/Komari 监控',
-        '建立实例专用 SSH 公钥后执行审计，不配置系统'
-    ) 1
-    $role = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly', 'AuditOnly')[$roleChoice - 1]
-
-    $adminUser = Read-VpsText '日常管理用户' -Default 'admin' `
-        -Validate { param($v) $v -match '^[a-z_][a-z0-9_-]{0,30}$' -and $v -ne 'root' } `
-        -ValidationMessage '请输入合法且不是 root 的 Linux 用户名。'
-
-    $usedPorts = @($bootstrapPort, 443)
-    $sshPrimary = Get-VpsRandomPort -Exclude $usedPorts
-    $usedPorts += $sshPrimary
-    $sshRescue = Get-VpsRandomPort -Exclude $usedPorts
-    $usedPorts += $sshRescue
-    $xrayBackup = Get-VpsRandomPort -Exclude $usedPorts
-    $usedPorts += $xrayBackup
-    $landingPort = Get-VpsRandomPort -Exclude $usedPorts
-
-    if (Read-VpsYesNo '是否手动指定高位端口？' $false) {
-        $sshPrimary = [int](Read-VpsText 'SSH 主端口' -Default $sshPrimary.ToString() -Validate {
-                param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -ne $bootstrapPort
-            })
-        $sshRescue = [int](Read-VpsText 'SSH 救援端口' -Default $sshRescue.ToString() -Validate {
-                param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -notin @($bootstrapPort, $sshPrimary)
-            })
-        if ($role -eq 'RealityEntry') {
-            $xrayBackup = [int](Read-VpsText 'Xray 救援端口' -Default $xrayBackup.ToString() -Validate {
-                    param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -notin @($bootstrapPort, $sshPrimary, $sshRescue, 443)
-                })
-        }
-        elseif ($role -eq 'ShadowsocksLanding') {
-            $landingPort = [int](Read-VpsText 'Shadowsocks TCP/UDP 端口' -Default $landingPort.ToString() -Validate {
-                    param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -notin @($bootstrapPort, $sshPrimary, $sshRescue, 443)
-                })
-        }
+    $getArchivePath = {
+        Join-Path (Join-Path $InstanceRoot ([string]$wizard.Provider)) ([string]$wizard.Instance)
     }
-
-    $archivePath = Join-Path (Join-Path $InstanceRoot $provider) $instance
-    $target = $null
-    $targetMode = 'ExternalAudited'
-    $realityServerName = $null
-    $realityTargetAddress = $null
-    $localHttpsPort = 8443
-    $anyTlsServerName = $null
-    $echPublicName = $null
-    $anyTlsPaddingScheme = @()
-    $trustedTlsEnabled = $false
-    $certbotEmail = $null
-    $cloudflareTokenFile = $null
-    $cloudflareZoneName = $null
-    $forceIpv4 = $true
-    if ($role -eq 'RealityEntry') {
-        $targetModeChoice = Read-VpsMenu 'REALITY target 模式' @(
-            '外部大学/机构/企业 target（严格审计）',
-            '自有域名 + 本机静态 HTTPS target'
-        ) 1
-        if ($targetModeChoice -eq 2) {
-            $targetMode = 'LocalOwnedTls'
-            $target = Read-VpsText '本机 HTTPS target 域名（只填域名）' `
-                -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入规范域名。'
-            $realityServerName = $target
-            $realityTargetAddress = "127.0.0.1:$localHttpsPort"
-            $trustedTlsEnabled = $true
-            Write-VpsUi 'Xray 将回落到 127.0.0.1 的静态 HTTPS 服务，不会把自有域名解析回公网 443。' Info
+    $ensureAutoPorts = {
+        $basis = [string]$wizard.BootstrapPort
+        if ($wizard.PortBasis -ne $basis -or -not $wizard.AutoSshPrimary) {
+            $usedPorts = @([int]$wizard.BootstrapPort, 443)
+            $wizard.AutoSshPrimary = Get-VpsRandomPort -Exclude $usedPorts
+            $usedPorts += [int]$wizard.AutoSshPrimary
+            $wizard.AutoSshRescue = Get-VpsRandomPort -Exclude $usedPorts
+            $usedPorts += [int]$wizard.AutoSshRescue
+            $wizard.AutoXrayBackup = Get-VpsRandomPort -Exclude $usedPorts
+            $usedPorts += [int]$wizard.AutoXrayBackup
+            $wizard.AutoLandingPort = Get-VpsRandomPort -Exclude $usedPorts
+            $wizard.PortBasis = $basis
+        }
+        if (-not $wizard.ManualPorts) {
+            $wizard.SshPrimary = $wizard.AutoSshPrimary
+            $wizard.SshRescue = $wizard.AutoSshRescue
+            $wizard.XrayBackup = $wizard.AutoXrayBackup
+            $wizard.LandingPort = $wizard.AutoLandingPort
         }
         else {
-            $target = Read-VpsText 'REALITY target（只填域名，不含 https://）' `
-                -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入规范域名。'
-            $realityServerName = $target
-            $realityTargetAddress = "${target}:443"
-            Write-VpsUi 'target 应是预期长期运营的大学、机构或成熟企业网站，不能只凭品牌或一次 ping 判断。' Warning
-            if (-not (Read-VpsYesNo '你确认该候选不是个人小站，并允许脚本从 VPS 严格审计？' $true)) {
-                throw '用户取消：请准备更合适的 REALITY target 后重试。'
-            }
+            if (-not $wizard.SshPrimary) { $wizard.SshPrimary = $wizard.AutoSshPrimary }
+            if (-not $wizard.SshRescue) { $wizard.SshRescue = $wizard.AutoSshRescue }
+            if (-not $wizard.XrayBackup) { $wizard.XrayBackup = $wizard.AutoXrayBackup }
+            if (-not $wizard.LandingPort) { $wizard.LandingPort = $wizard.AutoLandingPort }
         }
-        $forceIpv4 = Read-VpsYesNo '是否强制代理网站流量从 VPS IPv4 出口？' $true
     }
-    elseif ($role -eq 'AnyTlsEntry') {
-        $anyTlsServerName = Read-VpsText 'AnyTLS 证书域名/内部 SNI（只填域名）' `
-            -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入规范域名。'
-        $echPublicName = Read-VpsText 'ECH 对外 public name（必须与内部 SNI 不同）' `
-            -Validate { param($v) (Test-VpsHostName $v) -and $v -ne $anyTlsServerName } `
-            -ValidationMessage '请输入另一个规范域名，不能与 AnyTLS 内部 SNI 相同。'
-        $trustedTlsEnabled = $true
-        $anyTlsPaddingScheme = @(New-MxhAnyTlsPaddingScheme)
-        $forceIpv4 = Read-VpsYesNo '是否强制代理网站流量从 VPS IPv4 出口？' $true
+    $clearTrustedTlsState = {
+        $wizard.CloudflareZoneName = $null
+        $wizard.CertbotEmail = $null
+        $wizard.CloudflareTokenFile = $null
+    }
+    $clearRoleSpecificState = {
+        $wizard.TargetMode = 'ExternalAudited'
+        $wizard.Target = $null
+        $wizard.RealityServerName = $null
+        $wizard.RealityTargetAddress = $null
+        $wizard.ForceIpv4 = $true
+        $wizard.AnyTlsServerName = $null
+        $wizard.EchPublicName = $null
+        $wizard.AnyTlsPaddingScheme = @()
+        & $clearTrustedTlsState
+        $wizard.AllowlistInput = $null
+        $wizard.TrustedEntryIps = [ordered]@{ IPv4 = @(); IPv6 = @() }
+        $wizard.ClientTransitTag = 'US-West Entry'
+        $wizard.SecondaryIpv6Enabled = $false
+        $wizard.SecondaryIpv6Address = $null
+        $wizard.SecondaryBindInterface = $null
+        $wizard.NetworkAdaptive = $null
+        $wizard.BandwidthMbps = $null
+        $wizard.ReferenceRttMs = $null
+        & $ensureAutoPorts
+        $wizard.XrayBackup = $wizard.AutoXrayBackup
+        $wizard.LandingPort = $wizard.AutoLandingPort
     }
 
-    if ($trustedTlsEnabled) {
-        $domainForZone = if ($role -eq 'AnyTlsEntry') { $anyTlsServerName } else { $realityServerName }
-        $labels = @($domainForZone -split '\.')
-        $suggestedZone = if ($labels.Count -ge 2) { ($labels[-2..-1] -join '.') } else { $domainForZone }
-        $cloudflareZoneName = Read-VpsText 'Cloudflare Zone 根域名' -Default $suggestedZone `
-            -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入 Cloudflare 中的完整根域名。'
-        $certbotEmail = Read-VpsText 'ACME/Let''s Encrypt 联系邮箱' -Validate {
-            param($v) $v -match '^[^@\s]+@[^@\s]+\.[^@\s]+$'
-        } -ValidationMessage '请输入有效邮箱地址。'
-        $defaultTokenPath = Join-Path $archivePath 'cloudflare-certbot-token.private.txt'
-        $cloudflareTokenFile = Read-VpsText 'Cloudflare Certbot Token 本地私有文件' -Default $defaultTokenPath `
-            -Validate { param($v) Test-Path -LiteralPath $v -PathType Leaf } `
-            -ValidationMessage '找不到 Token 文件；请先保存到实例私有归档。'
-        $cloudflareTokenFile = (Resolve-Path -LiteralPath $cloudflareTokenFile).Path
-        Write-VpsUi 'Token 只会通过 SSH 标准输入传到服务器 root-only 凭据文件，不写入计划、日志或 Git。' Info
-    }
-
-    $trustedEntryIps = [ordered]@{ IPv4 = @(); IPv6 = @() }
-    $clientTransitTag = $null
-    $secondaryIpv6Enabled = $false
-    $secondaryIpv6Address = $null
-    $secondaryBindInterface = $null
-    if ($role -eq 'ShadowsocksLanding') {
-        while ($true) {
-            $allowlistInput = Read-VpsText '允许连接落地端口的入口 VPS 公网 IP（多个用逗号分隔）'
-            try {
-                $trustedEntryIps = ConvertTo-VpsIpAllowlist $allowlistInput
-                break
+    $steps = @(
+        [pscustomobject]@{
+            Id = 'provider'; ShouldRun = { $true }; Run = {
+                $old = [string]$wizard.Provider
+                $value = Read-VpsText '服务商名称' -Default $old -Validate ${function:Test-VpsSafePathSegment} `
+                    -ValidationMessage '名称不能包含路径分隔符或 Windows 非法字符。'
+                if ($old -and $old -ne $value) {
+                    $wizard.NodeName = $null
+                    $wizard.CloudflareTokenFile = $null
+                }
+                $wizard.Provider = $value
             }
-            catch { Write-VpsUi $_.Exception.Message Warning }
-        }
-        $clientTransitTag = Read-VpsText '客户端链式连接使用的入口组/tag' -Default 'US-West Entry' -Validate {
-            param($v)
-            -not [string]::IsNullOrWhiteSpace($v) -and $v -notin @('Proxy', "$nodeName-IPv4", "$nodeName-IPv6")
-        } -ValidationMessage '入口组/tag 不能与生成的 Proxy 或落地节点名称重复。'
-        if ($ipv6) {
-            $secondaryIpv6Enabled = Read-VpsYesNo '是否增加独立 IPv6 出口用户？' $false
-            if ($secondaryIpv6Enabled) {
-                $secondaryIpv6Address = Read-VpsText 'IPv6 出口源地址' -Default $ipv6 `
+        },
+        [pscustomobject]@{
+            Id = 'instance'; ShouldRun = { $true }; Run = {
+                $old = [string]$wizard.Instance
+                $value = Read-VpsText '实例名称' -Default $old -AllowBack -Validate ${function:Test-VpsSafePathSegment} `
+                    -ValidationMessage '名称不能包含路径分隔符或 Windows 非法字符。'
+                if ($old -and $old -ne $value) {
+                    $wizard.NodeName = $null
+                    $wizard.CloudflareTokenFile = $null
+                }
+                $wizard.Instance = $value
+            }
+        },
+        [pscustomobject]@{
+            Id = 'node-name'; ShouldRun = { $true }; Run = {
+                $suggested = (([string]$wizard.Provider + '-' + [string]$wizard.Instance) -replace '[^A-Za-z0-9._-]', '-') -replace '-+', '-'
+                $default = if ($wizard.NodeName) { [string]$wizard.NodeName } else { $suggested }
+                $wizard.NodeName = Read-VpsText '客户端节点名称' -Default $default -AllowBack `
+                    -Validate ${function:Test-VpsNodeName} -ValidationMessage '节点名只允许字母、数字、点、下划线和连字符。'
+            }
+        },
+        [pscustomobject]@{
+            Id = 'ipv4'; ShouldRun = { $true }; Run = {
+                $wizard.IPv4 = Read-VpsText '服务器 IPv4' -Default ([string]$wizard.IPv4) -AllowBack `
+                    -Validate { param($v) Test-VpsIpAddress $v IPv4 } -ValidationMessage '请输入有效的公网 IPv4 地址。'
+            }
+        },
+        [pscustomobject]@{
+            Id = 'ipv6'; ShouldRun = { $true }; Run = {
+                $old = [string]$wizard.IPv6
+                $value = Read-VpsText '服务器 IPv6（没有则直接回车）' -Default $old -AllowEmpty -AllowBack `
+                    -Validate { param($v) -not $v -or (Test-VpsIpAddress $v IPv6) } `
+                    -ValidationMessage '请输入有效 IPv6，或留空。'
+                $wizard.IPv6 = if ($value) { $value } else { $null }
+                if ($old -ne [string]$wizard.IPv6) {
+                    $wizard.SecondaryIpv6Enabled = $false
+                    $wizard.SecondaryIpv6Address = $null
+                    $wizard.SecondaryBindInterface = $null
+                }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'bootstrap-port'; ShouldRun = { $true }; Run = {
+                $old = [int]$wizard.BootstrapPort
+                $wizard.BootstrapPort = [int](Read-VpsText '服务商当前 SSH 端口' -Default $old.ToString() -AllowBack `
+                    -Validate { param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 65535 })
+                if ($old -ne [int]$wizard.BootstrapPort) { & $ensureAutoPorts }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'bootstrap-auth'; ShouldRun = { $true }; Run = {
+                $default = if ($wizard.BootstrapAuth -eq 'ExistingKey') { 2 } else { 1 }
+                $choice = Read-VpsMenu '服务商初始 root 登录方式' @(
+                    '密码登录（由 OpenSSH 直接询问）',
+                    '现有私钥登录（DMIT 等仅密钥模板）'
+                ) $default -AllowBack
+                $newAuth = if ($choice -eq 2) { 'ExistingKey' } else { 'Password' }
+                if ($wizard.BootstrapAuth -ne $newAuth) { $wizard.BootstrapKeyPath = $null }
+                $wizard.BootstrapAuth = $newAuth
+            }
+        },
+        [pscustomobject]@{
+            Id = 'bootstrap-key'; ShouldRun = { $wizard.BootstrapAuth -eq 'ExistingKey' }; Run = {
+                $inputPath = Read-VpsText '现有服务商私钥文件的完整路径' -Default ([string]$wizard.BootstrapKeyPath) -AllowBack -Validate {
+                    param($v)
+                    $candidate = $v.Trim().Trim('"')
+                    Test-Path -LiteralPath $candidate -PathType Leaf
+                } -ValidationMessage '找不到该私钥文件，请输入文件本身而不是目录。'
+                $wizard.BootstrapKeyPath = (Resolve-Path -LiteralPath $inputPath.Trim().Trim('"')).Path
+                Write-VpsUi '该私钥只用于写入新的实例专用公钥；不会复制进源码仓库或上传 GitHub。' Info
+            }
+        },
+        [pscustomobject]@{
+            Id = 'role'; ShouldRun = { $true }; Run = {
+                $roleValues = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly', 'AuditOnly')
+                $default = [Array]::IndexOf($roleValues, [string]$wizard.Role) + 1
+                if ($default -lt 1) { $default = 1 }
+                $choice = Read-VpsMenu '这台 VPS 的部署角色' @(
+                    'Reality 入口节点（推荐）',
+                    'AnyTLS + 可信 TLS + ECH 入口节点',
+                    'Shadowsocks 2022 纯落地节点',
+                    '仅 SSH/防火墙/Komari 监控',
+                    '建立实例专用 SSH 公钥后执行审计，不配置系统'
+                ) $default -AllowBack
+                $newRole = $roleValues[$choice - 1]
+                if ($wizard.Role -ne $newRole) { & $clearRoleSpecificState }
+                $wizard.Role = $newRole
+                if ($newRole -eq 'AnyTlsEntry' -and @($wizard.AnyTlsPaddingScheme).Count -eq 0) {
+                    $wizard.AnyTlsPaddingScheme = @(New-MxhAnyTlsPaddingScheme)
+                }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'admin-user'; ShouldRun = { $true }; Run = {
+                $wizard.AdminUser = Read-VpsText '日常管理用户' -Default ([string]$wizard.AdminUser) -AllowBack `
+                    -Validate { param($v) $v -match '^[a-z_][a-z0-9_-]{0,30}$' -and $v -ne 'root' } `
+                    -ValidationMessage '请输入合法且不是 root 的 Linux 用户名。'
+            }
+        },
+        [pscustomobject]@{
+            Id = 'manual-ports'; ShouldRun = { $true }; Run = {
+                & $ensureAutoPorts
+                $wizard.ManualPorts = Read-VpsYesNo '是否手动指定高位端口？' ([bool]$wizard.ManualPorts) -AllowBack
+                if (-not $wizard.ManualPorts) { & $ensureAutoPorts }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'ssh-primary'; ShouldRun = { [bool]$wizard.ManualPorts }; Run = {
+                $wizard.SshPrimary = [int](Read-VpsText 'SSH 主端口' -Default ([string]$wizard.SshPrimary) -AllowBack -Validate {
+                    param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -ne [int]$wizard.BootstrapPort
+                } -ValidationMessage '请输入 20000–59999 内且不与初始 SSH 端口冲突的端口。')
+            }
+        },
+        [pscustomobject]@{
+            Id = 'ssh-rescue'; ShouldRun = { [bool]$wizard.ManualPorts }; Run = {
+                $wizard.SshRescue = [int](Read-VpsText 'SSH 救援端口' -Default ([string]$wizard.SshRescue) -AllowBack -Validate {
+                    param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -notin @([int]$wizard.BootstrapPort, [int]$wizard.SshPrimary)
+                } -ValidationMessage '请输入未与初始 SSH/主 SSH 冲突的 20000–59999 端口。')
+            }
+        },
+        [pscustomobject]@{
+            Id = 'xray-backup'; ShouldRun = { [bool]$wizard.ManualPorts -and $wizard.Role -eq 'RealityEntry' }; Run = {
+                $wizard.XrayBackup = [int](Read-VpsText 'Xray 救援端口' -Default ([string]$wizard.XrayBackup) -AllowBack -Validate {
+                    param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -notin @([int]$wizard.BootstrapPort, [int]$wizard.SshPrimary, [int]$wizard.SshRescue, 443)
+                } -ValidationMessage '请输入未与 SSH/443 冲突的 20000–59999 端口。')
+            }
+        },
+        [pscustomobject]@{
+            Id = 'landing-port'; ShouldRun = { [bool]$wizard.ManualPorts -and $wizard.Role -eq 'ShadowsocksLanding' }; Run = {
+                $wizard.LandingPort = [int](Read-VpsText 'Shadowsocks TCP/UDP 端口' -Default ([string]$wizard.LandingPort) -AllowBack -Validate {
+                    param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -notin @([int]$wizard.BootstrapPort, [int]$wizard.SshPrimary, [int]$wizard.SshRescue, 443)
+                } -ValidationMessage '请输入未与 SSH/443 冲突的 20000–59999 端口。')
+            }
+        },
+        [pscustomobject]@{
+            Id = 'reality-target-mode'; ShouldRun = { $wizard.Role -eq 'RealityEntry' }; Run = {
+                $default = if ($wizard.TargetMode -eq 'LocalOwnedTls') { 2 } else { 1 }
+                $choice = Read-VpsMenu 'REALITY target 模式' @(
+                    '外部大学/机构/企业 target（严格审计）',
+                    '自有域名 + 本机静态 HTTPS target'
+                ) $default -AllowBack
+                $newMode = if ($choice -eq 2) { 'LocalOwnedTls' } else { 'ExternalAudited' }
+                if ($wizard.TargetMode -ne $newMode) {
+                    $wizard.Target = $null
+                    $wizard.RealityServerName = $null
+                    $wizard.RealityTargetAddress = $null
+                    & $clearTrustedTlsState
+                }
+                $wizard.TargetMode = $newMode
+            }
+        },
+        [pscustomobject]@{
+            Id = 'reality-target'; ShouldRun = { $wizard.Role -eq 'RealityEntry' }; Run = {
+                $old = [string]$wizard.Target
+                $prompt = if ($wizard.TargetMode -eq 'LocalOwnedTls') {
+                    '本机 HTTPS target 域名（只填域名）'
+                } else { 'REALITY target（只填域名，不含 https://）' }
+                $wizard.Target = Read-VpsText $prompt -Default $old -AllowBack `
+                    -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入规范域名。'
+                $wizard.RealityServerName = $wizard.Target
+                $wizard.RealityTargetAddress = if ($wizard.TargetMode -eq 'LocalOwnedTls') {
+                    "127.0.0.1:$($wizard.LocalHttpsPort)"
+                } else { "$($wizard.Target):443" }
+                if ($old -and $old -ne $wizard.Target -and $wizard.TargetMode -eq 'LocalOwnedTls') {
+                    & $clearTrustedTlsState
+                }
+                if ($wizard.TargetMode -eq 'LocalOwnedTls') {
+                    Write-VpsUi 'Xray 将回落到 127.0.0.1 的静态 HTTPS 服务，不会把自有域名解析回公网 443。' Info
+                }
+                else {
+                    Write-VpsUi 'target 应是预期长期运营的大学、机构或成熟企业网站，不能只凭品牌或一次 ping 判断。' Warning
+                }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'reality-target-confirm'; ShouldRun = { $wizard.Role -eq 'RealityEntry' -and $wizard.TargetMode -eq 'ExternalAudited' }; Run = {
+                if (-not (Read-VpsYesNo '你确认该候选不是个人小站，并允许脚本从 VPS 严格审计？' $true -AllowBack)) {
+                    Write-VpsUi '已返回 target 输入项，请更换候选。' Warning
+                    throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
+                }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'anytls-server-name'; ShouldRun = { $wizard.Role -eq 'AnyTlsEntry' }; Run = {
+                $old = [string]$wizard.AnyTlsServerName
+                $wizard.AnyTlsServerName = Read-VpsText 'AnyTLS 证书域名/内部 SNI（只填域名）' -Default $old -AllowBack `
+                    -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入规范域名。'
+                if ($old -and $old -ne $wizard.AnyTlsServerName) { & $clearTrustedTlsState }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'ech-public-name'; ShouldRun = { $wizard.Role -eq 'AnyTlsEntry' }; Run = {
+                $wizard.EchPublicName = Read-VpsText 'ECH 对外 public name（必须与内部 SNI 不同）' -Default ([string]$wizard.EchPublicName) -AllowBack `
+                    -Validate { param($v) (Test-VpsHostName $v) -and $v -ne $wizard.AnyTlsServerName } `
+                    -ValidationMessage '请输入另一个规范域名，不能与 AnyTLS 内部 SNI 相同。'
+            }
+        },
+        [pscustomobject]@{
+            Id = 'force-ipv4'; ShouldRun = { $wizard.Role -in @('RealityEntry', 'AnyTlsEntry') }; Run = {
+                $wizard.ForceIpv4 = Read-VpsYesNo '是否强制代理网站流量从 VPS IPv4 出口？' ([bool]$wizard.ForceIpv4) -AllowBack
+            }
+        },
+        [pscustomobject]@{
+            Id = 'cloudflare-zone'; ShouldRun = {
+                $wizard.Role -eq 'AnyTlsEntry' -or ($wizard.Role -eq 'RealityEntry' -and $wizard.TargetMode -eq 'LocalOwnedTls')
+            }; Run = {
+                $domain = if ($wizard.Role -eq 'AnyTlsEntry') { [string]$wizard.AnyTlsServerName } else { [string]$wizard.RealityServerName }
+                $labels = @($domain -split '\.')
+                $suggested = if ($labels.Count -ge 2) { ($labels[-2..-1] -join '.') } else { $domain }
+                $default = if ($wizard.CloudflareZoneName) { [string]$wizard.CloudflareZoneName } else { $suggested }
+                $wizard.CloudflareZoneName = Read-VpsText 'Cloudflare Zone 根域名' -Default $default -AllowBack `
+                    -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入 Cloudflare 中的完整根域名。'
+            }
+        },
+        [pscustomobject]@{
+            Id = 'certbot-email'; ShouldRun = {
+                $wizard.Role -eq 'AnyTlsEntry' -or ($wizard.Role -eq 'RealityEntry' -and $wizard.TargetMode -eq 'LocalOwnedTls')
+            }; Run = {
+                $wizard.CertbotEmail = Read-VpsText 'ACME/Let''s Encrypt 联系邮箱' -Default ([string]$wizard.CertbotEmail) -AllowBack -Validate {
+                    param($v) $v -match '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+                } -ValidationMessage '请输入有效邮箱地址。'
+            }
+        },
+        [pscustomobject]@{
+            Id = 'cloudflare-token'; ShouldRun = {
+                $wizard.Role -eq 'AnyTlsEntry' -or ($wizard.Role -eq 'RealityEntry' -and $wizard.TargetMode -eq 'LocalOwnedTls')
+            }; Run = {
+                $defaultPath = if ($wizard.CloudflareTokenFile) {
+                    [string]$wizard.CloudflareTokenFile
+                } else { Join-Path (& $getArchivePath) 'cloudflare-certbot-token.private.txt' }
+                $value = Read-VpsText 'Cloudflare Certbot Token 本地私有文件' -Default $defaultPath -AllowBack `
+                    -Validate { param($v) Test-Path -LiteralPath $v -PathType Leaf } `
+                    -ValidationMessage '找不到 Token 文件；请先保存到实例私有归档。'
+                $wizard.CloudflareTokenFile = (Resolve-Path -LiteralPath $value).Path
+                Write-VpsUi 'Token 只会通过 SSH 标准输入传到服务器 root-only 凭据文件，不写入计划、日志或 Git。' Info
+            }
+        },
+        [pscustomobject]@{
+            Id = 'landing-allowlist'; ShouldRun = { $wizard.Role -eq 'ShadowsocksLanding' }; Run = {
+                while ($true) {
+                    try {
+                        $value = Read-VpsText '允许连接落地端口的入口 VPS 公网 IP（多个用逗号分隔）' `
+                            -Default ([string]$wizard.AllowlistInput) -AllowBack
+                        $wizard.TrustedEntryIps = ConvertTo-VpsIpAllowlist $value
+                        $wizard.AllowlistInput = $value
+                        Write-VpsUi '落地端口不会向全网开放；nftables 仅允许上面填写的可信入口 IP 访问 TCP+UDP。' Warning
+                        break
+                    }
+                    catch {
+                        if (Test-VpsWizardBackError $_) { throw }
+                        Write-VpsUi $_.Exception.Message Warning
+                    }
+                }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'landing-transit-tag'; ShouldRun = { $wizard.Role -eq 'ShadowsocksLanding' }; Run = {
+                $wizard.ClientTransitTag = Read-VpsText '客户端链式连接使用的入口组/tag' -Default ([string]$wizard.ClientTransitTag) -AllowBack -Validate {
+                    param($v)
+                    -not [string]::IsNullOrWhiteSpace($v) -and $v -notin @('Proxy', "$($wizard.NodeName)-IPv4", "$($wizard.NodeName)-IPv6")
+                } -ValidationMessage '入口组/tag 不能与生成的 Proxy 或落地节点名称重复。'
+            }
+        },
+        [pscustomobject]@{
+            Id = 'secondary-ipv6-enabled'; ShouldRun = { $wizard.Role -eq 'ShadowsocksLanding' -and [bool]$wizard.IPv6 }; Run = {
+                $wizard.SecondaryIpv6Enabled = Read-VpsYesNo '是否增加独立 IPv6 出口用户？' ([bool]$wizard.SecondaryIpv6Enabled) -AllowBack
+                if (-not $wizard.SecondaryIpv6Enabled) {
+                    $wizard.SecondaryIpv6Address = $null
+                    $wizard.SecondaryBindInterface = $null
+                }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'secondary-ipv6-address'; ShouldRun = { $wizard.Role -eq 'ShadowsocksLanding' -and [bool]$wizard.IPv6 -and [bool]$wizard.SecondaryIpv6Enabled }; Run = {
+                $default = if ($wizard.SecondaryIpv6Address) { [string]$wizard.SecondaryIpv6Address } else { [string]$wizard.IPv6 }
+                $wizard.SecondaryIpv6Address = Read-VpsText 'IPv6 出口源地址' -Default $default -AllowBack `
                     -Validate { param($v) Test-VpsIpAddress $v IPv6 } -ValidationMessage '请输入本机实际配置的 IPv6 地址。'
-                $secondaryBindInterface = Read-VpsText 'IPv6 出口接口（一般留空；多网卡时填写）' -AllowEmpty `
+            }
+        },
+        [pscustomobject]@{
+            Id = 'secondary-bind-interface'; ShouldRun = { $wizard.Role -eq 'ShadowsocksLanding' -and [bool]$wizard.IPv6 -and [bool]$wizard.SecondaryIpv6Enabled }; Run = {
+                $value = Read-VpsText 'IPv6 出口接口（一般留空；多网卡时填写）' -Default ([string]$wizard.SecondaryBindInterface) -AllowEmpty -AllowBack `
                     -Validate { param($v) -not $v -or $v -match '^[A-Za-z0-9_.:-]{1,32}$' }
+                $wizard.SecondaryBindInterface = if ($value) { $value } else { $null }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'network-adaptive'; ShouldRun = { $wizard.Role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding') }; Run = {
+                Write-VpsUi '脚本不会通过测速或虚拟网卡速率猜测套餐；自适应调优需要你提供标称带宽和代表性 RTT。' Info
+                $default = if ($null -eq $wizard.NetworkAdaptive) { $true } else { [bool]$wizard.NetworkAdaptive }
+                $wizard.NetworkAdaptive = Read-VpsYesNo '是否启用内存/角色/带宽/RTT 联合的保守自适应调优？' $default -AllowBack
+                if (-not $wizard.NetworkAdaptive) {
+                    $wizard.BandwidthMbps = $null
+                    $wizard.ReferenceRttMs = $null
+                }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'network-bandwidth'; ShouldRun = { $wizard.Role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding') -and [bool]$wizard.NetworkAdaptive }; Run = {
+                $wizard.BandwidthMbps = [int](Read-VpsText '套餐标称带宽（Mbps，例如 100 或 1000）' -Default ([string]$wizard.BandwidthMbps) -AllowBack -Validate {
+                    param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 100000
+                } -ValidationMessage '请输入 1–100000 之间的整数 Mbps。')
+            }
+        },
+        [pscustomobject]@{
+            Id = 'network-rtt'; ShouldRun = { $wizard.Role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding') -and [bool]$wizard.NetworkAdaptive }; Run = {
+                $prompt = if ($wizard.Role -in @('RealityEntry', 'AnyTlsEntry')) {
+                    '主要使用地到该入口 VPS 的典型 RTT（ms）'
+                } else { '常用入口 VPS 到该落地机的典型 RTT（ms）' }
+                $wizard.ReferenceRttMs = [int](Read-VpsText $prompt -Default ([string]$wizard.ReferenceRttMs) -AllowBack -Validate {
+                    param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 2000
+                } -ValidationMessage '请输入 1–2000 之间的整数毫秒值。')
+            }
+        },
+        [pscustomobject]@{
+            Id = 'komari-enabled'; ShouldRun = { $wizard.Role -ne 'AuditOnly' }; Run = {
+                $default = if ($null -eq $wizard.EnableKomari) { $true } else { [bool]$wizard.EnableKomari }
+                $wizard.EnableKomari = Read-VpsYesNo '是否安装并纳管 Komari Agent？' $default -AllowBack
+            }
+        },
+        [pscustomobject]@{
+            Id = 'komari-endpoint'; ShouldRun = { $wizard.Role -ne 'AuditOnly' -and [bool]$wizard.EnableKomari }; Run = {
+                $wizard.KomariEndpoint = Read-VpsText 'Komari 站点地址' -Default ([string]$wizard.KomariEndpoint) -AllowBack `
+                    -Validate { param($v) $uri = $null; [Uri]::TryCreate($v, 'Absolute', [ref]$uri) -and $uri.Scheme -eq 'https' }
             }
         }
-        Write-VpsUi '落地端口不会向全网开放；nftables 仅允许上面填写的可信入口 IP 访问 TCP+UDP。' Warning
-    }
+    )
 
-    $networkTuning = if ($role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')) {
-        Read-VpsNetworkTuningSettings -Role $role
-    }
-    else {
-        [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
-    }
-
-    $enableKomari = $false
-    $komariEndpoint = $versions.komari_agent.endpoint_default
-    if ($role -ne 'AuditOnly') {
-        $enableKomari = Read-VpsYesNo '是否安装并纳管 Komari Agent？' $true
-        if ($enableKomari) {
-            $komariEndpoint = Read-VpsText 'Komari 站点地址' -Default $komariEndpoint `
-                -Validate { param($v) $uri = $null; [Uri]::TryCreate($v, 'Absolute', [ref]$uri) -and $uri.Scheme -eq 'https' }
+    $buildPlan = {
+        & $ensureAutoPorts
+        $archivePath = & $getArchivePath
+        $trustedTlsEnabled = $wizard.Role -eq 'AnyTlsEntry' -or `
+            ($wizard.Role -eq 'RealityEntry' -and $wizard.TargetMode -eq 'LocalOwnedTls')
+        $networkTuning = if ($wizard.Role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding') -and [bool]$wizard.NetworkAdaptive) {
+            [ordered]@{
+                Mode = 'AdaptiveConservative'
+                BandwidthMbps = [int]$wizard.BandwidthMbps
+                ReferenceRttMs = [int]$wizard.ReferenceRttMs
+            }
+        } else {
+            [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
         }
-    }
-
-    $existingPlan = Join-Path $archivePath 'deployment-plan.json'
-    if (Test-Path -LiteralPath $existingPlan) {
-        throw "该实例已有部署计划：${existingPlan}。请使用【继续未完成部署】，不要新建覆盖。"
-    }
-    return [ordered]@{
+        [ordered]@{
         SchemaVersion = 2
         CreatedAt = (Get-Date).ToString('o')
-        Provider = $provider
-        Instance = $instance
-        NodeName = $nodeName
-        Role = $role
+        Provider = $wizard.Provider
+        Instance = $wizard.Instance
+        NodeName = $wizard.NodeName
+        Role = $wizard.Role
         Server = [ordered]@{
-            IPv4 = $ipv4
-            IPv6 = $ipv6
+            IPv4 = $wizard.IPv4
+            IPv6 = $wizard.IPv6
             BootstrapUser = 'root'
-            BootstrapSshPort = $bootstrapPort
-            BootstrapAuth = $bootstrapAuth
-            BootstrapKeyPath = $bootstrapKeyPath
+            BootstrapSshPort = [int]$wizard.BootstrapPort
+            BootstrapAuth = $wizard.BootstrapAuth
+            BootstrapKeyPath = $wizard.BootstrapKeyPath
         }
-        AdminUser = $adminUser
+        AdminUser = $wizard.AdminUser
         Ports = [ordered]@{
-            SshPrimary = $sshPrimary
-            SshRescue = $sshRescue
+            SshPrimary = [int]$wizard.SshPrimary
+            SshRescue = [int]$wizard.SshRescue
             XrayPrimary = 443
-            XrayBackup = if ($role -eq 'RealityEntry') { $xrayBackup } else { $null }
-            AnyTlsPrimary = if ($role -eq 'AnyTlsEntry') { 443 } else { $null }
-            LandingShadowsocks = if ($role -eq 'ShadowsocksLanding') { $landingPort } else { $null }
+            XrayBackup = if ($wizard.Role -eq 'RealityEntry') { [int]$wizard.XrayBackup } else { $null }
+            AnyTlsPrimary = if ($wizard.Role -eq 'AnyTlsEntry') { 443 } else { $null }
+            LandingShadowsocks = if ($wizard.Role -eq 'ShadowsocksLanding') { [int]$wizard.LandingPort } else { $null }
         }
         Reality = [ordered]@{
-            Target = $target
-            TargetMode = $targetMode
-            ServerName = $realityServerName
-            TargetAddress = $realityTargetAddress
-            LocalHttpsPort = $localHttpsPort
-            ForceIpv4Egress = $forceIpv4
+            Target = $wizard.Target
+            TargetMode = $wizard.TargetMode
+            ServerName = $wizard.RealityServerName
+            TargetAddress = $wizard.RealityTargetAddress
+            LocalHttpsPort = [int]$wizard.LocalHttpsPort
+            ForceIpv4Egress = [bool]$wizard.ForceIpv4
             TargetSamples = [int]$versions.target_audit.samples
             TargetMaxMedianMs = [int]$versions.target_audit.maximum_median_ms
             XrayVersion = $versions.xray.version
         }
         AnyTls = [ordered]@{
-            Enabled = ($role -eq 'AnyTlsEntry')
-            ServerName = $anyTlsServerName
-            EchPublicName = $echPublicName
+            Enabled = ($wizard.Role -eq 'AnyTlsEntry')
+            ServerName = $wizard.AnyTlsServerName
+            EchPublicName = $wizard.EchPublicName
             SingBoxVersion = $versions.sing_box.version
-            ForceIpv4Egress = $forceIpv4
-            PaddingSchemeMode = if ($role -eq 'AnyTlsEntry') { 'PerInstanceConservativeV1' } else { $null }
-            PaddingScheme = @($anyTlsPaddingScheme)
+            ForceIpv4Egress = [bool]$wizard.ForceIpv4
+            PaddingSchemeMode = if ($wizard.Role -eq 'AnyTlsEntry') { 'PerInstanceConservativeV1' } else { $null }
+            PaddingScheme = @($wizard.AnyTlsPaddingScheme)
         }
         TrustedTls = [ordered]@{
             Enabled = $trustedTlsEnabled
-            ZoneName = $cloudflareZoneName
-            CertbotEmail = $certbotEmail
-            CloudflareTokenFile = $cloudflareTokenFile
+            ZoneName = $wizard.CloudflareZoneName
+            CertbotEmail = $wizard.CertbotEmail
+            CloudflareTokenFile = $wizard.CloudflareTokenFile
             AnyTlsCertificateName = 'mxh-anytls'
             RealityCertificateName = 'mxh-reality-target'
         }
         Shadowsocks = [ordered]@{
             Method = '2022-blake3-aes-128-gcm'
             SingBoxVersion = $versions.sing_box.version
-            TrustedEntryIPv4s = @($trustedEntryIps.IPv4)
-            TrustedEntryIPv6s = @($trustedEntryIps.IPv6)
-            ClientTransitTag = $clientTransitTag
-            SecondaryIpv6Enabled = $secondaryIpv6Enabled
-            SecondaryIpv6Address = $secondaryIpv6Address
-            SecondaryBindInterface = $secondaryBindInterface
+            TrustedEntryIPv4s = @($wizard.TrustedEntryIps.IPv4)
+            TrustedEntryIPv6s = @($wizard.TrustedEntryIps.IPv6)
+            ClientTransitTag = $wizard.ClientTransitTag
+            SecondaryIpv6Enabled = [bool]$wizard.SecondaryIpv6Enabled
+            SecondaryIpv6Address = $wizard.SecondaryIpv6Address
+            SecondaryBindInterface = $wizard.SecondaryBindInterface
         }
         NetworkTuning = $networkTuning
         Komari = [ordered]@{
-            Enabled = $enableKomari
-            Endpoint = $komariEndpoint
+            Enabled = if ($wizard.Role -eq 'AuditOnly') { $false } else { [bool]$wizard.EnableKomari }
+            Endpoint = $wizard.KomariEndpoint
             AgentVersion = $versions.komari_agent.version
         }
         Paths = [ordered]@{
             Archive = $archivePath
-            KeyDirectory = (Join-Path $archivePath ($nodeName + '-id_ed25519'))
+            KeyDirectory = (Join-Path $archivePath ([string]$wizard.NodeName + '-id_ed25519'))
         }
+        }
+    }
+
+    $index = 0
+    while ($true) {
+        while ($index -lt $steps.Count) {
+            $step = $steps[$index]
+            if (-not (& $step.ShouldRun)) {
+                $index++
+                continue
+            }
+            try {
+                & $step.Run
+                $index++
+            }
+            catch {
+                if (-not (Test-VpsWizardBackError $_)) { throw }
+                $previous = -1
+                for ($candidate = $index - 1; $candidate -ge 0; $candidate--) {
+                    if (& $steps[$candidate].ShouldRun) {
+                        $previous = $candidate
+                        break
+                    }
+                }
+                if ($previous -lt 0) {
+                    Write-VpsUi '已经是向导第一项，无法继续返回。' Warning
+                }
+                else {
+                    $index = $previous
+                    Write-VpsUi "返回上一项：$($steps[$previous].Id)" Muted
+                }
+            }
+        }
+
+        $plan = & $buildPlan
+        $existingPlan = Join-Path ([string]$plan.Paths.Archive) 'deployment-plan.json'
+        if (Test-Path -LiteralPath $existingPlan) {
+            throw "该实例已有部署计划：${existingPlan}。请使用【继续未完成部署】，不要新建覆盖。"
+        }
+
+        Show-VpsPlanSummary -Plan $plan
+        try {
+            $reviewChoice = Read-VpsMenu '请核对部署摘要' @(
+                '确认方案并继续',
+                '返回修改上一项',
+                '取消本次向导（不写入任何部署计划）'
+            ) 1 -AllowBack
+        }
+        catch {
+            if (-not (Test-VpsWizardBackError $_)) { throw }
+            $reviewChoice = 2
+        }
+        if ($reviewChoice -eq 1) { return $plan }
+        if ($reviewChoice -eq 3) { throw '用户取消新部署向导；尚未写入部署计划。' }
+
+        $previous = -1
+        for ($candidate = $steps.Count - 1; $candidate -ge 0; $candidate--) {
+            if (& $steps[$candidate].ShouldRun) {
+                $previous = $candidate
+                break
+            }
+        }
+        if ($previous -lt 0) { throw '向导内部错误：找不到可返回的输入项。' }
+        $index = $previous
+        Write-VpsUi "返回修改：$($steps[$previous].Id)" Muted
     }
 }
 
@@ -1776,8 +2131,10 @@ function Start-VpsDeploy {
         if ($Mode -eq 'ValidateProject') { Test-VpsProject -ProjectRoot $ProjectRoot; return }
     }
 
+    $planAlreadyReviewed = $false
     if ($Mode -eq 'New') {
         $plan = New-VpsInteractivePlan -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot
+        $planAlreadyReviewed = $true
     }
     else {
         if (-not $PlanPath) {
@@ -1786,7 +2143,7 @@ function Start-VpsDeploy {
         $plan = Read-VpsJsonHashtable -Path $PlanPath
     }
 
-    Show-VpsPlanSummary -Plan $plan
+    if (-not $planAlreadyReviewed) { Show-VpsPlanSummary -Plan $plan }
     $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan -DryRun:$DryRun -NonInteractive:$NonInteractive
     try {
         Invoke-VpsModulePipeline -Context $context -OnlyModule $OnlyModule
