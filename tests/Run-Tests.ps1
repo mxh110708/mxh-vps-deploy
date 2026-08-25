@@ -37,7 +37,13 @@ Assert-True ([string]$manifest.sing_box.version -match '^\d+\.\d+\.\d+$') 'sing-
 Assert-True ([string]$manifest.sing_box.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box amd64 SHA-256'
 Assert-True ([string]$manifest.sing_box.assets.windows_amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box Windows SHA-256'
 
-Import-Module (Join-Path $ProjectRoot 'src\VpsDeploy.Core.psm1') -Force
+# ValidateProject invokes this script from inside the already imported core
+# module.  Forcing that same module to reload would tear down the caller's
+# session state (including this script's Assert-True helper).  Direct test runs
+# still import the module normally.
+if (-not (Get-Command Get-VpsModules -ErrorAction SilentlyContinue)) {
+    Import-Module (Join-Path $ProjectRoot 'src\VpsDeploy.Core.psm1') -Force
+}
 $modules = @(Get-VpsModules -ProjectRoot $ProjectRoot)
 Assert-True ($modules.Count -ge 10) 'module count'
 Assert-True (($modules.Id | Sort-Object -Unique).Count -eq $modules.Count) 'module IDs unique'
@@ -80,7 +86,7 @@ $fixtureContext = [pscustomobject]@{
         NodeName = 'Example-US.Entry'
         Server = [ordered]@{ IPv4 = '192.0.2.10'; IPv6 = '2001:db8::10' }
         Ports = [ordered]@{ XrayPrimary = 443; XrayBackup = 32345 }
-        Reality = [ordered]@{ Target = 'www.example.edu' }
+        Reality = [ordered]@{ Target = 'www.example.edu'; ForceIpv4Egress = $true }
     }
     Secrets = [ordered]@{
         AdminPassword = 'fixture-only-password'
@@ -102,6 +108,10 @@ $clientModule = $modules | Where-Object Id -eq 'client-export'
 $singBoxFixture = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'client-exports\sing-box-outbounds.private.json') | ConvertFrom-Json
 Assert-True (@($singBoxFixture.outbounds).Count -eq 2) 'sing-box IPv4 and IPv6 outbounds generated'
 Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'client-exports\mihomo-test-primary.yaml')) -match 'xtls-rprx-vision') 'Mihomo Vision profile generated'
+$serverConfig = New-MxhXrayServerConfig -Context $fixtureContext
+$serverConfigRoundTrip = $serverConfig | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+Assert-True (@($serverConfigRoundTrip.routing.rules).Count -eq 1) 'Xray routing rules remain a JSON array with one rule'
+Assert-True ($serverConfigRoundTrip.routing.rules[0].outboundTag -eq 'block') 'Xray IPv6 egress block rule preserved'
 [IO.Directory]::Delete($fixtureRoot, $true)
 
 Write-Host '== Shadowsocks landing fixture ==' -ForegroundColor Cyan
@@ -168,11 +178,17 @@ $bashCandidates = @(
 $bash = $bashCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 $shellFiles = @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'assets\remote') -Filter '*.sh' -File)
 Assert-True ($shellFiles.Count -ge 10) 'remote shell module count'
+$remotePayload = New-VpsRemoteScriptPayload `
+    -Context ([pscustomobject]@{ ProjectRoot = $ProjectRoot }) `
+    -Asset 'audit.sh' -Parameters ([ordered]@{ SAMPLE = 'value' })
+Assert-True (-not $remotePayload.Contains("`r")) 'generated remote payload uses LF on Windows'
+Assert-True ($remotePayload -match '(?m)^set -euo pipefail$') 'generated remote payload includes strict bash preamble'
 foreach ($file in $shellFiles) {
     $bytes = [IO.File]::ReadAllBytes($file.FullName)
     $text = [Text.Encoding]::UTF8.GetString($bytes)
     Assert-True (-not $text.Contains("`r")) "$($file.Name) uses LF"
     Assert-True ($text -notmatch '(?m)^\s*set\s+-[^\n]*x') "$($file.Name) does not enable xtrace"
+    Assert-True ($text -notmatch 'nft\s+list\s+ruleset\s*\|\s*grep\s+-[^\s]*q') "$($file.Name) avoids pipefail plus grep-q SIGPIPE checks"
     if ($bash) {
         & $bash -n $file.FullName
         Assert-True ($LASTEXITCODE -eq 0) "$($file.Name) bash -n"
@@ -185,7 +201,7 @@ $dryRunArchive = Join-Path $ProjectRoot 'DRY-RUN-SENTINEL-SHOULD-NOT-EXIST'
 if (Test-Path -LiteralPath $dryRunArchive) { throw "Dry-run sentinel path already exists: $dryRunArchive" }
 Push-Location $ProjectRoot
 try {
-    & (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1') -Mode Resume `
+    Start-VpsDeploy -ProjectRoot $ProjectRoot -Mode Resume `
         -PlanPath (Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json') -DryRun -NonInteractive
 }
 finally {
@@ -197,7 +213,7 @@ $landingDryRunArchive = Join-Path $ProjectRoot 'DRY-RUN-LANDING-SENTINEL-SHOULD-
 if (Test-Path -LiteralPath $landingDryRunArchive) { throw "Dry-run sentinel path already exists: $landingDryRunArchive" }
 Push-Location $ProjectRoot
 try {
-    & (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1') -Mode Resume `
+    Start-VpsDeploy -ProjectRoot $ProjectRoot -Mode Resume `
         -PlanPath (Join-Path $ProjectRoot 'tests\fixtures\dry-run-landing-plan.json') -DryRun -NonInteractive
 }
 finally {

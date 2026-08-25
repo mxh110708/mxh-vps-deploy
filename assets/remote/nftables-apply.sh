@@ -100,11 +100,17 @@ nft -f "$config"
 systemctl enable nftables.service
 systemctl restart nftables.service
 systemctl is-active --quiet nftables.service
+active_ruleset="$(nft list ruleset)"
+tcp_rules="$(grep -E 'tcp dport' <<<"$active_ruleset" || true)"
+udp_rules="$(grep -E 'udp dport' <<<"$active_ruleset" || true)"
 for port in "${ports[@]}"; do
-  nft list ruleset | grep -Eq "tcp dport.*${port}" || { echo "Port missing from nftables: $port" >&2; exit 1; }
+  grep -Eq "(^|[^0-9])${port}([^0-9]|$)" <<<"$tcp_rules" || {
+    echo "Port missing from nftables: $port" >&2
+    exit 1
+  }
 done
 if [[ -n "$restricted_port" ]]; then
-  nft list ruleset | grep -Eq "tcp dport.*${restricted_port}|tcp dport ${restricted_port}" || exit 1
-  nft list ruleset | grep -Eq "udp dport.*${restricted_port}|udp dport ${restricted_port}" || exit 1
+  grep -Eq "(^|[^0-9])${restricted_port}([^0-9]|$)" <<<"$tcp_rules" || exit 1
+  grep -Eq "(^|[^0-9])${restricted_port}([^0-9]|$)" <<<"$udp_rules" || exit 1
 fi
 printf 'VPSDEPLOY_BACKUP_DIR_B64=%s\n' "$(printf '%s' "$backup_dir" | base64 | tr -d '\n')"

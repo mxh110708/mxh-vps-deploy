@@ -791,6 +791,30 @@ function Get-VpsRemoteAsset {
     return (Get-Content -Raw -LiteralPath $path).Replace("`r`n", "`n").Replace("`r", "`n")
 }
 
+function New-VpsRemoteScriptPayload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] [string]$Asset,
+        [Collections.IDictionary]$Parameters = @{}
+    )
+
+    # StringBuilder.AppendLine() follows the Windows host newline and therefore
+    # inserts CRLF.  Remote bash reads the trailing CR as part of option names
+    # such as "pipefail\r", so build the complete payload with explicit LF.
+    $preamble = [Text.StringBuilder]::new()
+    [void]$preamble.Append("set -euo pipefail`n")
+    foreach ($key in $Parameters.Keys) {
+        $name = ([string]$key).ToUpperInvariant()
+        if ($name -notmatch '^[A-Z][A-Z0-9_]*$') { throw "远端参数名无效：$key" }
+        $value = if ($null -eq $Parameters[$key]) { '' } else { [string]$Parameters[$key] }
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($value))
+        $exportLine = 'export VPS_PARAM_' + $name + '="$(printf ''%s'' ''' + $encoded + ''' | base64 -d)"'
+        [void]$preamble.Append($exportLine + "`n")
+    }
+    return "(`n" + $preamble.ToString() + (Get-VpsRemoteAsset -Context $Context -Name $Asset) + "`n)`n"
+}
+
 function Invoke-VpsRemoteScript {
     [CmdletBinding()]
     param(
@@ -805,17 +829,7 @@ function Invoke-VpsRemoteScript {
     )
 
     if (-not $Port) { $Port = [int]$Context.State.CurrentManagementPort }
-    $preamble = [Text.StringBuilder]::new()
-    [void]$preamble.AppendLine('set -euo pipefail')
-    foreach ($key in $Parameters.Keys) {
-        $name = ([string]$key).ToUpperInvariant()
-        if ($name -notmatch '^[A-Z][A-Z0-9_]*$') { throw "远端参数名无效：$key" }
-        $value = if ($null -eq $Parameters[$key]) { '' } else { [string]$Parameters[$key] }
-        $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($value))
-        $exportLine = 'export VPS_PARAM_' + $name + '="$(printf ''%s'' ''' + $encoded + ''' | base64 -d)"'
-        [void]$preamble.AppendLine($exportLine)
-    }
-    $script = "(`n" + $preamble.ToString() + (Get-VpsRemoteAsset -Context $Context -Name $Asset) + "`n)`n"
+    $script = New-VpsRemoteScriptPayload -Context $Context -Asset $Asset -Parameters $Parameters
     return Invoke-VpsSshCommand -Context $Context -User $User -Port $Port -Command 'bash -s' `
         -InputText $script -TimeoutSeconds $TimeoutSeconds -AllowFailure:$AllowFailure -SensitiveOutput:$SensitiveOutput
 }
@@ -918,6 +932,32 @@ function New-MxhXrayInbound {
                 shortIds = @($Secrets.ShortId)
             }
         }
+    }
+}
+
+function New-MxhXrayServerConfig {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Context)
+
+    $xraySecrets = $Context.Secrets.Xray
+    $target = [string]$Context.Plan.Reality.Target
+    $inbounds = @(
+        (New-MxhXrayInbound -Tag 'reality-primary' -Port ([int]$Context.Plan.Ports.XrayPrimary) -Secrets $xraySecrets -Target $target),
+        (New-MxhXrayInbound -Tag 'reality-backup' -Port ([int]$Context.Plan.Ports.XrayBackup) -Secrets $xraySecrets -Target $target)
+    )
+    $directSettings = if ($Context.Plan.Reality.ForceIpv4Egress) { [ordered]@{ domainStrategy = 'ForceIPv4' } } else { @{} }
+    [object[]]$routingRules = @()
+    if ($Context.Plan.Reality.ForceIpv4Egress) {
+        $routingRules = ,([ordered]@{ type = 'field'; ip = @('::/0'); outboundTag = 'block' })
+    }
+    return [ordered]@{
+        log = [ordered]@{ access = 'none'; error = '/var/log/xray/error.log'; loglevel = 'warning' }
+        inbounds = $inbounds
+        outbounds = @(
+            [ordered]@{ tag = 'direct'; protocol = 'freedom'; settings = $directSettings },
+            [ordered]@{ tag = 'block'; protocol = 'blackhole' }
+        )
+        routing = [ordered]@{ domainStrategy = 'AsIs'; rules = $routingRules }
     }
 }
 
@@ -1344,6 +1384,7 @@ Export-ModuleMember -Function @(
     'Save-VpsContext', 'Save-VpsJson', 'Protect-VpsPrivateFile', 'Get-VpsSshKeyPath',
     'Invoke-VpsProcess', 'Get-VpsCommandPath', 'Get-VpsModules', 'Get-VpsRandomPort',
     'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',
-    'New-MxhXrayInbound', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest',
-    'New-MxhRandomBase64Key', 'New-MxhShadowsocksServerConfig', 'New-MxhLandingMihomoProfileText'
+    'New-MxhXrayInbound', 'New-MxhXrayServerConfig', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest',
+    'New-MxhRandomBase64Key', 'New-MxhShadowsocksServerConfig', 'New-MxhLandingMihomoProfileText',
+    'New-VpsRemoteScriptPayload'
 )

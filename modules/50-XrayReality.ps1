@@ -36,24 +36,7 @@
         }
 
         $target = [string]$Context.Plan.Reality.Target
-        $inbounds = @(
-            (New-MxhXrayInbound -Tag 'reality-primary' -Port ([int]$Context.Plan.Ports.XrayPrimary) -Secrets $xraySecrets -Target $target),
-            (New-MxhXrayInbound -Tag 'reality-backup' -Port ([int]$Context.Plan.Ports.XrayBackup) -Secrets $xraySecrets -Target $target)
-        )
-        $directSettings = if ($Context.Plan.Reality.ForceIpv4Egress) { [ordered]@{ domainStrategy = 'ForceIPv4' } } else { @{} }
-        $routingRules = if ($Context.Plan.Reality.ForceIpv4Egress) {
-            @([ordered]@{ type = 'field'; ip = @('::/0'); outboundTag = 'block' })
-        }
-        else { @() }
-        $config = [ordered]@{
-            log = [ordered]@{ access = 'none'; error = '/var/log/xray/error.log'; loglevel = 'warning' }
-            inbounds = $inbounds
-            outbounds = @(
-                [ordered]@{ tag = 'direct'; protocol = 'freedom'; settings = $directSettings },
-                [ordered]@{ tag = 'block'; protocol = 'blackhole' }
-            )
-            routing = [ordered]@{ domainStrategy = 'AsIs'; rules = $routingRules }
-        }
+        $config = New-MxhXrayServerConfig -Context $Context
         $configJson = $config | ConvertTo-Json -Depth 30
         $applyParameters = @{
             CONFIG_JSON = $configJson

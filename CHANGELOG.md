@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- 修复 Windows 端远程脚本参数前导段混入 CRLF，导致 Bash 把 `pipefail\r` 识别为无效选项的问题。
+- 固化 Xray 单条路由规则为 JSON 数组，并增加服务端配置往返回归测试。
+- 修复 nftables 在 `pipefail` 下使用 `grep -q` 触发 SIGPIPE 后误报端口缺失的问题。
+- 修复从 `ValidateProject` 入口运行测试时重复强制导入核心模块、破坏测试作用域的问题。
+- 增加远程载荷 LF、Xray 路由数组和 nftables 验证方式的回归断言。
+
 ## 0.2.0
 
 - 新增独立 `ShadowsocksLanding` 部署角色。
