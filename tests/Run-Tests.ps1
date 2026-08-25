@@ -110,10 +110,16 @@ foreach ($file in $shellFiles) {
 if (-not $bash) { Write-Warning 'Bash not found; bash -n was skipped.' }
 
 Write-Host '== Offline dry run ==' -ForegroundColor Cyan
-$dryRunArchive = 'F:\MXH-VPS-DEPLOY-DRY-RUN-SHOULD-NOT-EXIST'
+$dryRunArchive = Join-Path $ProjectRoot 'DRY-RUN-SENTINEL-SHOULD-NOT-EXIST'
 if (Test-Path -LiteralPath $dryRunArchive) { throw "Dry-run sentinel path already exists: $dryRunArchive" }
-& (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1') -Mode Resume `
-    -PlanPath (Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json') -DryRun -NonInteractive
+Push-Location $ProjectRoot
+try {
+    & (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1') -Mode Resume `
+        -PlanPath (Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json') -DryRun -NonInteractive
+}
+finally {
+    Pop-Location
+}
 Assert-True (-not (Test-Path -LiteralPath $dryRunArchive)) 'dry run creates no instance data'
 
 Write-Host '== Secret scan ==' -ForegroundColor Cyan

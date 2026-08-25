@@ -31,7 +31,7 @@
     "AgentVersion": "1.2.60"
   },
   "Paths": {
-    "Archive": "F:\\MXH-VPS-DEPLOY-DRY-RUN-SHOULD-NOT-EXIST",
-    "KeyDirectory": "F:\\MXH-VPS-DEPLOY-DRY-RUN-SHOULD-NOT-EXIST\\key"
+    "Archive": "DRY-RUN-SENTINEL-SHOULD-NOT-EXIST",
+    "KeyDirectory": "DRY-RUN-SENTINEL-SHOULD-NOT-EXIST\\key"
   }
 }
