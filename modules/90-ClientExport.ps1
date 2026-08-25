@@ -63,10 +63,10 @@
         [IO.File]::WriteAllText($notePath, $note, [Text.UTF8Encoding]::new($false))
         Protect-VpsPrivateFile $notePath
 
-        $cores = @(
-            'D:\Program Files\Clash Verge\verge-mihomo.exe',
-            'D:\Program Files\Clash Verge\verge-mihomo-alpha.exe'
-        ) | Where-Object { Test-Path -LiteralPath $_ }
+        $cores = @(@(
+                'D:\Program Files\Clash Verge\verge-mihomo.exe',
+                'D:\Program Files\Clash Verge\verge-mihomo-alpha.exe'
+            ) | Where-Object { Test-Path -LiteralPath $_ })
         $testData = Join-Path $exportDir 'syntax-test-data'
         [IO.Directory]::CreateDirectory($testData) | Out-Null
         foreach ($core in $cores) {

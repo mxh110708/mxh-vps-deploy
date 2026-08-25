@@ -78,7 +78,7 @@ $fixtureContext = [pscustomobject]@{
 $clientModule = $modules | Where-Object Id -eq 'client-export'
 & $clientModule.Invoke $fixtureContext
 $singBoxFixture = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'client-exports\sing-box-outbounds.private.json') | ConvertFrom-Json
-Assert-True ($singBoxFixture.outbounds.Count -eq 2) 'sing-box IPv4 and IPv6 outbounds generated'
+Assert-True (@($singBoxFixture.outbounds).Count -eq 2) 'sing-box IPv4 and IPv6 outbounds generated'
 Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'client-exports\mihomo-test-primary.yaml')) -match 'xtls-rprx-vision') 'Mihomo Vision profile generated'
 [IO.Directory]::Delete($fixtureRoot, $true)
 
