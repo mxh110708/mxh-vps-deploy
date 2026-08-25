@@ -10,7 +10,7 @@
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'network-tuning.sh'
         $bbr = Get-VpsMarkerValue $result.StdOut BBR -Required
         $backup = Get-VpsMarkerValue $result.StdOut BACKUP_DIR -Required
-        if (-not $Context.State.ContainsKey('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
+        if (-not $Context.State.Contains('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
         $Context.State.BackupDirectories.Sysctl = $backup
         $Context.State.BbrEnabled = ($bbr -eq 'true')
         Save-VpsContext -Context $Context

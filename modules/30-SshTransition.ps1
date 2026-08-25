@@ -19,7 +19,7 @@
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'ssh-transition.sh' -Parameters $parameters `
             -Port ([int]$Context.Plan.Server.BootstrapSshPort)
         $backup = Get-VpsMarkerValue $result.StdOut BACKUP_DIR -Required
-        if (-not $Context.State.ContainsKey('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
+        if (-not $Context.State.Contains('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
         $Context.State.BackupDirectories.SshTransition = $backup
 
         foreach ($port in @([int]$Context.Plan.Ports.SshPrimary, [int]$Context.Plan.Ports.SshRescue)) {

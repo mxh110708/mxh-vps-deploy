@@ -9,7 +9,9 @@
     "IPv4": "192.0.2.10",
     "IPv6": "2001:db8::10",
     "BootstrapUser": "root",
-    "BootstrapSshPort": 22
+    "BootstrapSshPort": 22,
+    "BootstrapAuth": "Password",
+    "BootstrapKeyPath": null
   },
   "AdminUser": "admin",
   "Ports": {

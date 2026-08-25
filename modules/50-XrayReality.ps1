@@ -19,7 +19,7 @@
         $needCredentials = -not $xraySecrets
         if (-not $needCredentials) {
             foreach ($field in @('Uuid', 'RealityPrivateKey', 'RealityClientKey', 'ShortId')) {
-                if (-not $xraySecrets.ContainsKey($field) -or [string]::IsNullOrWhiteSpace([string]$xraySecrets[$field])) {
+                if (-not $xraySecrets.Contains($field) -or [string]::IsNullOrWhiteSpace([string]$xraySecrets[$field])) {
                     $needCredentials = $true
                     break
                 }
@@ -63,7 +63,7 @@
         }
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'xray-apply-config.sh' -Parameters $applyParameters -TimeoutSeconds 600 -SensitiveOutput
         $backup = Get-VpsMarkerValue $result.StdOut BACKUP_DIR -Required
-        if (-not $Context.State.ContainsKey('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
+        if (-not $Context.State.Contains('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
         $Context.State.BackupDirectories.Xray = $backup
         $Context.State.XrayVersion = $xrayVersion
         Save-VpsContext -Context $Context

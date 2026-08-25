@@ -42,6 +42,23 @@ Assert-True ($modules[0].Id -eq 'bootstrap-access') 'bootstrap first'
 Assert-True ($modules[-1].Id -eq 'private-archive') 'archive last'
 Assert-True ('ssh-cutover' -in $modules.Id) 'safe SSH cutover module exists'
 
+Write-Host '== Bootstrap authentication arguments ==' -ForegroundColor Cyan
+$sshArgumentContext = [pscustomobject]@{
+    Plan = [ordered]@{
+        Server = [ordered]@{ IPv4 = '192.0.2.10' }
+        Paths = [ordered]@{ KeyDirectory = 'C:\fixture-key' }
+    }
+}
+$providerKeyArgs = @(Get-VpsSshArguments -Context $sshArgumentContext -Port 22 -User root `
+        -Interactive -IdentityFile 'C:\provider-existing-key')
+Assert-True ('C:\provider-existing-key' -in $providerKeyArgs) 'existing provider key is passed to OpenSSH'
+Assert-True ('IdentitiesOnly=yes' -in $providerKeyArgs) 'provider key uses IdentitiesOnly'
+Assert-True ('PreferredAuthentications=publickey' -in $providerKeyArgs) 'provider key cannot silently fall back to password'
+Assert-True ('BatchMode=yes' -notin $providerKeyArgs) 'interactive provider key permits passphrase prompt'
+$passwordArgs = @(Get-VpsSshArguments -Context $sshArgumentContext -Port 22 -User root -Interactive)
+Assert-True ('-i' -notin $passwordArgs) 'password bootstrap does not force an identity file'
+Assert-True ('PubkeyAuthentication=no' -in $passwordArgs) 'password bootstrap does not accidentally reuse an agent key'
+
 Write-Host '== Client export fixture ==' -ForegroundColor Cyan
 $fixtureRoot = Join-Path $ProjectRoot '.test-output\client-export'
 if (Test-Path -LiteralPath $fixtureRoot) {

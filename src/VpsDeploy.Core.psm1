@@ -185,7 +185,7 @@ function New-VpsInteractivePlan {
     $versions = Get-VpsVersions -ProjectRoot $ProjectRoot
     Write-Host ''
     Write-Host 'MXH VPS Deploy - 新部署向导' -ForegroundColor White
-    Write-Host '不会读取或保存 root 初始密码；首次连接由 OpenSSH 直接询问。' -ForegroundColor DarkGray
+    Write-Host '支持初始密码或服务商现有私钥；密码只由 OpenSSH 询问，现有私钥只用于一次性引导。' -ForegroundColor DarkGray
 
     $provider = Read-VpsText '服务商名称' -Validate ${function:Test-VpsSafePathSegment} `
         -ValidationMessage '名称不能包含路径分隔符或 Windows 非法字符。'
@@ -201,6 +201,21 @@ function New-VpsInteractivePlan {
         -ValidationMessage '请输入有效 IPv6，或留空。'
     $bootstrapPort = [int](Read-VpsText '服务商当前 SSH 端口' -Default '22' `
         -Validate { param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 65535 })
+    $bootstrapAuthChoice = Read-VpsMenu '服务商初始 root 登录方式' @(
+        '密码登录（由 OpenSSH 直接询问）',
+        '现有私钥登录（DMIT 等仅密钥模板）'
+    ) 1
+    $bootstrapAuth = if ($bootstrapAuthChoice -eq 2) { 'ExistingKey' } else { 'Password' }
+    $bootstrapKeyPath = $null
+    if ($bootstrapAuth -eq 'ExistingKey') {
+        $bootstrapKeyInput = Read-VpsText '现有服务商私钥文件的完整路径' -Validate {
+            param($v)
+            $candidate = $v.Trim().Trim('"')
+            Test-Path -LiteralPath $candidate -PathType Leaf
+        } -ValidationMessage '找不到该私钥文件，请输入文件本身而不是目录。'
+        $bootstrapKeyPath = (Resolve-Path -LiteralPath $bootstrapKeyInput.Trim().Trim('"')).Path
+        Write-VpsUi '该私钥只用于写入新的实例专用公钥；不会复制进源码仓库或上传 GitHub。' Info
+    }
 
     $roleChoice = Read-VpsMenu '这台 VPS 的部署角色' @(
         'Reality 入口节点（推荐）',
@@ -273,6 +288,8 @@ function New-VpsInteractivePlan {
             IPv6 = $ipv6
             BootstrapUser = 'root'
             BootstrapSshPort = $bootstrapPort
+            BootstrapAuth = $bootstrapAuth
+            BootstrapKeyPath = $bootstrapKeyPath
         }
         AdminUser = $adminUser
         Ports = [ordered]@{
@@ -545,7 +562,8 @@ function Get-VpsSshArguments {
         [Parameter(Mandatory)] $Context,
         [Parameter(Mandatory)] [int]$Port,
         [Parameter(Mandatory)] [string]$User,
-        [switch]$Interactive
+        [switch]$Interactive,
+        [string]$IdentityFile
     )
 
     $arguments = [Collections.Generic.List[string]]::new()
@@ -555,9 +573,23 @@ function Get-VpsSshArguments {
     $arguments.Add('-o'); $arguments.Add('ServerAliveCountMax=2')
     $arguments.Add('-o'); $arguments.Add('StrictHostKeyChecking=accept-new')
     $arguments.Add('-o'); $arguments.Add('LogLevel=ERROR')
-    if (-not $Interactive) {
+    if ($IdentityFile) {
+        $arguments.Add('-o'); $arguments.Add('IdentitiesOnly=yes')
+        $arguments.Add('-o'); $arguments.Add('PreferredAuthentications=publickey')
+        $arguments.Add('-o'); $arguments.Add('PasswordAuthentication=no')
+        $arguments.Add('-o'); $arguments.Add('KbdInteractiveAuthentication=no')
+        $arguments.Add('-i'); $arguments.Add($IdentityFile)
+        if (-not $Interactive) {
+            $arguments.Add('-o'); $arguments.Add('BatchMode=yes')
+        }
+    }
+    elseif (-not $Interactive) {
         $arguments.Add('-o'); $arguments.Add('BatchMode=yes')
         $arguments.Add('-i'); $arguments.Add((Get-VpsSshKeyPath $Context))
+    }
+    else {
+        $arguments.Add('-o'); $arguments.Add('PreferredAuthentications=password,keyboard-interactive')
+        $arguments.Add('-o'); $arguments.Add('PubkeyAuthentication=no')
     }
     $arguments.Add('-p'); $arguments.Add($Port.ToString())
     $arguments.Add("$User@$($Context.Plan.Server.IPv4)")
@@ -604,16 +636,43 @@ function Initialize-VpsBootstrapAccess {
         return
     }
 
-    if ($Context.NonInteractive) {
-        throw '非交互模式下 root 公钥尚不可用，无法请求初始密码。'
-    }
-    Write-VpsUi '即将首次连接。若出现密码提示，请输入服务商提供的 root 初始密码。' Warning
     $ssh = Get-VpsCommandPath 'ssh.exe'
     $quotedKey = ConvertTo-VpsShellSingleQuote $publicKey
     $remote = "umask 077; install -d -m 700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; grep -qxF $quotedKey /root/.ssh/authorized_keys || printf '%s\\n' $quotedKey >> /root/.ssh/authorized_keys; printf 'VPSDEPLOY_BOOTSTRAP_OK\\n'"
-    $arguments = Get-VpsSshArguments -Context $Context -Port $rootPort -User 'root' -Interactive
-    & $ssh @arguments $remote
-    if ($LASTEXITCODE -ne 0) { throw '初始 SSH 登录或公钥写入失败。旧入口未做任何关闭操作。' }
+    $bootstrapAuth = if ($Context.Plan.Server.Contains('BootstrapAuth')) {
+        [string]$Context.Plan.Server.BootstrapAuth
+    }
+    else { 'Password' }
+    if ($bootstrapAuth -eq 'ExistingKey') {
+        $bootstrapKeyPath = [string]$Context.Plan.Server.BootstrapKeyPath
+        if (-not (Test-Path -LiteralPath $bootstrapKeyPath -PathType Leaf)) {
+            throw "服务商初始私钥不存在：$bootstrapKeyPath"
+        }
+        Protect-VpsPrivateFile -Path $bootstrapKeyPath
+        Write-VpsUi '正在用服务商现有私钥建立一次性引导连接；如有口令，OpenSSH 会直接询问。' Warning
+        if ($Context.NonInteractive) {
+            $arguments = Get-VpsSshArguments -Context $Context -Port $rootPort -User 'root' -IdentityFile $bootstrapKeyPath
+            $arguments += $remote
+            $bootstrapResult = Invoke-VpsProcess -FilePath $ssh -ArgumentList $arguments -TimeoutSeconds 90
+            if ($bootstrapResult.ExitCode -ne 0) {
+                throw '现有服务商私钥引导失败；非交互模式不能询问私钥口令。'
+            }
+        }
+        else {
+            $arguments = Get-VpsSshArguments -Context $Context -Port $rootPort -User 'root' -Interactive -IdentityFile $bootstrapKeyPath
+            & $ssh @arguments $remote
+            if ($LASTEXITCODE -ne 0) { throw '现有服务商私钥引导失败。旧入口未做任何关闭操作。' }
+        }
+    }
+    else {
+        if ($Context.NonInteractive) {
+            throw '非交互模式下实例专用公钥尚不可用，无法请求初始 root 密码。'
+        }
+        Write-VpsUi '即将首次连接。若出现密码提示，请输入服务商提供的 root 初始密码。' Warning
+        $arguments = Get-VpsSshArguments -Context $Context -Port $rootPort -User 'root' -Interactive
+        & $ssh @arguments $remote
+        if ($LASTEXITCODE -ne 0) { throw '初始密码登录或公钥写入失败。旧入口未做任何关闭操作。' }
+    }
 
     $verified = Invoke-VpsSshCommand -Context $Context -User 'root' -Port $rootPort `
         -Command "printf 'VPSDEPLOY_KEY_OK\\n'"
@@ -996,6 +1055,8 @@ function Show-VpsPlanSummary {
     Write-Host "  节点：$($Plan.NodeName)"
     Write-Host "  角色：$($Plan.Role)"
     Write-Host "  地址：$($Plan.Server.IPv4)"
+    $bootstrapAuthLabel = if ($Plan.Server.Contains('BootstrapAuth') -and $Plan.Server.BootstrapAuth -eq 'ExistingKey') { '现有服务商私钥' } else { '密码' }
+    Write-Host "  初始认证：$bootstrapAuthLabel"
     Write-Host "  SSH：$($Plan.Server.BootstrapSshPort) -> $($Plan.Ports.SshPrimary) + $($Plan.Ports.SshRescue)"
     if ($Plan.Role -eq 'RealityEntry') {
         Write-Host "  Xray：443 + $($Plan.Ports.XrayBackup)，target=$($Plan.Reality.Target)"
@@ -1060,6 +1121,6 @@ Export-ModuleMember -Function @(
     'Invoke-VpsScpDownload', 'Initialize-VpsBootstrapAccess', 'Test-VpsSshConnection',
     'Save-VpsContext', 'Save-VpsJson', 'Protect-VpsPrivateFile', 'Get-VpsSshKeyPath',
     'Invoke-VpsProcess', 'Get-VpsCommandPath', 'Get-VpsModules', 'Get-VpsRandomPort',
-    'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue',
+    'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',
     'New-MxhXrayInbound', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest'
 )

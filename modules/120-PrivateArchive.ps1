@@ -27,6 +27,8 @@
 
         $s = $Context.Secrets.Xray
         $archivePath = Join-Path $Context.ArchivePath ($Context.Plan.NodeName + '-final-archive.txt')
+        $bootstrapAuth = if ($Context.Plan.Server.Contains('BootstrapAuth')) { $Context.Plan.Server.BootstrapAuth } else { 'Password' }
+        $bootstrapKeyPath = if ($Context.Plan.Server.Contains('BootstrapKeyPath')) { $Context.Plan.Server.BootstrapKeyPath } else { $null }
         $xrayBlock = if ($Context.Plan.Role -eq 'RealityEntry') {
 @"
 Xray Version: $($Context.Plan.Reality.XrayVersion)
@@ -54,6 +56,8 @@ IPv4: $($Context.Plan.Server.IPv4)
 IPv6: $($Context.Plan.Server.IPv6)
 
 SSH Admin User: $($Context.Plan.AdminUser)
+Bootstrap Authentication: $bootstrapAuth
+Bootstrap Existing Key Path: $bootstrapKeyPath
 SSH Primary Port: $($Context.Plan.Ports.SshPrimary)
 SSH Rescue Port: $($Context.Plan.Ports.SshRescue)
 Bootstrap SSH Port Removed: $($Context.State.BootstrapSshRemoved)
