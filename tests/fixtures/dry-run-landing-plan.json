@@ -38,6 +38,11 @@
     "SecondaryIpv6Address": "2001:db8::20",
     "SecondaryBindInterface": "eth0"
   },
+  "NetworkTuning": {
+    "Mode": "AdaptiveConservative",
+    "BandwidthMbps": 1000,
+    "ReferenceRttMs": 5
+  },
   "Komari": {
     "Enabled": false,
     "Endpoint": "https://status.example.invalid",

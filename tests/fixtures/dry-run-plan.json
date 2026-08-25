@@ -27,6 +27,11 @@
     "TargetMaxMedianMs": 15,
     "XrayVersion": "26.3.27"
   },
+  "NetworkTuning": {
+    "Mode": "AdaptiveConservative",
+    "BandwidthMbps": 100,
+    "ReferenceRttMs": 160
+  },
   "Komari": {
     "Enabled": false,
     "Endpoint": "https://status.example.invalid",

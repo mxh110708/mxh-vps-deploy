@@ -163,6 +163,32 @@ Assert-True (($landingOutbounds.outbounds[0].password -split ':').Count -eq 2) '
 Assert-True ($landingOutbounds.outbounds[0].detour -eq 'US-West Entry') 'sing-box detour points to transit tag'
 [IO.Directory]::Delete($landingFixtureRoot, $true)
 
+Write-Host '== Conservative adaptive network planning ==' -ForegroundColor Cyan
+$entrySmall = Get-VpsConservativeNetworkPlan -Role RealityEntry -MemoryKiB 1048576 `
+    -Mode AdaptiveConservative -BandwidthMbps 1000 -ReferenceRttMs 160
+Assert-True ($entrySmall.MemoryTier -eq 'small') '1 GiB entry uses small memory tier'
+Assert-True ($entrySmall.BufferCapBytes -eq 8MB) '1 GiB entry buffer cap is 8 MiB'
+Assert-True ($entrySmall.BufferTargetBytes -eq 8MB) 'high-BDP entry is capped by memory'
+Assert-True ($entrySmall.QueueFloor -eq 1024) 'entry queue floor is conservative'
+$entryTiny = Get-VpsConservativeNetworkPlan -Role RealityEntry -MemoryKiB 524288 `
+    -Mode AdaptiveConservative -BandwidthMbps 100 -ReferenceRttMs 160
+Assert-True ($entryTiny.BufferTargetBytes -eq 4000000) '100 Mbps 160 ms entry uses two BDP below tiny cap'
+Assert-True ($entryTiny.BufferTargetBytes -le $entryTiny.BufferCapBytes) 'tiny entry never exceeds memory cap'
+$landingSmall = Get-VpsConservativeNetworkPlan -Role ShadowsocksLanding -MemoryKiB 1048576 `
+    -Mode AdaptiveConservative -BandwidthMbps 1000 -ReferenceRttMs 5
+Assert-True ($landingSmall.BufferTargetBytes -eq 1250000) 'nearby landing uses entry-to-landing RTT BDP'
+Assert-True ($landingSmall.QueueFloor -eq 2048) 'landing queue floor reflects fan-in role'
+$monitor = Get-VpsConservativeNetworkPlan -Role MonitorOnly -MemoryKiB 1048576 -Mode BaselineOnly
+Assert-True ($monitor.BufferTargetBytes -eq 0) 'monitor baseline does not tune buffers'
+Assert-True ($monitor.QueueFloor -eq 0) 'monitor baseline does not pin proxy queues'
+$invalidTuningRejected = $false
+try {
+    Get-VpsConservativeNetworkPlan -Role RealityEntry -MemoryKiB 1048576 `
+        -Mode AdaptiveConservative -BandwidthMbps 0 -ReferenceRttMs 160 | Out-Null
+}
+catch { $invalidTuningRejected = $true }
+Assert-True $invalidTuningRejected 'invalid adaptive bandwidth is rejected'
+
 Write-Host '== Random port generator ==' -ForegroundColor Cyan
 $ports = 1..200 | ForEach-Object { Get-VpsRandomPort -Exclude @(22, 443) }
 Assert-True (@($ports | Where-Object { $_ -lt 20000 -or $_ -gt 59999 }).Count -eq 0) 'ports stay in 20000-59999'

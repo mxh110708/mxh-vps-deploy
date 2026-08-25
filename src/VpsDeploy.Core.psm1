@@ -139,6 +139,105 @@ function Get-VpsRandomPort {
     throw '无法生成不冲突的高位端口。'
 }
 
+function Read-VpsNetworkTuningSettings {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [ValidateSet('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')] [string]$Role)
+
+    if ($Role -eq 'MonitorOnly') {
+        return [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
+    }
+    Write-VpsUi '脚本不会通过测速或虚拟网卡速率猜测套餐；自适应调优需要你提供标称带宽和代表性 RTT。' Info
+    if (-not (Read-VpsYesNo '是否启用内存/角色/带宽/RTT 联合的保守自适应调优？' $true)) {
+        return [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
+    }
+    $bandwidth = [int](Read-VpsText '套餐标称带宽（Mbps，例如 100 或 1000）' -Validate {
+            param($v)
+            $n = 0
+            [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 100000
+        } -ValidationMessage '请输入 1–100000 之间的整数 Mbps。')
+    $rttPrompt = if ($Role -eq 'RealityEntry') {
+        '主要使用地到该入口 VPS 的典型 RTT（ms）'
+    }
+    else {
+        '常用入口 VPS 到该落地机的典型 RTT（ms）'
+    }
+    $referenceRtt = [int](Read-VpsText $rttPrompt -Validate {
+            param($v)
+            $n = 0
+            [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 2000
+        } -ValidationMessage '请输入 1–2000 之间的整数毫秒值。')
+    return [ordered]@{
+        Mode = 'AdaptiveConservative'
+        BandwidthMbps = $bandwidth
+        ReferenceRttMs = $referenceRtt
+    }
+}
+
+function Get-VpsConservativeNetworkPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [ValidateSet('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')] [string]$Role,
+        [Parameter(Mandatory)] [long]$MemoryKiB,
+        [ValidateSet('BaselineOnly', 'AdaptiveConservative')] [string]$Mode = 'BaselineOnly',
+        [int]$BandwidthMbps = 0,
+        [int]$ReferenceRttMs = 0
+    )
+
+    if ($MemoryKiB -lt 131072) { throw '审计得到的内存小于 128 MiB，拒绝计算网络调优参数。' }
+    $memoryMiB = [long][Math]::Floor($MemoryKiB / 1024)
+    if ($memoryMiB -le 512) {
+        $memoryTier = 'tiny'
+        $bufferCap = 4MB
+    }
+    elseif ($memoryMiB -le 1024) {
+        $memoryTier = 'small'
+        $bufferCap = 8MB
+    }
+    elseif ($memoryMiB -le 2048) {
+        $memoryTier = 'medium'
+        $bufferCap = 16MB
+    }
+    else {
+        $memoryTier = 'standard'
+        $bufferCap = 32MB
+    }
+    $roleSlug = switch ($Role) {
+        'RealityEntry' { 'entry' }
+        'ShadowsocksLanding' { 'landing' }
+        default { 'monitor' }
+    }
+    $queueFloor = switch ($Role) {
+        'RealityEntry' { 1024 }
+        'ShadowsocksLanding' { 2048 }
+        default { 0 }
+    }
+    $bdpBytes = [long]0
+    $bufferTarget = [long]0
+    if ($Mode -eq 'AdaptiveConservative') {
+        if ($Role -eq 'MonitorOnly') { throw 'MonitorOnly 不启用自适应缓冲区调优。' }
+        if ($BandwidthMbps -lt 1 -or $BandwidthMbps -gt 100000) { throw '标称带宽必须在 1–100000 Mbps。' }
+        if ($ReferenceRttMs -lt 1 -or $ReferenceRttMs -gt 2000) { throw '参考 RTT 必须在 1–2000 ms。' }
+        $bdpBytes = [long]$BandwidthMbps * [long]$ReferenceRttMs * 125L
+        $minimum = if ($Role -eq 'RealityEntry') { 2MB } else { 1MB }
+        $wanted = [Math]::Max([long]$minimum, $bdpBytes * 2L)
+        $bufferTarget = [Math]::Min([long]$bufferCap, [long]$wanted)
+    }
+    $modeSlug = if ($Mode -eq 'AdaptiveConservative') { 'adaptive' } else { 'baseline' }
+    return [ordered]@{
+        Profile = "${roleSlug}-${memoryTier}-${modeSlug}"
+        Mode = $Mode
+        Role = $Role
+        MemoryMiB = $memoryMiB
+        MemoryTier = $memoryTier
+        BandwidthMbps = if ($Mode -eq 'AdaptiveConservative') { $BandwidthMbps } else { $null }
+        ReferenceRttMs = if ($Mode -eq 'AdaptiveConservative') { $ReferenceRttMs } else { $null }
+        BdpBytes = $bdpBytes
+        BufferTargetBytes = $bufferTarget
+        BufferCapBytes = [long]$bufferCap
+        QueueFloor = $queueFloor
+    }
+}
+
 function Test-VpsIpAddress {
     param([string]$Value, [ValidateSet('IPv4', 'IPv6')] [string]$Family)
     $parsed = $null
@@ -321,6 +420,13 @@ function New-VpsInteractivePlan {
         Write-VpsUi '落地端口不会向全网开放；nftables 仅允许上面填写的可信入口 IP 访问 TCP+UDP。' Warning
     }
 
+    $networkTuning = if ($role -in @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')) {
+        Read-VpsNetworkTuningSettings -Role $role
+    }
+    else {
+        [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
+    }
+
     $enableKomari = $false
     $komariEndpoint = $versions.komari_agent.endpoint_default
     if ($role -ne 'AuditOnly') {
@@ -376,6 +482,7 @@ function New-VpsInteractivePlan {
             SecondaryIpv6Address = $secondaryIpv6Address
             SecondaryBindInterface = $secondaryBindInterface
         }
+        NetworkTuning = $networkTuning
         Komari = [ordered]@{
             Enabled = $enableKomari
             Endpoint = $komariEndpoint
@@ -1315,6 +1422,12 @@ function Show-VpsPlanSummary {
         Write-Host "  Shadowsocks：TCP+UDP $($Plan.Ports.LandingShadowsocks)，可信入口 $allowCount 个"
         Write-Host "  独立 IPv6 出口：$($Plan.Shadowsocks.SecondaryIpv6Enabled)"
     }
+    if ($Plan.Contains('NetworkTuning') -and $Plan.NetworkTuning.Mode -eq 'AdaptiveConservative') {
+        Write-Host "  网络调优：保守自适应，$($Plan.NetworkTuning.BandwidthMbps) Mbps / $($Plan.NetworkTuning.ReferenceRttMs) ms"
+    }
+    else {
+        Write-Host '  网络调优：基础保守项（不调整缓冲区）'
+    }
     Write-Host "  Komari：$($Plan.Komari.Enabled)"
     Write-Host "  私有归档：$($Plan.Paths.Archive)"
     if ($Plan.Role -eq 'RealityEntry') {
@@ -1384,6 +1497,7 @@ Export-ModuleMember -Function @(
     'Save-VpsContext', 'Save-VpsJson', 'Protect-VpsPrivateFile', 'Get-VpsSshKeyPath',
     'Invoke-VpsProcess', 'Get-VpsCommandPath', 'Get-VpsModules', 'Get-VpsRandomPort',
     'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',
+    'Read-VpsNetworkTuningSettings', 'Get-VpsConservativeNetworkPlan',
     'New-MxhXrayInbound', 'New-MxhXrayServerConfig', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest',
     'New-MxhRandomBase64Key', 'New-MxhShadowsocksServerConfig', 'New-MxhLandingMihomoProfileText',
     'New-VpsRemoteScriptPayload'

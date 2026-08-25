@@ -58,6 +58,12 @@ Xray 生成的秘密通过捕获的机器可读标记返回核心；普通控制
 
 默认 sing-box 服务不保留 Linux capabilities。只有明确填写 `SecondaryBindInterface` 时，才通过 systemd drop-in 授予 `CAP_NET_RAW`，用于 Linux 的接口绑定；仅填写 IPv6 源地址时不会增加该能力。
 
-## 7. Git 防泄漏
+## 7. 网络调优边界
+
+基础项只包含 fq、内核可用时的 BBR、TCP Fast Open 与 MTU 探测。自适应部分按角色、实际内存、用户填写的标称带宽和代表性 RTT 计算 2×BDP，并设置 4/8/16/32 MiB 的分级上限。
+
+脚本不运行来源不明的测速或 BBR 一键脚本，不根据虚拟网卡速率猜套餐，不降低当前内核或服务商已有的缓冲区与队列值。现有值超过计算上限时保留原值并记录状态，而不是强制覆盖。
+
+## 8. Git 防泄漏
 
 `.gitignore` 排除运行数据；`scripts/Test-NoSecrets.ps1` 在本地与 CI 中检查私钥块、UUID、Token/Password 赋值和常见实例归档文件名。它是最后一道保护，不替代人工检查。

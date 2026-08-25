@@ -77,6 +77,12 @@ Server Self Test: $($Context.State.ShadowsocksSelfTest | ConvertTo-Json -Compres
 "@
         }
         else { 'Shadowsocks: Not installed by this deployment role.' }
+        $networkTuningBlock = if ($Context.State.Contains('NetworkTuning')) {
+            'Network Tuning: ' + ($Context.State.NetworkTuning | ConvertTo-Json -Compress -Depth 8)
+        }
+        else {
+            'Network Tuning: Not recorded.'
+        }
         $content = @"
 MXH VPS DEPLOY - PRIVATE FINAL ARCHIVE
 Generated: $((Get-Date).ToString('o'))
@@ -100,6 +106,8 @@ SSH private key: $(Get-VpsSshKeyPath $Context)
 $xrayBlock
 
 $shadowsocksBlock
+
+$networkTuningBlock
 
 Komari Enabled: $($Context.Plan.Komari.Enabled)
 Komari Endpoint: $($Context.Plan.Komari.Endpoint)
