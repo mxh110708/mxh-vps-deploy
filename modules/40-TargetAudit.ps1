@@ -42,7 +42,7 @@
             $newTarget = Read-VpsText '新的 target 域名' -Validate {
                 param($v) $v -match '^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$' -and $v.Contains('.')
             }
-            $Context.Plan.Reality.Target = $newTarget
+            Set-MxhRealityExternalTarget -Plan $Context.Plan -Target $newTarget
             Save-VpsJson -Value $Context.Plan -Path $Context.PlanPath -Private
         }
     }

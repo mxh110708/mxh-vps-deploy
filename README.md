@@ -25,6 +25,8 @@
 
 ## 最简单的用法
 
+第一次使用建议先阅读：[中文完整使用手册](docs/USER-GUIDE.zh-CN.md)。手册包含 Windows 环境准备、角色选择、向导逐项填写、Cloudflare/Komari 前置条件、失败恢复、客户端导入和部署后验收。
+
 要求：Windows 10/11、PowerShell 7、Windows OpenSSH Client；目标机是带 systemd/apt 的 Debian 12/13 或 Ubuntu 22.04/24.04，初始可用 root SSH 登录。
 
 双击 `Start-VPSDeploy.cmd`，或运行：

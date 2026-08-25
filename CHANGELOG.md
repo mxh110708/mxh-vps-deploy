@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- 修复外部 Reality target 重新选择后只更新候选名、未同步 `ServerName` 和 `TargetAddress` 的问题。
+- 明确 `AuditOnly` 会建立实例专用 SSH 公钥后执行审计，而不是完全零写入。
+- 新增面向首次使用者的中文完整手册，覆盖环境准备、角色选择、向导字段、恢复、验收和停用流程。
+
 ## 0.4.0
 
 - 新增 `AnyTlsEntry` 角色，使用独立低权限 sing-box 服务部署 AnyTLS、公共 CA 可信 TLS 和 ECH。

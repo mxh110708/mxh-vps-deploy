@@ -153,6 +153,23 @@ $localRealityTarget = Get-MxhRealityTargetSettings -Plan $localRealityPlan
 Assert-True ($localRealityTarget.Mode -eq 'LocalOwnedTls') 'local Reality target mode is preserved'
 Assert-True ($localRealityTarget.TargetAddress -eq '127.0.0.1:8443') 'local Reality target never loops to public 443'
 Assert-True ($localRealityTarget.ServerName -eq 'portal.example.invalid') 'local Reality SNI uses owned domain'
+$replacementRealityPlan = [ordered]@{
+    Reality = [ordered]@{
+        Target = 'old.example.invalid'
+        TargetMode = 'ExternalAudited'
+        ServerName = 'old.example.invalid'
+        TargetAddress = 'old.example.invalid:443'
+    }
+}
+Set-MxhRealityExternalTarget -Plan $replacementRealityPlan -Target 'new.example.invalid'
+$replacementRealityTarget = Get-MxhRealityTargetSettings -Plan $replacementRealityPlan
+Assert-True ($replacementRealityTarget.ServerName -eq 'new.example.invalid') 'replacement Reality target updates client server name'
+Assert-True ($replacementRealityTarget.TargetAddress -eq 'new.example.invalid:443') 'replacement Reality target updates server destination'
+$legacyRealityPlan = [ordered]@{ Reality = [ordered]@{ Target = 'legacy.example.invalid' } }
+Set-MxhRealityExternalTarget -Plan $legacyRealityPlan -Target 'legacy-new.example.invalid'
+$legacyRealityTarget = Get-MxhRealityTargetSettings -Plan $legacyRealityPlan
+Assert-True ($legacyRealityTarget.ServerName -eq 'legacy-new.example.invalid') 'legacy Reality replacement keeps client compatibility'
+Assert-True ($legacyRealityTarget.TargetAddress -eq 'legacy-new.example.invalid:443') 'legacy Reality replacement keeps server compatibility'
 [IO.Directory]::Delete($fixtureRoot, $true)
 
 Write-Host '== Shadowsocks landing fixture ==' -ForegroundColor Cyan

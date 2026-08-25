@@ -406,7 +406,7 @@ function New-VpsInteractivePlan {
         'AnyTLS + 可信 TLS + ECH 入口节点',
         'Shadowsocks 2022 纯落地节点',
         '仅 SSH/防火墙/Komari 监控',
-        '只读审计，不做变更'
+        '建立实例专用 SSH 公钥后执行审计，不配置系统'
     ) 1
     $role = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly', 'AuditOnly')[$roleChoice - 1]
 
@@ -1170,6 +1170,19 @@ function Get-MxhRealityTargetSettings {
     }
 }
 
+function Set-MxhRealityExternalTarget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Plan,
+        [Parameter(Mandatory)] [string]$Target
+    )
+
+    if (-not (Test-VpsHostName $Target)) { throw '新的 Reality target 域名格式无效。' }
+    $Plan.Reality.Target = $Target
+    if ($Plan.Reality.Contains('ServerName')) { $Plan.Reality.ServerName = $Target }
+    if ($Plan.Reality.Contains('TargetAddress')) { $Plan.Reality.TargetAddress = "${Target}:443" }
+}
+
 function New-MxhXrayInbound {
     [CmdletBinding()]
     param(
@@ -1796,7 +1809,8 @@ Export-ModuleMember -Function @(
     'Invoke-VpsProcess', 'Get-VpsCommandPath', 'Get-VpsModules', 'Get-VpsRandomPort',
     'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',
     'Read-VpsNetworkTuningSettings', 'Get-VpsConservativeNetworkPlan',
-    'Get-MxhRealityTargetSettings', 'New-MxhXrayInbound', 'New-MxhXrayServerConfig', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest',
+    'Get-MxhRealityTargetSettings', 'Set-MxhRealityExternalTarget',
+    'New-MxhXrayInbound', 'New-MxhXrayServerConfig', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest',
     'New-MxhAnyTlsPaddingScheme', 'Get-MxhAnyTlsPaddingScheme',
     'ConvertFrom-MxhEchKeyPairText', 'New-MxhAnyTlsServerConfig', 'New-MxhAnyTlsClientOutbound', 'New-MxhAnyTlsMihomoProfileText',
     'New-MxhRandomBase64Key', 'New-MxhShadowsocksServerConfig', 'New-MxhLandingMihomoProfileText',
