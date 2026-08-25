@@ -33,6 +33,9 @@ Assert-True ([string]$manifest.xray.version -match '^\d+\.\d+\.\d+$') 'Xray pinn
 Assert-True ([string]$manifest.xray.installer_commit -match '^[0-9a-f]{40}$') 'Xray installer commit'
 Assert-True ([string]$manifest.xray.installer_sha256 -match '^[0-9a-f]{64}$') 'Xray installer SHA-256'
 Assert-True ([string]$manifest.komari_agent.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'Komari amd64 SHA-256'
+Assert-True ([string]$manifest.sing_box.version -match '^\d+\.\d+\.\d+$') 'sing-box pinned version'
+Assert-True ([string]$manifest.sing_box.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box amd64 SHA-256'
+Assert-True ([string]$manifest.sing_box.assets.windows_amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box Windows SHA-256'
 
 Import-Module (Join-Path $ProjectRoot 'src\VpsDeploy.Core.psm1') -Force
 $modules = @(Get-VpsModules -ProjectRoot $ProjectRoot)
@@ -41,6 +44,8 @@ Assert-True (($modules.Id | Sort-Object -Unique).Count -eq $modules.Count) 'modu
 Assert-True ($modules[0].Id -eq 'bootstrap-access') 'bootstrap first'
 Assert-True ($modules[-1].Id -eq 'private-archive') 'archive last'
 Assert-True ('ssh-cutover' -in $modules.Id) 'safe SSH cutover module exists'
+Assert-True ('sing-box-shadowsocks' -in $modules.Id) 'Shadowsocks server module exists'
+Assert-True ('landing-client-export' -in $modules.Id) 'Shadowsocks client export module exists'
 
 Write-Host '== Bootstrap authentication arguments ==' -ForegroundColor Cyan
 $sshArgumentContext = [pscustomobject]@{
@@ -99,6 +104,55 @@ Assert-True (@($singBoxFixture.outbounds).Count -eq 2) 'sing-box IPv4 and IPv6 o
 Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'client-exports\mihomo-test-primary.yaml')) -match 'xtls-rprx-vision') 'Mihomo Vision profile generated'
 [IO.Directory]::Delete($fixtureRoot, $true)
 
+Write-Host '== Shadowsocks landing fixture ==' -ForegroundColor Cyan
+$landingFixtureRoot = Join-Path $ProjectRoot '.test-output\landing-export'
+if (Test-Path -LiteralPath $landingFixtureRoot) { [IO.Directory]::Delete($landingFixtureRoot, $true) }
+[IO.Directory]::CreateDirectory($landingFixtureRoot) | Out-Null
+$serverKey = [Convert]::ToBase64String([byte[]](1..16))
+$primaryUserKey = [Convert]::ToBase64String([byte[]](17..32))
+$secondaryUserKey = [Convert]::ToBase64String([byte[]](33..48))
+$landingContext = [pscustomobject]@{
+    ProjectRoot = $ProjectRoot
+    ArchivePath = $landingFixtureRoot
+    Plan = [ordered]@{
+        NodeName = 'Example-US.Landing'
+        Server = [ordered]@{ IPv4 = '192.0.2.20'; IPv6 = '2001:db8::20' }
+        Ports = [ordered]@{ LandingShadowsocks = 33456 }
+        Shadowsocks = [ordered]@{
+            Method = '2022-blake3-aes-128-gcm'
+            ClientTransitTag = 'US-West Entry'
+            SecondaryIpv6Enabled = $true
+            SecondaryIpv6Address = '2001:db8::20'
+            SecondaryBindInterface = 'eth0'
+        }
+    }
+    Secrets = [ordered]@{
+        AdminPassword = 'fixture-only-password'
+        Shadowsocks = [ordered]@{
+            ServerKey = $serverKey
+            PrimaryUserKey = $primaryUserKey
+            SecondaryUserKey = $secondaryUserKey
+        }
+    }
+    State = [ordered]@{ Modules = @{} }
+    SecretsPath = (Join-Path $landingFixtureRoot 'secrets.json')
+    StatePath = (Join-Path $landingFixtureRoot 'state.json')
+    LogPath = (Join-Path $landingFixtureRoot 'test.log')
+    DryRun = $false
+}
+$serverConfig = New-MxhShadowsocksServerConfig -Context $landingContext
+Assert-True (@($serverConfig.inbounds[0].users).Count -eq 2) 'SS2022 server has two users'
+Assert-True (@($serverConfig.outbounds).Count -eq 2) 'landing server has IPv4 and IPv6 direct outbounds'
+Assert-True ($serverConfig.outbounds[1].inet6_bind_address -eq '2001:db8::20') 'IPv6 outbound binds configured address'
+Assert-True (@($serverConfig.route.rules).Count -eq 4) 'auth_user routing and opposite-family reject rules generated'
+$landingExportModule = $modules | Where-Object Id -eq 'landing-client-export'
+& $landingExportModule.Invoke $landingContext
+$landingOutbounds = Get-Content -Raw -LiteralPath (Join-Path $landingFixtureRoot 'client-exports\sing-box-shadowsocks-outbounds.private.json') | ConvertFrom-Json
+Assert-True (@($landingOutbounds.outbounds).Count -eq 2) 'two landing client outbounds generated'
+Assert-True (($landingOutbounds.outbounds[0].password -split ':').Count -eq 2) 'client password combines server and user keys'
+Assert-True ($landingOutbounds.outbounds[0].detour -eq 'US-West Entry') 'sing-box detour points to transit tag'
+[IO.Directory]::Delete($landingFixtureRoot, $true)
+
 Write-Host '== Random port generator ==' -ForegroundColor Cyan
 $ports = 1..200 | ForEach-Object { Get-VpsRandomPort -Exclude @(22, 443) }
 Assert-True (@($ports | Where-Object { $_ -lt 20000 -or $_ -gt 59999 }).Count -eq 0) 'ports stay in 20000-59999'
@@ -138,6 +192,18 @@ finally {
     Pop-Location
 }
 Assert-True (-not (Test-Path -LiteralPath $dryRunArchive)) 'dry run creates no instance data'
+
+$landingDryRunArchive = Join-Path $ProjectRoot 'DRY-RUN-LANDING-SENTINEL-SHOULD-NOT-EXIST'
+if (Test-Path -LiteralPath $landingDryRunArchive) { throw "Dry-run sentinel path already exists: $landingDryRunArchive" }
+Push-Location $ProjectRoot
+try {
+    & (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1') -Mode Resume `
+        -PlanPath (Join-Path $ProjectRoot 'tests\fixtures\dry-run-landing-plan.json') -DryRun -NonInteractive
+}
+finally {
+    Pop-Location
+}
+Assert-True (-not (Test-Path -LiteralPath $landingDryRunArchive)) 'landing dry run creates no instance data'
 
 Write-Host '== Secret scan ==' -ForegroundColor Cyan
 & (Join-Path $ProjectRoot 'scripts\Test-NoSecrets.ps1') -ProjectRoot $ProjectRoot

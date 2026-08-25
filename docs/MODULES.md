@@ -16,6 +16,15 @@
 
 核心按 `Order` 排序，并验证 `Id` 唯一、依赖存在且位于之前。删除模块文件即可移除功能；新增模块不需要修改入口脚本。
 
+当前角色：
+
+- `RealityEntry`：Xray VLESS + REALITY + Vision；
+- `ShadowsocksLanding`：sing-box Shadowsocks 2022 多用户落地；
+- `MonitorOnly`：只配置管理入口、防火墙和可选 Komari；
+- `AuditOnly`：只建立临时管理访问并审计。
+
+供应商专有 IPv6 获取、策略路由或网络命名空间应作为单独模块加入，不应修改通用 `sing-box-shadowsocks` 模块。
+
 ## 约定
 
 - 远端 Bash 放在 `assets/remote`，必须通过 `bash -n`；

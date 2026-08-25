@@ -2,7 +2,7 @@
     Id        = 'private-archive'
     Name      = '下载配置并生成最终私有归档'
     Order     = 120
-    Roles     = @('RealityEntry', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('ssh-cutover')
     IsEnabled = { param($Context) $true }
     Invoke    = {
@@ -16,6 +16,13 @@
         }
         if ($Context.Plan.Role -eq 'RealityEntry') {
             $downloads['/usr/local/etc/xray/config.json'] = Join-Path $serverDir 'xray-config.json'
+        }
+        elseif ($Context.Plan.Role -eq 'ShadowsocksLanding') {
+            $downloads['/etc/sing-box/config.json'] = Join-Path $serverDir 'sing-box-config.private.json'
+            $downloads['/etc/systemd/system/sing-box.service'] = Join-Path $serverDir 'sing-box.service'
+            if ($Context.Plan.Shadowsocks.SecondaryBindInterface) {
+                $downloads['/etc/systemd/system/sing-box.service.d/20-bind-interface-capability.conf'] = Join-Path $serverDir 'sing-box-bind-interface-capability.conf'
+            }
         }
         if ($Context.Plan.Komari.Enabled) {
             $downloads['/etc/komari-agent/config.json'] = Join-Path $serverDir 'komari-agent-config.private.json'
@@ -44,6 +51,32 @@ Reality Egress Test: $($Context.State.RealityEgressTest | ConvertTo-Json -Compre
 "@
         }
         else { 'Xray: Not installed by this deployment role.' }
+        $shadowsocksBlock = if ($Context.Plan.Role -eq 'ShadowsocksLanding') {
+            $ss = $Context.Secrets.Shadowsocks
+            $primaryPassword = ([string]$ss.ServerKey) + ':' + ([string]$ss.PrimaryUserKey)
+            $secondaryPassword = if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
+                ([string]$ss.ServerKey) + ':' + ([string]$ss.SecondaryUserKey)
+            }
+            else { '<disabled>' }
+@"
+sing-box Version: $($Context.Plan.Shadowsocks.SingBoxVersion)
+Shadowsocks Port: $($Context.Plan.Ports.LandingShadowsocks) TCP+UDP
+Shadowsocks Method: $($Context.Plan.Shadowsocks.Method)
+Server Key: $($ss.ServerKey)
+Primary IPv4 User Key: $($ss.PrimaryUserKey)
+Primary Client Password: $primaryPassword
+Secondary IPv6 Enabled: $($Context.Plan.Shadowsocks.SecondaryIpv6Enabled)
+Secondary IPv6 User Key: $($ss.SecondaryUserKey)
+Secondary Client Password: $secondaryPassword
+Secondary IPv6 Address: $($Context.Plan.Shadowsocks.SecondaryIpv6Address)
+Secondary Bind Interface: $($Context.Plan.Shadowsocks.SecondaryBindInterface)
+Trusted Entry IPv4: $(@($Context.Plan.Shadowsocks.TrustedEntryIPv4s) -join ',')
+Trusted Entry IPv6: $(@($Context.Plan.Shadowsocks.TrustedEntryIPv6s) -join ',')
+Client Transit Tag: $($Context.Plan.Shadowsocks.ClientTransitTag)
+Server Self Test: $($Context.State.ShadowsocksSelfTest | ConvertTo-Json -Compress -Depth 5)
+"@
+        }
+        else { 'Shadowsocks: Not installed by this deployment role.' }
         $content = @"
 MXH VPS DEPLOY - PRIVATE FINAL ARCHIVE
 Generated: $((Get-Date).ToString('o'))
@@ -66,13 +99,15 @@ SSH private key: $(Get-VpsSshKeyPath $Context)
 
 $xrayBlock
 
+$shadowsocksBlock
+
 Komari Enabled: $($Context.Plan.Komari.Enabled)
 Komari Endpoint: $($Context.Plan.Komari.Endpoint)
 Komari Agent Version: $($Context.Plan.Komari.AgentVersion)
 
 Server config snapshots: $serverDir
 Client exports: $(Join-Path $Context.ArchivePath 'client-exports')
-Target audit: $(Join-Path $Context.ArchivePath 'target-audit.json')
+Target audit: $(if ($Context.Plan.Role -eq 'RealityEntry') { Join-Path $Context.ArchivePath 'target-audit.json' } else { '<not applicable>' })
 Deployment plan: $($Context.PlanPath)
 Deployment state: $($Context.StatePath)
 Remote backup directories: $($Context.State.BackupDirectories | ConvertTo-Json -Compress -Depth 8)

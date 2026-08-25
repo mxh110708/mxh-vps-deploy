@@ -1,0 +1,81 @@
+@{
+    Id        = 'sing-box-shadowsocks'
+    Name      = '安装 sing-box 并部署 Shadowsocks 2022 落地'
+    Order     = 55
+    Roles     = @('ShadowsocksLanding')
+    Requires  = @('ssh-transition')
+    IsEnabled = { param($Context) $true }
+    Invoke    = {
+        param($Context)
+
+        $arch = [string]$Context.State.Audit.Architecture
+        $archKey = if ($arch -in @('x86_64', 'amd64')) { 'amd64' } else { 'arm64' }
+        $asset = $Context.Versions.sing_box.assets.$archKey
+        $version = [string]$Context.Plan.Shadowsocks.SingBoxVersion
+        $installResult = Invoke-VpsRemoteScript -Context $Context -Asset 'sing-box-install.sh' -Parameters @{
+            VERSION = $version
+            ASSET_NAME = [string]$asset.name
+            SHA256 = [string]$asset.sha256
+            NEED_BIND_INTERFACE = ([bool]$Context.Plan.Shadowsocks.SecondaryBindInterface).ToString().ToLowerInvariant()
+        } -TimeoutSeconds 1200
+        $installBackup = Get-VpsMarkerValue $installResult.StdOut BACKUP_DIR -Required
+        if (-not $Context.State.Contains('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
+        $Context.State.BackupDirectories.SingBoxInstall = $installBackup
+
+        if (-not $Context.Secrets.Contains('Shadowsocks')) {
+            $Context.Secrets['Shadowsocks'] = [ordered]@{}
+        }
+        $credentials = $Context.Secrets.Shadowsocks
+        $credentialsChanged = $false
+        foreach ($field in @('ServerKey', 'PrimaryUserKey')) {
+            if (-not $credentials.Contains($field) -or [string]::IsNullOrWhiteSpace([string]$credentials[$field])) {
+                $credentials[$field] = New-MxhRandomBase64Key -Length 16
+                $credentialsChanged = $true
+            }
+        }
+        if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled -and
+            (-not $credentials.Contains('SecondaryUserKey') -or [string]::IsNullOrWhiteSpace([string]$credentials.SecondaryUserKey))) {
+            $credentials['SecondaryUserKey'] = New-MxhRandomBase64Key -Length 16
+            $credentialsChanged = $true
+        }
+        if ($credentialsChanged) {
+            Save-VpsContext -Context $Context
+        }
+
+        $config = New-MxhShadowsocksServerConfig -Context $Context
+        $configJson = $config | ConvertTo-Json -Depth 30
+        $result = Invoke-VpsRemoteScript -Context $Context -Asset 'sing-box-apply-config.sh' -Parameters @{
+            CONFIG_JSON = $configJson
+            LANDING_PORT = [string]$Context.Plan.Ports.LandingShadowsocks
+        } -TimeoutSeconds 600 -SensitiveOutput
+        $backup = Get-VpsMarkerValue $result.StdOut BACKUP_DIR -Required
+        $Context.State.BackupDirectories.SingBox = $backup
+
+        $testServer = if ($Context.Plan.Server.IPv6) { '::1' } else { '127.0.0.1' }
+        $primaryPassword = ([string]$credentials.ServerKey) + ':' + ([string]$credentials.PrimaryUserKey)
+        $primaryTest = Invoke-VpsRemoteScript -Context $Context -Asset 'shadowsocks-self-test.sh' -Parameters @{
+            METHOD = [string]$Context.Plan.Shadowsocks.Method
+            PASSWORD = $primaryPassword
+            LANDING_PORT = [string]$Context.Plan.Ports.LandingShadowsocks
+            IP_VERSION = '4'
+            TEST_SERVER = $testServer
+        } -TimeoutSeconds 180 -SensitiveOutput
+        $primaryEgress = Get-VpsMarkerValue $primaryTest.StdOut EGRESS -Required
+        $testState = [ordered]@{ PrimaryIpv4Egress = $primaryEgress; TestedAt = (Get-Date).ToString('o') }
+
+        if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
+            $secondaryPassword = ([string]$credentials.ServerKey) + ':' + ([string]$credentials.SecondaryUserKey)
+            $secondaryTest = Invoke-VpsRemoteScript -Context $Context -Asset 'shadowsocks-self-test.sh' -Parameters @{
+                METHOD = [string]$Context.Plan.Shadowsocks.Method
+                PASSWORD = $secondaryPassword
+                LANDING_PORT = [string]$Context.Plan.Ports.LandingShadowsocks
+                IP_VERSION = '6'
+                TEST_SERVER = $testServer
+            } -TimeoutSeconds 180 -SensitiveOutput
+            $testState.SecondaryIpv6Egress = Get-VpsMarkerValue $secondaryTest.StdOut EGRESS -Required
+        }
+        $Context.State.ShadowsocksSelfTest = $testState
+        $Context.State.SingBoxVersion = $version
+        Save-VpsContext -Context $Context
+    }
+}

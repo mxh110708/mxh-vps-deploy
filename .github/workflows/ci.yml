@@ -15,6 +15,21 @@ jobs:
       - name: Run project tests
         shell: pwsh
         run: ./tests/Run-Tests.ps1 -ProjectRoot $PWD
+      - name: Validate generated configs with pinned sing-box
+        shell: pwsh
+        run: |
+          $versions = Get-Content -Raw ./config/versions.json | ConvertFrom-Json
+          $asset = $versions.sing_box.assets.windows_amd64
+          $archive = Join-Path $env:RUNNER_TEMP $asset.name
+          $url = "https://github.com/SagerNet/sing-box/releases/download/v$($versions.sing_box.version)/$($asset.name)"
+          curl.exe -fsSL --retry 3 --output $archive $url
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $asset.sha256) { throw 'sing-box release checksum mismatch' }
+          $destination = Join-Path $env:RUNNER_TEMP 'sing-box-check'
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $core = Get-ChildItem $destination -Recurse -Filter sing-box.exe | Select-Object -First 1
+          if (-not $core) { throw 'sing-box.exe not found' }
+          ./tests/Test-SingBoxConfig.ps1 -ProjectRoot $PWD -SingBoxPath $core.FullName
 
   shell:
     runs-on: ubuntu-latest
@@ -30,3 +45,15 @@ jobs:
       - name: ShellCheck
         shell: bash
         run: shellcheck --severity=warning assets/remote/*.sh
+      - name: Validate restricted nftables template
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nftables
+          sudo env \
+            VPS_PARAM_TCP_PORTS='30124,31235' \
+            VPS_PARAM_RESTRICTED_PORT='33456' \
+            VPS_PARAM_ALLOWED_IPV4S='192.0.2.30,192.0.2.31' \
+            VPS_PARAM_ALLOWED_IPV6S='2001:db8::30' \
+            VPS_PARAM_CHECK_ONLY='true' \
+            bash assets/remote/nftables-apply.sh

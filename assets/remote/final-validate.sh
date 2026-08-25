@@ -25,6 +25,23 @@ if [[ "$VPS_PARAM_ROLE" == 'RealityEntry' ]]; then
   ss -H -lntp "sport = :${VPS_PARAM_XRAY_BACKUP}" | grep -q xray
 fi
 
+if [[ "$VPS_PARAM_ROLE" == 'ShadowsocksLanding' ]]; then
+  : "${VPS_PARAM_LANDING_PORT:?}"
+  /usr/local/bin/sing-box check -c /etc/sing-box/config.json
+  systemctl is-active --quiet sing-box.service
+  [[ "$(stat -c '%a' /etc/sing-box/config.json)" == '640' ]]
+  ss -H -lntp "sport = :${VPS_PARAM_LANDING_PORT}" | grep -q sing-box
+  ss -H -lnup "sport = :${VPS_PARAM_LANDING_PORT}" | grep -q sing-box
+  ruleset="$(nft list ruleset)"
+  grep -Eq "tcp dport.*${VPS_PARAM_LANDING_PORT}|tcp dport ${VPS_PARAM_LANDING_PORT}" <<<"$ruleset"
+  grep -Eq "udp dport.*${VPS_PARAM_LANDING_PORT}|udp dport ${VPS_PARAM_LANDING_PORT}" <<<"$ruleset"
+  IFS=',' read -r -a trusted_addresses <<<"${VPS_PARAM_TRUSTED_ADDRESSES:-}"
+  for address in "${trusted_addresses[@]}"; do
+    [[ -z "$address" ]] && continue
+    grep -Fq "$address" <<<"$ruleset" || { echo 'Trusted entry address is missing from nftables.' >&2; exit 1; }
+  done
+fi
+
 if [[ "$VPS_PARAM_KOMARI_ENABLED" == 'true' ]]; then
   systemctl is-active --quiet komari-agent.service
   [[ "$(stat -c '%a' /etc/komari-agent/config.json)" == '600' ]]

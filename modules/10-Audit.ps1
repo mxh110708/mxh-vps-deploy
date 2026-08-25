@@ -2,7 +2,7 @@
     Id        = 'audit'
     Name      = '只读审计系统、服务、监听与防火墙'
     Order     = 10
-    Roles     = @('RealityEntry', 'MonitorOnly', 'AuditOnly')
+    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly', 'AuditOnly')
     Requires  = @('bootstrap-access')
     IsEnabled = { param($Context) $true }
     Invoke    = {

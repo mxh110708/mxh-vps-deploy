@@ -1,0 +1,50 @@
+{
+  "SchemaVersion": 1,
+  "CreatedAt": "2026-01-01T00:00:00Z",
+  "Provider": "ExampleProvider",
+  "Instance": "ExampleLanding",
+  "NodeName": "Example-US.Landing",
+  "Role": "ShadowsocksLanding",
+  "Server": {
+    "IPv4": "192.0.2.20",
+    "IPv6": "2001:db8::20",
+    "BootstrapUser": "root",
+    "BootstrapSshPort": 22,
+    "BootstrapAuth": "Password",
+    "BootstrapKeyPath": null
+  },
+  "AdminUser": "admin",
+  "Ports": {
+    "SshPrimary": 30124,
+    "SshRescue": 31235,
+    "XrayPrimary": 443,
+    "XrayBackup": null,
+    "LandingShadowsocks": 33456
+  },
+  "Reality": {
+    "Target": null,
+    "ForceIpv4Egress": true,
+    "TargetSamples": 20,
+    "TargetMaxMedianMs": 15,
+    "XrayVersion": "26.3.27"
+  },
+  "Shadowsocks": {
+    "Method": "2022-blake3-aes-128-gcm",
+    "SingBoxVersion": "1.13.19",
+    "TrustedEntryIPv4s": ["192.0.2.30", "192.0.2.31"],
+    "TrustedEntryIPv6s": ["2001:db8::30"],
+    "ClientTransitTag": "US-West Entry",
+    "SecondaryIpv6Enabled": true,
+    "SecondaryIpv6Address": "2001:db8::20",
+    "SecondaryBindInterface": "eth0"
+  },
+  "Komari": {
+    "Enabled": false,
+    "Endpoint": "https://status.example.invalid",
+    "AgentVersion": "1.2.60"
+  },
+  "Paths": {
+    "Archive": "DRY-RUN-LANDING-SENTINEL-SHOULD-NOT-EXIST",
+    "KeyDirectory": "DRY-RUN-LANDING-SENTINEL-SHOULD-NOT-EXIST\\key"
+  }
+}

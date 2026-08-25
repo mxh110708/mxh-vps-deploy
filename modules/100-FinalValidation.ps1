@@ -1,8 +1,8 @@
 @{
     Id        = 'final-validation'
-    Name      = '服务端总验收与 REALITY 真实出口测试'
+    Name      = '服务端总验收与协议真实出口测试'
     Order     = 100
-    Roles     = @('RealityEntry', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('nftables-transition')
     IsEnabled = { param($Context) $true }
     Invoke    = {
@@ -13,6 +13,11 @@
             SSH_RESCUE = [string]$Context.Plan.Ports.SshRescue
             XRAY_PRIMARY = [string]$Context.Plan.Ports.XrayPrimary
             XRAY_BACKUP = [string]$Context.Plan.Ports.XrayBackup
+            LANDING_PORT = [string]$Context.Plan.Ports.LandingShadowsocks
+            TRUSTED_ADDRESSES = if ($Context.Plan.Role -eq 'ShadowsocksLanding') {
+                (@($Context.Plan.Shadowsocks.TrustedEntryIPv4s) + @($Context.Plan.Shadowsocks.TrustedEntryIPv6s)) -join ','
+            }
+            else { '' }
             KOMARI_ENABLED = ([bool]$Context.Plan.Komari.Enabled).ToString().ToLowerInvariant()
         }
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'final-validate.sh' -Parameters $parameters

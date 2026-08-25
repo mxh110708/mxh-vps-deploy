@@ -8,7 +8,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-  ca-certificates curl dnsutils iproute2 jq nftables openssl python3 sudo unzip
+  ca-certificates curl dnsutils iproute2 jq nftables openssl python3 sudo tar unzip
 
 if systemctl is-active --quiet chrony.service 2>/dev/null || \
    systemctl is-active --quiet chronyd.service 2>/dev/null; then

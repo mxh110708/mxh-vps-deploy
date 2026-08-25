@@ -2,7 +2,7 @@
     Id        = 'komari-agent'
     Name      = '安装低权限 Komari Agent'
     Order     = 80
-    Roles     = @('RealityEntry', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('nftables-transition')
     IsEnabled = { param($Context) [bool]$Context.Plan.Komari.Enabled }
     Invoke    = {

@@ -147,6 +147,28 @@ function Test-VpsIpAddress {
     return $parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6
 }
 
+function ConvertTo-VpsIpAllowlist {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string]$Value)
+
+    $ipv4 = [Collections.Generic.List[string]]::new()
+    $ipv6 = [Collections.Generic.List[string]]::new()
+    $items = @($Value -split '[,;\s]+' | Where-Object { $_ } | Sort-Object -Unique)
+    if ($items.Count -eq 0) { throw '至少需要一个可信入口 IP。' }
+    foreach ($item in $items) {
+        $parsed = $null
+        if (-not [Net.IPAddress]::TryParse($item, [ref]$parsed)) { throw "无效 IP：$item" }
+        if ($parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) {
+            $ipv4.Add($parsed.ToString())
+        }
+        elseif ($parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) {
+            $ipv6.Add($parsed.ToString())
+        }
+        else { throw "不支持的地址类型：$item" }
+    }
+    return [ordered]@{ IPv4 = $ipv4.ToArray(); IPv6 = $ipv6.ToArray() }
+}
+
 function Test-VpsSafePathSegment {
     param([string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
@@ -219,10 +241,11 @@ function New-VpsInteractivePlan {
 
     $roleChoice = Read-VpsMenu '这台 VPS 的部署角色' @(
         'Reality 入口节点（推荐）',
+        'Shadowsocks 2022 纯落地节点',
         '仅 SSH/防火墙/Komari 监控',
         '只读审计，不做变更'
     ) 1
-    $role = @('RealityEntry', 'MonitorOnly', 'AuditOnly')[$roleChoice - 1]
+    $role = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly', 'AuditOnly')[$roleChoice - 1]
 
     $adminUser = Read-VpsText '日常管理用户' -Default 'admin' `
         -Validate { param($v) $v -match '^[a-z_][a-z0-9_-]{0,30}$' -and $v -ne 'root' } `
@@ -234,6 +257,8 @@ function New-VpsInteractivePlan {
     $sshRescue = Get-VpsRandomPort -Exclude $usedPorts
     $usedPorts += $sshRescue
     $xrayBackup = Get-VpsRandomPort -Exclude $usedPorts
+    $usedPorts += $xrayBackup
+    $landingPort = Get-VpsRandomPort -Exclude $usedPorts
 
     if (Read-VpsYesNo '是否手动指定高位端口？' $false) {
         $sshPrimary = [int](Read-VpsText 'SSH 主端口' -Default $sshPrimary.ToString() -Validate {
@@ -244,6 +269,11 @@ function New-VpsInteractivePlan {
             })
         if ($role -eq 'RealityEntry') {
             $xrayBackup = [int](Read-VpsText 'Xray 救援端口' -Default $xrayBackup.ToString() -Validate {
+                    param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -notin @($bootstrapPort, $sshPrimary, $sshRescue, 443)
+                })
+        }
+        elseif ($role -eq 'ShadowsocksLanding') {
+            $landingPort = [int](Read-VpsText 'Shadowsocks TCP/UDP 端口' -Default $landingPort.ToString() -Validate {
                     param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -notin @($bootstrapPort, $sshPrimary, $sshRescue, 443)
                 })
         }
@@ -259,6 +289,36 @@ function New-VpsInteractivePlan {
             throw '用户取消：请准备更合适的 REALITY target 后重试。'
         }
         $forceIpv4 = Read-VpsYesNo '是否强制代理网站流量从 VPS IPv4 出口？' $true
+    }
+
+    $trustedEntryIps = [ordered]@{ IPv4 = @(); IPv6 = @() }
+    $clientTransitTag = $null
+    $secondaryIpv6Enabled = $false
+    $secondaryIpv6Address = $null
+    $secondaryBindInterface = $null
+    if ($role -eq 'ShadowsocksLanding') {
+        while ($true) {
+            $allowlistInput = Read-VpsText '允许连接落地端口的入口 VPS 公网 IP（多个用逗号分隔）'
+            try {
+                $trustedEntryIps = ConvertTo-VpsIpAllowlist $allowlistInput
+                break
+            }
+            catch { Write-VpsUi $_.Exception.Message Warning }
+        }
+        $clientTransitTag = Read-VpsText '客户端链式连接使用的入口组/tag' -Default 'US-West Entry' -Validate {
+            param($v)
+            -not [string]::IsNullOrWhiteSpace($v) -and $v -notin @('Proxy', "$nodeName-IPv4", "$nodeName-IPv6")
+        } -ValidationMessage '入口组/tag 不能与生成的 Proxy 或落地节点名称重复。'
+        if ($ipv6) {
+            $secondaryIpv6Enabled = Read-VpsYesNo '是否增加独立 IPv6 出口用户？' $false
+            if ($secondaryIpv6Enabled) {
+                $secondaryIpv6Address = Read-VpsText 'IPv6 出口源地址' -Default $ipv6 `
+                    -Validate { param($v) Test-VpsIpAddress $v IPv6 } -ValidationMessage '请输入本机实际配置的 IPv6 地址。'
+                $secondaryBindInterface = Read-VpsText 'IPv6 出口接口（一般留空；多网卡时填写）' -AllowEmpty `
+                    -Validate { param($v) -not $v -or $v -match '^[A-Za-z0-9_.:-]{1,32}$' }
+            }
+        }
+        Write-VpsUi '落地端口不会向全网开放；nftables 仅允许上面填写的可信入口 IP 访问 TCP+UDP。' Warning
     }
 
     $enableKomari = $false
@@ -297,6 +357,7 @@ function New-VpsInteractivePlan {
             SshRescue = $sshRescue
             XrayPrimary = 443
             XrayBackup = if ($role -eq 'RealityEntry') { $xrayBackup } else { $null }
+            LandingShadowsocks = if ($role -eq 'ShadowsocksLanding') { $landingPort } else { $null }
         }
         Reality = [ordered]@{
             Target = $target
@@ -304,6 +365,16 @@ function New-VpsInteractivePlan {
             TargetSamples = [int]$versions.target_audit.samples
             TargetMaxMedianMs = [int]$versions.target_audit.maximum_median_ms
             XrayVersion = $versions.xray.version
+        }
+        Shadowsocks = [ordered]@{
+            Method = '2022-blake3-aes-128-gcm'
+            SingBoxVersion = $versions.sing_box.version
+            TrustedEntryIPv4s = @($trustedEntryIps.IPv4)
+            TrustedEntryIPv6s = @($trustedEntryIps.IPv6)
+            ClientTransitTag = $clientTransitTag
+            SecondaryIpv6Enabled = $secondaryIpv6Enabled
+            SecondaryIpv6Address = $secondaryIpv6Address
+            SecondaryBindInterface = $secondaryBindInterface
         }
         Komari = [ordered]@{
             Enabled = $enableKomari
@@ -850,6 +921,90 @@ function New-MxhXrayInbound {
     }
 }
 
+function New-MxhRandomBase64Key {
+    [CmdletBinding()]
+    param([ValidateSet(16, 32)] [int]$Length = 16)
+
+    $bytes = [byte[]]::new($Length)
+    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    return [Convert]::ToBase64String($bytes)
+}
+
+function New-MxhShadowsocksServerConfig {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Context)
+
+    $credentials = $Context.Secrets.Shadowsocks
+    if (-not $credentials) { throw 'Shadowsocks 凭据尚未生成。' }
+    $users = [Collections.Generic.List[object]]::new()
+    $users.Add([ordered]@{ name = 'ipv4-client'; password = [string]$credentials.PrimaryUserKey })
+    $outbounds = [Collections.Generic.List[object]]::new()
+    $outbounds.Add([ordered]@{
+            type = 'direct'
+            tag = 'direct-ipv4'
+            domain_resolver = [ordered]@{ server = 'local'; strategy = 'ipv4_only' }
+        })
+    $rules = [Collections.Generic.List[object]]::new()
+    $rules.Add([ordered]@{
+            auth_user = @('ipv4-client')
+            ip_version = 6
+            action = 'reject'
+        })
+    $rules.Add([ordered]@{
+            auth_user = @('ipv4-client')
+            action = 'route'
+            outbound = 'direct-ipv4'
+        })
+
+    if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
+        $users.Add([ordered]@{ name = 'ipv6-client'; password = [string]$credentials.SecondaryUserKey })
+        $ipv6Outbound = [ordered]@{
+            type = 'direct'
+            tag = 'direct-ipv6'
+            inet6_bind_address = [string]$Context.Plan.Shadowsocks.SecondaryIpv6Address
+            domain_resolver = [ordered]@{ server = 'local'; strategy = 'ipv6_only' }
+        }
+        if ($Context.Plan.Shadowsocks.SecondaryBindInterface) {
+            $ipv6Outbound.bind_interface = [string]$Context.Plan.Shadowsocks.SecondaryBindInterface
+        }
+        $outbounds.Add($ipv6Outbound)
+        $rules.Add([ordered]@{
+                auth_user = @('ipv6-client')
+                ip_version = 4
+                action = 'reject'
+            })
+        $rules.Add([ordered]@{
+                auth_user = @('ipv6-client')
+                action = 'route'
+                outbound = 'direct-ipv6'
+            })
+    }
+
+    $listenAddress = if ($Context.Plan.Server.IPv6) { '::' } else { '0.0.0.0' }
+    return [ordered]@{
+        log = [ordered]@{ level = 'warn'; timestamp = $true }
+        dns = [ordered]@{
+            servers = @([ordered]@{ type = 'local'; tag = 'local' })
+        }
+        inbounds = @([ordered]@{
+                type = 'shadowsocks'
+                tag = 'ss2022-in'
+                listen = $listenAddress
+                listen_port = [int]$Context.Plan.Ports.LandingShadowsocks
+                method = [string]$Context.Plan.Shadowsocks.Method
+                password = [string]$credentials.ServerKey
+                users = $users
+                udp_timeout = '5m'
+            })
+        outbounds = $outbounds
+        route = [ordered]@{
+            rules = $rules
+            final = 'direct-ipv4'
+            auto_detect_interface = $true
+        }
+    }
+}
+
 function ConvertTo-MxhYamlString {
     param([AllowEmptyString()] [string]$Value)
     return "'" + $Value.Replace("'", "''") + "'"
@@ -899,6 +1054,60 @@ function New-MxhMihomoProfileText {
     }
     $lines.Add('')
     $lines.Add('proxy-groups:')
+    $lines.Add("  - name: $(ConvertTo-MxhYamlString 'Proxy')")
+    $lines.Add('    type: select')
+    $lines.Add('    proxies:')
+    foreach ($node in $nodes) { $lines.Add("      - $(ConvertTo-MxhYamlString $node)") }
+    $lines.Add('')
+    $lines.Add('rules:')
+    $lines.Add('  - MATCH,Proxy')
+    return ($lines -join "`n") + "`n"
+}
+
+function New-MxhLandingMihomoProfileText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] [int]$MixedPort
+    )
+
+    $credentials = $Context.Secrets.Shadowsocks
+    $transitTag = [string]$Context.Plan.Shadowsocks.ClientTransitTag
+    $lines = [Collections.Generic.List[string]]::new()
+    foreach ($line in @(
+            "mixed-port: $MixedPort", 'allow-lan: false', 'bind-address: 127.0.0.1',
+            'mode: rule', 'log-level: warning', 'ipv6: true', '', 'proxies:'
+        )) { $lines.Add($line) }
+
+    function Add-MxhLandingNode([string]$Name, [string]$UserKey) {
+        $combinedPassword = ([string]$credentials.ServerKey) + ':' + $UserKey
+        $lines.Add("  - name: $(ConvertTo-MxhYamlString $Name)")
+        $lines.Add('    type: ss')
+        $lines.Add("    server: $(ConvertTo-MxhYamlString ([string]$Context.Plan.Server.IPv4))")
+        $lines.Add("    port: $([int]$Context.Plan.Ports.LandingShadowsocks)")
+        $lines.Add("    cipher: $(ConvertTo-MxhYamlString ([string]$Context.Plan.Shadowsocks.Method))")
+        $lines.Add("    password: $(ConvertTo-MxhYamlString $combinedPassword)")
+        $lines.Add('    udp: true')
+        $lines.Add('    ip-version: ipv4')
+        $lines.Add("    dialer-proxy: $(ConvertTo-MxhYamlString $transitTag)")
+    }
+
+    $primaryName = "$($Context.Plan.NodeName)-IPv4"
+    Add-MxhLandingNode $primaryName ([string]$credentials.PrimaryUserKey)
+    $nodes = [Collections.Generic.List[string]]::new()
+    $nodes.Add($primaryName)
+    if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
+        $secondaryName = "$($Context.Plan.NodeName)-IPv6"
+        Add-MxhLandingNode $secondaryName ([string]$credentials.SecondaryUserKey)
+        $nodes.Add($secondaryName)
+    }
+
+    $lines.Add('')
+    $lines.Add('proxy-groups:')
+    $lines.Add("  - name: $(ConvertTo-MxhYamlString $transitTag)")
+    $lines.Add('    type: select')
+    $lines.Add('    proxies:')
+    $lines.Add('      - DIRECT')
     $lines.Add("  - name: $(ConvertTo-MxhYamlString 'Proxy')")
     $lines.Add('    type: select')
     $lines.Add('    proxies:')
@@ -1061,9 +1270,22 @@ function Show-VpsPlanSummary {
     if ($Plan.Role -eq 'RealityEntry') {
         Write-Host "  Xray：443 + $($Plan.Ports.XrayBackup)，target=$($Plan.Reality.Target)"
     }
+    elseif ($Plan.Role -eq 'ShadowsocksLanding') {
+        $allowCount = @($Plan.Shadowsocks.TrustedEntryIPv4s).Count + @($Plan.Shadowsocks.TrustedEntryIPv6s).Count
+        Write-Host "  Shadowsocks：TCP+UDP $($Plan.Ports.LandingShadowsocks)，可信入口 $allowCount 个"
+        Write-Host "  独立 IPv6 出口：$($Plan.Shadowsocks.SecondaryIpv6Enabled)"
+    }
     Write-Host "  Komari：$($Plan.Komari.Enabled)"
     Write-Host "  私有归档：$($Plan.Paths.Archive)"
-    Write-VpsUi '请先在服务商安全组临时放行上面两个 SSH 高位端口、443 和可选 Xray 救援端口。' Warning
+    if ($Plan.Role -eq 'RealityEntry') {
+        Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口、443 和 Xray 救援端口。' Warning
+    }
+    elseif ($Plan.Role -eq 'ShadowsocksLanding') {
+        Write-VpsUi '请放行两个 SSH 高位端口；Shadowsocks TCP+UDP 端口必须只允许上面填写的可信入口 IP。' Warning
+    }
+    else {
+        Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口。' Warning
+    }
 }
 
 function Start-VpsDeploy {
@@ -1122,5 +1344,6 @@ Export-ModuleMember -Function @(
     'Save-VpsContext', 'Save-VpsJson', 'Protect-VpsPrivateFile', 'Get-VpsSshKeyPath',
     'Invoke-VpsProcess', 'Get-VpsCommandPath', 'Get-VpsModules', 'Get-VpsRandomPort',
     'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',
-    'New-MxhXrayInbound', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest'
+    'New-MxhXrayInbound', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest',
+    'New-MxhRandomBase64Key', 'New-MxhShadowsocksServerConfig', 'New-MxhLandingMihomoProfileText'
 )

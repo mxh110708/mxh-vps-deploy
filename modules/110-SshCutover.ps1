@@ -2,7 +2,7 @@
     Id        = 'ssh-cutover'
     Name      = '最终关闭服务商初始 SSH 端口'
     Order     = 110
-    Roles     = @('RealityEntry', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('final-validation')
     IsEnabled = { param($Context) $true }
     Invoke    = {
@@ -34,8 +34,19 @@
             $ports += [int]$Context.Plan.Ports.XrayPrimary
             $ports += [int]$Context.Plan.Ports.XrayBackup
         }
+        $nftParameters = @{
+            TCP_PORTS = (($ports | Sort-Object -Unique) -join ',')
+            RESTRICTED_PORT = ''
+            ALLOWED_IPV4S = ''
+            ALLOWED_IPV6S = ''
+        }
+        if ($Context.Plan.Role -eq 'ShadowsocksLanding') {
+            $nftParameters.RESTRICTED_PORT = [string]$Context.Plan.Ports.LandingShadowsocks
+            $nftParameters.ALLOWED_IPV4S = (@($Context.Plan.Shadowsocks.TrustedEntryIPv4s) -join ',')
+            $nftParameters.ALLOWED_IPV6S = (@($Context.Plan.Shadowsocks.TrustedEntryIPv6s) -join ',')
+        }
         $nft = Invoke-VpsRemoteScript -Context $Context -Asset 'nftables-apply.sh' `
-            -Parameters @{ TCP_PORTS = (($ports | Sort-Object -Unique) -join ',') } -Port $primary
+            -Parameters $nftParameters -Port $primary
         $backup = Get-VpsMarkerValue $nft.StdOut BACKUP_DIR -Required
         $Context.State.BackupDirectories.NftablesFinal = $backup
         $Context.State.BootstrapSshRemoved = $true

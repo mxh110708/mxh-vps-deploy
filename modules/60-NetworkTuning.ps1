@@ -2,7 +2,7 @@
     Id        = 'network-tuning'
     Name      = '应用保守 BBR/fq 与 MTU 探测基线'
     Order     = 60
-    Roles     = @('RealityEntry', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('ssh-transition')
     IsEnabled = { param($Context) $true }
     Invoke    = {

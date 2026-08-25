@@ -2,12 +2,15 @@
     Id        = 'ssh-transition'
     Name      = '过渡到初始 + 主/救援双高位 SSH'
     Order     = 30
-    Roles     = @('RealityEntry', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('base-system')
     IsEnabled = { param($Context) $true }
     Invoke    = {
         param($Context)
         Write-VpsUi "请确认服务商安全组已放行 TCP $($Context.Plan.Ports.SshPrimary) 和 $($Context.Plan.Ports.SshRescue)。" Warning
+        if ($Context.Plan.Role -eq 'ShadowsocksLanding') {
+            Write-VpsUi "同时应只对可信入口 IP 放行 TCP+UDP $($Context.Plan.Ports.LandingShadowsocks)，不要对全网开放。" Warning
+        }
         if (-not $Context.NonInteractive -and -not (Read-VpsYesNo '已放行并准备继续？' $true)) {
             throw '用户尚未放行服务商安全组。'
         }

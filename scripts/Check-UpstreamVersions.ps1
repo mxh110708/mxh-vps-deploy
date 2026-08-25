@@ -8,6 +8,7 @@ $versions = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'config\versio
 $headers = @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'mxh-vps-deploy-version-check' }
 $xray = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/XTLS/Xray-core/releases/latest'
 $komari = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/komari-monitor/komari-agent/releases/latest'
+$singBox = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'
 
 [pscustomobject]@{
     Component = 'Xray-core'
@@ -20,6 +21,12 @@ $komari = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos
     Pinned = [string]$versions.komari_agent.version
     Upstream = ([string]$komari.tag_name).TrimStart('v')
     Same = ([string]$versions.komari_agent.version -eq ([string]$komari.tag_name).TrimStart('v'))
+}
+[pscustomobject]@{
+    Component = 'sing-box'
+    Pinned = [string]$versions.sing_box.version
+    Upstream = ([string]$singBox.tag_name).TrimStart('v')
+    Same = ([string]$versions.sing_box.version -eq ([string]$singBox.tag_name).TrimStart('v'))
 }
 
 Write-Host 'This command only reports versions. Review release notes, hashes, config tests and real handshakes before changing the manifest.' -ForegroundColor Yellow

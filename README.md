@@ -2,7 +2,7 @@
 
 面向个人 Debian/Ubuntu VPS 的中文交互式部署工具。Windows 端运行一个向导，远端操作拆成可独立增删的 Bash 模块。
 
-首版覆盖已经多次实际验证的流程：
+当前版本覆盖已经多次实际验证的流程：
 
 - 初始只读审计，发现 Docker、面板、复杂防火墙或既有代理服务时默认停止；
 - 初始入口同时支持 root 密码和服务商现有私钥（如 DMIT 的 key-only 模板）；
@@ -11,6 +11,9 @@
 - 分阶段迁移到主、救援两个随机高位 SSH 端口；
 - 对 REALITY target 做 TLS 1.3、h2、证书、跳转、CDN 特征与 20 次握手时延审计；
 - 固定安装 Xray 26.3.27，部署 VLESS + TCP + REALITY + Vision 主/救援入口；
+- 可选择纯落地角色，固定安装 sing-box 1.13.19 并部署多用户 Shadowsocks 2022；
+- Shadowsocks 端口同时支持 TCP/UDP，但只允许向导中填写的可信入口 VPS 地址；
+- 可选为第二个 SS2022 用户绑定独立 IPv6 源地址/网卡，实现同端口不同出口；
 - 应用最小 nftables 和保守 BBR/fq；
 - 可选安装低权限、无公网监听、关闭 Web SSH/自动更新的 Komari Agent；
 - 生成 Mihomo 与 sing-box 私有客户端片段、服务器配置快照和最终归档；
@@ -76,8 +79,17 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New -DryRun
 
 - 服务商网页安全组、VNC/救援控制台；
 - 已有 Docker、3x-ui/s-ui、复杂 nftables 或生产服务的主机；
-- Shadowsocks/AnyTLS/Hysteria 等落地协议部署；
+- 服务商专有的附加 IPv6 获取脚本、策略路由或网络命名空间；
+- AnyTLS/Hysteria 等其他备用协议；
 - 对权威 Clash/sing-box 多节点配置的自动合并；
 - Cloudflare Tunnel Token、Komari 主控和数据库迁移。
 
 这些功能可以按同一模块接口增加，但不会为了“功能多”牺牲可回滚性。
+
+## Shadowsocks 落地角色
+
+向导会要求填写允许访问落地端口的入口 VPS 公网 IP。sing-box 使用 `2022-blake3-aes-128-gcm` 多用户结构，主用户走普通 IPv4 出口；存在可用 IPv6 时，可增加第二用户并绑定指定 IPv6 地址和可选接口。
+
+生成的 Mihomo 节点使用 `dialer-proxy`，sing-box 出站使用 `detour`，都指向向导填写的入口组/tag。工具只生成实例私有片段，不直接修改权威多节点配置。
+
+Shadowsocks 不是伪装协议，不能把落地端口当作受限网络直连入口。服务商安全组也必须按相同来源白名单限制 TCP 和 UDP。

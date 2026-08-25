@@ -48,6 +48,16 @@ Xray 生成的秘密通过捕获的机器可读标记返回核心；普通控制
 
 自动审计只能筛除明显不合格项，不能证明长期安全。正式使用仍以客户端 Reality Authentication、HTTP 204 和真实出口为最终标准。
 
-## 6. Git 防泄漏
+## 6. Shadowsocks 落地边界
+
+纯落地角色使用 sing-box Shadowsocks 2022 多用户结构。服务端主密钥、各用户密钥和拼接后的客户端密码全部属于有效凭据，只写实例私有归档。
+
+落地端口不会加入公网通用放行集合；nftables 仅对填写的可信入口 IPv4/IPv6 放行同一个 TCP+UDP 端口。服务商安全组必须手动保持同样白名单。入口 IP 变化时应先添加新地址并验证链路，再删除旧地址。
+
+可选 IPv6 用户通过 `auth_user` 路由到绑定指定 IPv6 地址的 direct 出站。部署模块会在服务器回环地址上实际完成 SS2022 认证和出口测试，但公网链式路径仍需在权威客户端配置合并后验证。
+
+默认 sing-box 服务不保留 Linux capabilities。只有明确填写 `SecondaryBindInterface` 时，才通过 systemd drop-in 授予 `CAP_NET_RAW`，用于 Linux 的接口绑定；仅填写 IPv6 源地址时不会增加该能力。
+
+## 7. Git 防泄漏
 
 `.gitignore` 排除运行数据；`scripts/Test-NoSecrets.ps1` 在本地与 CI 中检查私钥块、UUID、Token/Password 赋值和常见实例归档文件名。它是最后一道保护，不替代人工检查。
