@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:VpsWizardBackMarker = '__MXH_VPS_WIZARD_BACK__'
+$script:VpsWizardCancelMarker = '__MXH_VPS_WIZARD_CANCEL__'
 
 function Write-VpsUi {
     [CmdletBinding()]
@@ -90,7 +91,8 @@ function Read-VpsMenu {
         [Parameter(Mandatory)] [string]$Title,
         [Parameter(Mandatory)] [string[]]$Options,
         [int]$Default = 1,
-        [switch]$AllowBack
+        [switch]$AllowBack,
+        [string]$BackLabel = '返回上一步'
     )
 
     Write-Host ''
@@ -98,7 +100,7 @@ function Read-VpsMenu {
     for ($i = 0; $i -lt $Options.Count; $i++) {
         Write-Host ("  {0}. {1}" -f ($i + 1), $Options[$i])
     }
-    if ($AllowBack) { Write-Host '  0. 返回上一步' }
+    if ($AllowBack) { Write-Host ("  0. {0}" -f $BackLabel) }
     while ($true) {
         $raw = Read-Host "请选择 [$Default]"
         if ($AllowBack -and ($raw.Trim() -eq '0' -or $raw.Trim().Equals('b', [StringComparison]::OrdinalIgnoreCase))) {
@@ -116,6 +118,19 @@ function Read-VpsMenu {
 function Test-VpsWizardBackError {
     param([Parameter(Mandatory)] $ErrorRecord)
     return $ErrorRecord.Exception.Message -eq $script:VpsWizardBackMarker
+}
+
+function Test-VpsNavigationError {
+    param([Parameter(Mandatory)] $ErrorRecord)
+    return $ErrorRecord.Exception.Message -in @($script:VpsWizardBackMarker, $script:VpsWizardCancelMarker)
+}
+
+function Get-VpsNavigationMessage {
+    param([Parameter(Mandatory)] $ErrorRecord)
+    if ($ErrorRecord.Exception.Message -eq $script:VpsWizardCancelMarker) {
+        return '已取消当前操作，未开始执行新的远端模块。'
+    }
+    return '已返回上一级。'
 }
 
 function ConvertFrom-VpsSecureString {
@@ -391,7 +406,7 @@ function New-VpsInteractivePlan {
     Write-Host ''
     Write-Host 'MXH VPS Deploy - 新部署向导' -ForegroundColor White
     Write-Host '支持初始密码或服务商现有私钥；密码只由 OpenSSH 询问，现有私钥只用于一次性引导。' -ForegroundColor DarkGray
-    Write-Host '普通输入输入 b 可返回；编号菜单输入 0 或 b 可返回。' -ForegroundColor DarkGray
+    Write-Host '普通文本和是/否输入 b 可返回；编号菜单输入 0 或 b 可返回。第一项返回主菜单。' -ForegroundColor DarkGray
 
     $wizard = [ordered]@{
         Provider = $null
@@ -501,7 +516,7 @@ function New-VpsInteractivePlan {
         [pscustomobject]@{
             Id = 'provider'; ShouldRun = { $true }; Run = {
                 $old = [string]$wizard.Provider
-                $value = Read-VpsText '服务商名称' -Default $old -Validate ${function:Test-VpsSafePathSegment} `
+                $value = Read-VpsText '服务商名称' -Default $old -AllowBack -Validate ${function:Test-VpsSafePathSegment} `
                     -ValidationMessage '名称不能包含路径分隔符或 Windows 非法字符。'
                 if ($old -and $old -ne $value) {
                     $wizard.NodeName = $null
@@ -513,8 +528,16 @@ function New-VpsInteractivePlan {
         [pscustomobject]@{
             Id = 'instance'; ShouldRun = { $true }; Run = {
                 $old = [string]$wizard.Instance
-                $value = Read-VpsText '实例名称' -Default $old -AllowBack -Validate ${function:Test-VpsSafePathSegment} `
-                    -ValidationMessage '名称不能包含路径分隔符或 Windows 非法字符。'
+                while ($true) {
+                    $value = Read-VpsText '实例名称' -Default $old -AllowBack -Validate ${function:Test-VpsSafePathSegment} `
+                        -ValidationMessage '名称不能包含路径分隔符或 Windows 非法字符。'
+                    $candidatePlan = Join-Path (Join-Path $InstanceRoot ([string]$wizard.Provider)) `
+                        (Join-Path $value 'deployment-plan.json')
+                    if (-not (Test-Path -LiteralPath $candidatePlan)) { break }
+                    Write-VpsUi "该实例已有部署计划：$candidatePlan" Warning
+                    Write-VpsUi '请换一个实例名称，或输入 b 返回主菜单后选择【继续未完成部署】。' Info
+                    $old = $value
+                }
                 if ($old -and $old -ne $value) {
                     $wizard.NodeName = $null
                     $wizard.CloudflareTokenFile = $null
@@ -948,7 +971,7 @@ function New-VpsInteractivePlan {
                     }
                 }
                 if ($previous -lt 0) {
-                    Write-VpsUi '已经是向导第一项，无法继续返回。' Warning
+                    throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
                 }
                 else {
                     $index = $previous
@@ -976,7 +999,9 @@ function New-VpsInteractivePlan {
             $reviewChoice = 2
         }
         if ($reviewChoice -eq 1) { return $plan }
-        if ($reviewChoice -eq 3) { throw '用户取消新部署向导；尚未写入部署计划。' }
+        if ($reviewChoice -eq 3) {
+            throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)
+        }
 
         $previous = -1
         for ($candidate = $steps.Count - 1; $candidate -ge 0; $candidate--) {
@@ -2020,8 +2045,11 @@ function Invoke-VpsModulePipeline {
         Write-VpsUi 'DryRun：只显示计划，不连接服务器、不生成凭据、不改文件。' Success
         return
     }
-    if (-not $Context.NonInteractive -and -not (Read-VpsYesNo '确认按以上顺序开始？' $true)) {
-        throw '用户取消部署。'
+    if (-not $Context.NonInteractive) {
+        Write-VpsUi '此处返回或取消不会连接 VPS；已确认的本地计划会保留，可稍后 Resume。' Muted
+        if (-not (Read-VpsYesNo '确认按以上顺序开始？' $true -AllowBack)) {
+            throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)
+        }
     }
 
     foreach ($module in $selected) {
@@ -2107,6 +2135,107 @@ function Show-VpsPlanSummary {
     }
 }
 
+function Read-VpsResumePlan {
+    [CmdletBinding()]
+    param(
+        [string]$PlanPath,
+        [switch]$NonInteractive
+    )
+
+    $candidatePath = $PlanPath
+    while ($true) {
+        if (-not $candidatePath) {
+            $inputPath = Read-VpsText 'deployment-plan.json 完整路径' -AllowBack -Validate {
+                param($v)
+                $candidate = $v.Trim().Trim('"')
+                Test-Path -LiteralPath $candidate -PathType Leaf
+            } -ValidationMessage '找不到该计划文件。可输入 b 返回主菜单。'
+            $candidatePath = $inputPath.Trim().Trim('"')
+        }
+        else {
+            $candidatePath = $candidatePath.Trim().Trim('"')
+        }
+
+        if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
+            if ($NonInteractive) { throw "找不到部署计划：$candidatePath" }
+            Write-VpsUi "找不到部署计划：$candidatePath" Warning
+            $candidatePath = $null
+            continue
+        }
+        $candidatePath = (Resolve-Path -LiteralPath $candidatePath).Path
+        try {
+            $plan = Read-VpsJsonHashtable -Path $candidatePath
+        }
+        catch {
+            if ($NonInteractive) { throw }
+            Write-VpsUi "无法读取部署计划：$($_.Exception.Message)" Warning
+            $candidatePath = $null
+            continue
+        }
+
+        try {
+            Show-VpsPlanSummary -Plan $plan
+        }
+        catch {
+            if ($NonInteractive) { throw }
+            Write-VpsUi "该 JSON 不是可用的部署计划：$($_.Exception.Message)" Warning
+            $candidatePath = $null
+            continue
+        }
+        if ($NonInteractive) { return $plan }
+
+        try {
+            $choice = Read-VpsMenu '继续部署前请核对计划' @(
+                '使用此计划继续',
+                '重新选择 deployment-plan.json',
+                '取消并返回主菜单'
+            ) 1 -AllowBack
+        }
+        catch {
+            if (-not (Test-VpsWizardBackError $_)) { throw }
+            $choice = 2
+        }
+        if ($choice -eq 1) { return $plan }
+        if ($choice -eq 3) {
+            throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)
+        }
+        $candidatePath = $null
+    }
+}
+
+function Invoke-VpsDeploymentSession {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ProjectRoot,
+        [Parameter(Mandatory)] [ValidateSet('New', 'Resume')] [string]$Mode,
+        [string]$PlanPath,
+        [string[]]$OnlyModule,
+        [Parameter(Mandatory)] [string]$InstanceRoot,
+        [switch]$DryRun,
+        [switch]$NonInteractive
+    )
+
+    if ($Mode -eq 'New') {
+        $plan = New-VpsInteractivePlan -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot
+    }
+    else {
+        $plan = Read-VpsResumePlan -PlanPath $PlanPath -NonInteractive:$NonInteractive
+    }
+
+    $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan -DryRun:$DryRun -NonInteractive:$NonInteractive
+    try {
+        Invoke-VpsModulePipeline -Context $context -OnlyModule $OnlyModule
+        if (-not $DryRun) {
+            Write-Host ''
+            Write-VpsUi "部署流程完成。私有归档：$($context.ArchivePath)" Success
+            Write-VpsUi '最后请在服务商安全组删除初始 SSH 端口，并按归档中的客户端步骤完成真实出口测试。' Warning
+        }
+    }
+    finally {
+        Save-VpsContext -Context $context
+    }
+}
+
 function Start-VpsDeploy {
     [CmdletBinding()]
     param(
@@ -2125,36 +2254,44 @@ function Start-VpsDeploy {
         return
     }
     if ($Mode -eq 'Interactive') {
-        $choice = Read-VpsMenu '请选择操作' @('新部署', '继续未完成部署', '项目离线自检', '退出') 1
-        $Mode = @('New', 'Resume', 'ValidateProject', 'Exit')[$choice - 1]
-        if ($Mode -eq 'Exit') { return }
-        if ($Mode -eq 'ValidateProject') { Test-VpsProject -ProjectRoot $ProjectRoot; return }
-    }
-
-    $planAlreadyReviewed = $false
-    if ($Mode -eq 'New') {
-        $plan = New-VpsInteractivePlan -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot
-        $planAlreadyReviewed = $true
-    }
-    else {
-        if (-not $PlanPath) {
-            $PlanPath = Read-VpsText 'deployment-plan.json 完整路径' -Validate { param($v) Test-Path -LiteralPath $v }
+        while ($true) {
+            try {
+                $choice = Read-VpsMenu '请选择操作' @('新部署', '继续未完成部署', '项目离线自检', '退出') 1 `
+                    -AllowBack -BackLabel '退出'
+            }
+            catch {
+                if (Test-VpsWizardBackError $_) { return }
+                throw
+            }
+            $selectedMode = @('New', 'Resume', 'ValidateProject', 'Exit')[$choice - 1]
+            if ($selectedMode -eq 'Exit') { return }
+            if ($selectedMode -eq 'ValidateProject') {
+                Test-VpsProject -ProjectRoot $ProjectRoot
+                Write-VpsUi '项目离线自检完成，已返回主菜单。' Success
+                continue
+            }
+            try {
+                Invoke-VpsDeploymentSession -ProjectRoot $ProjectRoot -Mode $selectedMode -PlanPath $PlanPath `
+                    -OnlyModule $OnlyModule -InstanceRoot $InstanceRoot -DryRun:$DryRun -NonInteractive:$NonInteractive
+                return
+            }
+            catch {
+                if (-not (Test-VpsNavigationError $_)) { throw }
+                Write-VpsUi (Get-VpsNavigationMessage $_) Info
+                $PlanPath = $null
+                continue
+            }
         }
-        $plan = Read-VpsJsonHashtable -Path $PlanPath
     }
 
-    if (-not $planAlreadyReviewed) { Show-VpsPlanSummary -Plan $plan }
-    $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan -DryRun:$DryRun -NonInteractive:$NonInteractive
     try {
-        Invoke-VpsModulePipeline -Context $context -OnlyModule $OnlyModule
-        if (-not $DryRun) {
-            Write-Host ''
-            Write-VpsUi "部署流程完成。私有归档：$($context.ArchivePath)" Success
-            Write-VpsUi '最后请在服务商安全组删除初始 SSH 端口，并按归档中的客户端步骤完成真实出口测试。' Warning
-        }
+        Invoke-VpsDeploymentSession -ProjectRoot $ProjectRoot -Mode $Mode -PlanPath $PlanPath `
+            -OnlyModule $OnlyModule -InstanceRoot $InstanceRoot -DryRun:$DryRun -NonInteractive:$NonInteractive
     }
-    finally {
-        Save-VpsContext -Context $context
+    catch {
+        if (-not (Test-VpsNavigationError $_)) { throw }
+        Write-VpsUi (Get-VpsNavigationMessage $_) Info
+        return
     }
 }
 

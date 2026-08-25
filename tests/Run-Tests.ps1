@@ -443,6 +443,71 @@ Assert-True ($branchPlan.NetworkTuning.Mode -eq 'BaselineOnly') 'role change cle
 Assert-True ($branchQueue.Count -eq 0) 'branch-reset wizard consumed the expected navigation path'
 Assert-True (-not (Test-Path -LiteralPath $branchResetArchive)) 'in-memory branch-reset test writes no plan or archive'
 
+Write-Host '== Interactive navigation hierarchy ==' -ForegroundColor Cyan
+$hierarchyInput = (@('1', 'b', '2', 'b', '0') -join [Environment]::NewLine) + [Environment]::NewLine
+$hierarchyResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
+) -InputText $hierarchyInput -TimeoutSeconds 60
+Assert-True ($hierarchyResult.ExitCode -eq 0) 'first new-deployment field and resume path both return to the main menu'
+Assert-True ($hierarchyResult.StdOut -match 'MXH VPS Deploy' -and `
+    [regex]::Matches($hierarchyResult.StdOut, '(?m)^b\r?$').Count -eq 2) 'interactive hierarchy consumed back commands in both child workflows'
+Assert-True ($hierarchyResult.StdOut -notmatch '__MXH_VPS_WIZARD_' -and $hierarchyResult.StdErr -notmatch '__MXH_VPS_WIZARD_') 'navigation markers never leak to the console'
+
+$providerPrefixInput = (@('1', 'BreadCloud', 'b', 'b', '0') -join [Environment]::NewLine) + [Environment]::NewLine
+$providerPrefixResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
+) -InputText $providerPrefixInput -TimeoutSeconds 60
+Assert-True ($providerPrefixResult.ExitCode -eq 0) 'provider names beginning with b remain valid while exact b navigates back'
+Assert-True ($providerPrefixResult.StdOut -match '(?m)^BreadCloud\r?$') 'BreadCloud is accepted as a provider value, not parsed as a back command'
+
+$directBackInput = 'b' + [Environment]::NewLine
+$directBackResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'New', '-DryRun'
+) -InputText $directBackInput -TimeoutSeconds 60
+Assert-True ($directBackResult.ExitCode -eq 0) 'direct New mode exits cleanly when backing out of its first field'
+Assert-True ($directBackResult.StdOut -notmatch '__MXH_VPS_WIZARD_' -and $directBackResult.StdErr -notmatch '__MXH_VPS_WIZARD_') 'direct-mode back remains an internal control signal'
+
+$resumeFixture = (Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json')
+$resumeNavigationInput = (@('2', ('"' + $resumeFixture + '"'), '0', 'b', '0') -join [Environment]::NewLine) + [Environment]::NewLine
+$resumeNavigationResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
+) -InputText $resumeNavigationInput -TimeoutSeconds 60
+Assert-True ($resumeNavigationResult.ExitCode -eq 0) 'resume summary returns to quoted plan-path selection and then to the main menu'
+Assert-True ($resumeNavigationResult.StdOut -match 'ExampleInstance') 'resume path with surrounding quotes is normalized and loaded'
+
+$cancelInstanceRoot = Join-Path $ProjectRoot '.test-output\wizard-cancel-root'
+$cancelArchive = Join-Path $cancelInstanceRoot 'ExampleProvider\CancelAtSummary'
+$cancelInput = (@(
+    '1', 'ExampleProvider', 'CancelAtSummary', '', '192.0.2.62', '', '', '1', '4', '', 'n', 'n', '3', '0'
+) -join [Environment]::NewLine) + [Environment]::NewLine
+$cancelResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
+    '-Mode', 'Interactive', '-DryRun', '-InstanceRoot', $cancelInstanceRoot
+) -InputText $cancelInput -TimeoutSeconds 60
+Assert-True ($cancelResult.ExitCode -eq 0) 'summary cancellation returns to the main menu without an error pause'
+Assert-True (-not (Test-Path -LiteralPath $cancelArchive)) 'summary cancellation writes no plan, credentials, or instance archive'
+Assert-True ($cancelResult.StdOut -notmatch '__MXH_VPS_WIZARD_' -and $cancelResult.StdErr -notmatch '__MXH_VPS_WIZARD_') 'summary cancellation marker never leaks to the console'
+
+$preExecutionContext = [pscustomobject]@{
+    ProjectRoot = $ProjectRoot
+    Plan = [ordered]@{ Role = 'AuditOnly' }
+    State = [ordered]@{ Modules = @{} }
+    DryRun = $false
+    NonInteractive = $false
+}
+$preExecutionBack = & $coreModule {
+    param($Context)
+    function Read-Host { param([string]$Prompt); return 'b' }
+    try {
+        Invoke-VpsModulePipeline -Context $Context -OnlyModule @('audit')
+        return '<no-navigation-signal>'
+    }
+    catch { return $_.Exception.Message }
+    finally { Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue }
+} $preExecutionContext 6>$null
+Assert-True ($preExecutionBack -eq '__MXH_VPS_WIZARD_BACK__') 'final pre-execution confirmation can return before any remote module starts'
+Assert-True ($preExecutionContext.State.Modules.Count -eq 0) 'pre-execution back leaves every module untouched'
+
 $testOutputRoot = Join-Path $ProjectRoot '.test-output'
 if (Test-Path -LiteralPath $testOutputRoot) {
     $remainingTestOutput = @(Get-ChildItem -LiteralPath $testOutputRoot -Force)
