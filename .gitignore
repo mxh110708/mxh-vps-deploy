@@ -1,0 +1,24 @@
+# Runtime/private data must never enter Git.
+data/
+private/
+state/
+logs/
+exports/
+*.private.json
+*.private.txt
+*.key
+*.pem
+id_ed25519
+id_rsa
+
+# Local test/build output.
+.test-output/
+.tmp/
+TestResults/
+*.log
+
+# Editors and operating systems.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,32 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run project tests
+        shell: pwsh
+        run: ./tests/Run-Tests.ps1 -ProjectRoot $PWD
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in assets/remote/*.sh; do
+            bash -n "$file"
+          done
+      - name: ShellCheck
+        shell: bash
+        run: shellcheck --severity=warning assets/remote/*.sh

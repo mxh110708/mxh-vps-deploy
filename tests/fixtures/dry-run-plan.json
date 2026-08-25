@@ -1,0 +1,37 @@
+{
+  "SchemaVersion": 1,
+  "CreatedAt": "2026-01-01T00:00:00Z",
+  "Provider": "ExampleProvider",
+  "Instance": "ExampleInstance",
+  "NodeName": "Example-US.Entry",
+  "Role": "RealityEntry",
+  "Server": {
+    "IPv4": "192.0.2.10",
+    "IPv6": "2001:db8::10",
+    "BootstrapUser": "root",
+    "BootstrapSshPort": 22
+  },
+  "AdminUser": "admin",
+  "Ports": {
+    "SshPrimary": 30123,
+    "SshRescue": 31234,
+    "XrayPrimary": 443,
+    "XrayBackup": 32345
+  },
+  "Reality": {
+    "Target": "www.example.edu",
+    "ForceIpv4Egress": true,
+    "TargetSamples": 20,
+    "TargetMaxMedianMs": 15,
+    "XrayVersion": "26.3.27"
+  },
+  "Komari": {
+    "Enabled": false,
+    "Endpoint": "https://status.example.invalid",
+    "AgentVersion": "1.2.60"
+  },
+  "Paths": {
+    "Archive": "F:\\MXH-VPS-DEPLOY-DRY-RUN-SHOULD-NOT-EXIST",
+    "KeyDirectory": "F:\\MXH-VPS-DEPLOY-DRY-RUN-SHOULD-NOT-EXIST\\key"
+  }
+}
