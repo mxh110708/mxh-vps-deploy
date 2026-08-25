@@ -56,6 +56,10 @@ Assert-True ('certbot-dns' -in $modules.Id) 'Certbot DNS-01 module exists'
 Assert-True ('local-https-target' -in $modules.Id) 'local Reality HTTPS target module exists'
 Assert-True ('sing-box-anytls' -in $modules.Id) 'AnyTLS trusted TLS server module exists'
 Assert-True ('anytls-client-export' -in $modules.Id) 'AnyTLS client export module exists'
+Assert-True ('migration-preflight' -in $modules.Id) 'protocol migration preflight module exists'
+Assert-True ('migration-arm-rollback' -in $modules.Id) 'protocol migration rollback timer module exists'
+Assert-True ('migration-commit' -in $modules.Id) 'protocol migration commit module exists'
+Assert-True ('migration-shadowsocks-probe' -in $modules.Id) 'trusted-entry Shadowsocks migration probe module exists'
 $shadowsocksSelfTest = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\shadowsocks-self-test.sh')
 Assert-True ($shadowsocksSelfTest -match 'VPSDEPLOY_UDP_B64') 'Shadowsocks self-test reports functional UDP result'
 Assert-True ($shadowsocksSelfTest -match '"type": "direct"') 'Shadowsocks self-test creates a UDP tunnel inbound'
@@ -78,6 +82,12 @@ Assert-True ($certbotSetup -notmatch 'echo\s+.*CLOUDFLARE_TOKEN') 'Certbot setup
 $anyTlsApply = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\anytls-apply-config.sh')
 Assert-True ($anyTlsApply -match "rollback_needed='yes'") 'AnyTLS cutover arms automatic rollback'
 Assert-True ($anyTlsApply -match 'systemctl start xray\.service') 'AnyTLS cutover restores an originally active Xray service on failure'
+$migrationArm = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\protocol-migration-arm-rollback.sh')
+Assert-True ($migrationArm -match 'mxh-protocol-migration-rollback\.timer') 'protocol migration installs a VPS-side rollback timer'
+Assert-True ($migrationArm -match 'cp -a /etc/nftables\.conf') 'protocol migration backs up the source firewall'
+$migrationCommit = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\protocol-migration-commit.sh')
+Assert-True ($migrationCommit -match 'systemctl disable --now "\$source_service"') 'migration commit disables only the source protocol service'
+Assert-True ($migrationCommit -match 'systemctl stop mxh-protocol-migration-rollback\.timer') 'migration commit cancels rollback only after target validation'
 $localHttpsSetup = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\local-https-target.sh')
 Assert-True ($localHttpsSetup -match 'mask nginx\.service') 'nginx is masked while the package default site could start'
 Assert-True ($localHttpsSetup -match 'unmask nginx\.service') 'nginx is unmasked only after package installation checks'
@@ -271,6 +281,122 @@ Assert-True ($anyTlsMihomo -match 'type: anytls') 'Mihomo AnyTLS profile generat
 Assert-True ($anyTlsMihomo -match 'skip-cert-verify: false') 'Mihomo AnyTLS keeps certificate verification enabled'
 Assert-True ($anyTlsMihomo -match 'ech-opts:') 'Mihomo AnyTLS profile includes ECH'
 
+Write-Host '== Bidirectional protocol migration planning ==' -ForegroundColor Cyan
+$realitySourcePath = Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json'
+$anyTlsSourcePath = Join-Path $ProjectRoot 'tests\fixtures\dry-run-anytls-plan.json'
+$shadowsocksSourcePath = Join-Path $ProjectRoot 'tests\fixtures\dry-run-landing-plan.json'
+$realitySource = Get-Content -Raw -LiteralPath $realitySourcePath | ConvertFrom-Json -AsHashtable
+$anyTlsSource = Get-Content -Raw -LiteralPath $anyTlsSourcePath | ConvertFrom-Json -AsHashtable
+$shadowsocksSource = Get-Content -Raw -LiteralPath $shadowsocksSourcePath | ConvertFrom-Json -AsHashtable
+$migrationAllowlist = [ordered]@{ IPv4 = @('192.0.2.70'); IPv6 = @('2001:db8::70') }
+$baselineTuning = [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
+$migrationCases = @(
+    @{ Source = $realitySource; Path = $realitySourcePath; Target = 'AnyTlsEntry'; Port = 443 },
+    @{ Source = $realitySource; Path = $realitySourcePath; Target = 'ShadowsocksLanding'; Port = 34101 },
+    @{ Source = $anyTlsSource; Path = $anyTlsSourcePath; Target = 'RealityEntry'; Port = 34102 },
+    @{ Source = $anyTlsSource; Path = $anyTlsSourcePath; Target = 'ShadowsocksLanding'; Port = 34103 },
+    @{ Source = $shadowsocksSource; Path = $shadowsocksSourcePath; Target = 'RealityEntry'; Port = 34104 },
+    @{ Source = $shadowsocksSource; Path = $shadowsocksSourcePath; Target = 'AnyTlsEntry'; Port = 443 }
+)
+$migrationPlans = foreach ($case in $migrationCases) {
+    New-MxhProtocolMigrationPlan -SourcePlan $case.Source -SourcePlanPath $case.Path `
+        -TargetRole $case.Target -TargetServicePort $case.Port `
+        -RealityTargetMode ExternalAudited -RealityTarget 'target.example.invalid' `
+        -RealityServerName 'target.example.invalid' -RealityTargetAddress 'target.example.invalid:443' `
+        -AnyTlsServerName 'edge.example.invalid' -EchPublicName 'www.example.invalid' `
+        -AnyTlsPaddingScheme @('stop=8', '0=10-20') -ForceIpv4Egress $true `
+        -TrustedTlsEnabled ($case.Target -eq 'AnyTlsEntry') -CloudflareZoneName 'example.invalid' `
+        -CertbotEmail 'fixture@example.invalid' -CloudflareTokenFile 'C:\fixture-token.private.txt' `
+        -TrustedEntryIps $migrationAllowlist -ClientTransitTag 'US-West Entry' `
+        -ValidationEntryPlanPath 'C:\fixture-entry-plan.json' `
+        -SecondaryIpv6Enabled $false -NetworkTuning $baselineTuning
+}
+Assert-True ($migrationPlans.Count -eq 6) 'all six directed protocol role conversions are generated'
+$directionNames = @($migrationPlans | ForEach-Object { "$($_.Migration.SourceRole)->$($_.Migration.TargetRole)" })
+Assert-True (($directionNames | Sort-Object -Unique).Count -eq 6) 'every Reality AnyTLS Shadowsocks direction is unique'
+foreach ($plan in $migrationPlans) {
+    Assert-True ($plan.Role -eq $plan.Migration.TargetRole) "migration target role is authoritative for $($plan.Migration.SourceRole)->$($plan.Role)"
+    Assert-True ('migration-preflight' -in $plan.Migration.ModuleIds) 'migration plan includes fresh preflight'
+    Assert-True ('migration-arm-rollback' -in $plan.Migration.ModuleIds) 'migration plan arms rollback before target switch'
+    Assert-True ('migration-commit' -in $plan.Migration.ModuleIds) 'migration plan requires final commit'
+    Assert-True ('final-validation' -in $plan.Migration.ModuleIds) 'migration plan includes target validation'
+    $targetModule = switch ($plan.Role) {
+        'RealityEntry' { 'xray-reality' }
+        'AnyTlsEntry' { 'sing-box-anytls' }
+        'ShadowsocksLanding' { 'sing-box-shadowsocks' }
+    }
+    Assert-True ($targetModule -in $plan.Migration.ModuleIds) "migration includes target module $targetModule"
+}
+Assert-True (($migrationPlans | Where-Object Role -eq 'RealityEntry').Count -eq 2) 'two sources can migrate to Reality'
+Assert-True (($migrationPlans | Where-Object Role -eq 'AnyTlsEntry').Count -eq 2) 'two sources can migrate to AnyTLS'
+Assert-True (($migrationPlans | Where-Object Role -eq 'ShadowsocksLanding').Count -eq 2) 'two sources can migrate to Shadowsocks'
+Assert-True (@($migrationPlans | Where-Object Role -eq 'ShadowsocksLanding' | Where-Object { 'migration-shadowsocks-probe' -notin $_.Migration.ModuleIds }).Count -eq 0) 'every Shadowsocks migration requires a trusted-entry external probe'
+$localRealityMigrationIds = @(Get-MxhMigrationModuleIds -TargetRole RealityEntry -RealityTargetMode LocalOwnedTls)
+Assert-True ('certbot-dns' -in $localRealityMigrationIds -and 'local-https-target' -in $localRealityMigrationIds) 'local Reality migration includes certificate and loopback HTTPS modules'
+Assert-True ('target-audit' -notin $localRealityMigrationIds) 'local Reality migration excludes external target audit'
+
+$clearCommandResult = & (Get-Module VpsDeploy.Core) {
+    [ordered]@{
+        Clear = Test-VpsClearCommand ' clear '
+        Cls = Test-VpsClearCommand 'CLS'
+        BreadCloud = Test-VpsClearCommand 'BreadCloud'
+        Clearwater = Test-VpsClearCommand 'Clearwater'
+    }
+}
+Assert-True ($clearCommandResult.Clear -and $clearCommandResult.Cls) 'clear and cls are exact global clear commands'
+Assert-True (-not $clearCommandResult.BreadCloud -and -not $clearCommandResult.Clearwater) 'clear command never uses prefix matching'
+
+$migrationFixtureRoot = Join-Path $ProjectRoot '.test-output\migration-context'
+if (Test-Path -LiteralPath $migrationFixtureRoot) { [IO.Directory]::Delete($migrationFixtureRoot, $true) }
+[IO.Directory]::CreateDirectory($migrationFixtureRoot) | Out-Null
+$migrationSourcePlan = ($realitySource | ConvertTo-Json -Depth 40) | ConvertFrom-Json -AsHashtable
+$migrationSourcePlan.Paths.Archive = $migrationFixtureRoot
+$migrationSourcePlan.Paths.KeyDirectory = Join-Path $migrationFixtureRoot 'fixture-id_ed25519'
+[IO.Directory]::CreateDirectory([string]$migrationSourcePlan.Paths.KeyDirectory) | Out-Null
+[IO.File]::WriteAllText((Join-Path $migrationSourcePlan.Paths.KeyDirectory 'id_ed25519'), 'fixture-key')
+[IO.File]::WriteAllText((Join-Path $migrationSourcePlan.Paths.KeyDirectory 'id_ed25519.pub'), 'fixture-public-key')
+$migrationSourcePlanPath = Join-Path $migrationFixtureRoot 'deployment-plan.json'
+$successState = { [ordered]@{ Status = 'Success'; UpdatedAt = '2026-01-01T00:00:00Z'; Message = 'fixture' } }
+$migrationSourceState = [ordered]@{
+    SchemaVersion = 1
+    CurrentManagementPort = [int]$migrationSourcePlan.Ports.SshPrimary
+    Modules = [ordered]@{
+        'ssh-transition' = & $successState
+        'xray-reality' = & $successState
+        'nftables-transition' = & $successState
+        'final-validation' = & $successState
+        'ssh-cutover' = & $successState
+        'private-archive' = & $successState
+        'komari-agent' = & $successState
+    }
+}
+$migrationSourceSecrets = [ordered]@{
+    SchemaVersion = 1
+    AdminPassword = 'fixture-admin-password'
+    Xray = [ordered]@{ Uuid = 'fixture'; RealityPrivateKey = 'fixture'; RealityClientKey = 'fixture'; ShortId = 'fixture' }
+}
+Save-VpsJson -Value $migrationSourcePlan -Path $migrationSourcePlanPath -Private
+Save-VpsJson -Value $migrationSourceState -Path (Join-Path $migrationFixtureRoot 'deployment-state.json') -Private
+Save-VpsJson -Value $migrationSourceSecrets -Path (Join-Path $migrationFixtureRoot 'deployment-secrets.private.json') -Private
+Assert-True (Test-MxhProtocolMigrationSource -PlanPath $migrationSourcePlanPath -Plan $migrationSourcePlan -State $migrationSourceState) 'completed script-managed source is accepted for migration'
+$migrationTargetPlan = New-MxhProtocolMigrationPlan -SourcePlan $migrationSourcePlan -SourcePlanPath $migrationSourcePlanPath `
+    -TargetRole ShadowsocksLanding -TargetServicePort 34201 -TrustedEntryIps $migrationAllowlist `
+    -ClientTransitTag 'US-West Entry' -NetworkTuning $baselineTuning
+$migrationResultFixture = [pscustomobject]@{
+    Plan = $migrationTargetPlan
+    Source = [pscustomobject]@{ PlanPath = $migrationSourcePlanPath; Plan = $migrationSourcePlan; State = $migrationSourceState }
+}
+$migrationContext = & (Get-Module VpsDeploy.Core) {
+    param($Root, $Result)
+    Initialize-MxhProtocolMigrationContext -ProjectRoot $Root -MigrationResult $Result -NonInteractive
+} $ProjectRoot $migrationResultFixture
+Assert-True ($migrationContext.Plan.Role -eq 'ShadowsocksLanding') 'migration context writes the target role plan'
+Assert-True (Test-Path -LiteralPath (Join-Path $migrationContext.Plan.Migration.LocalBackupDirectory 'deployment-plan.json')) 'migration context preserves the source plan before replacement'
+Assert-True ($migrationContext.State.Modules.Contains('xray-reality')) 'migration context preserves source protocol history'
+Assert-True (-not $migrationContext.State.Modules.Contains('nftables-transition') -and -not $migrationContext.State.Modules.Contains('final-validation')) 'migration context resets target validation and firewall modules'
+Assert-True ($migrationContext.State.Migration.Status -eq 'Planned' -and -not $migrationContext.State.Migration.RollbackArmed) 'migration context starts before remote rollback is armed'
+[IO.Directory]::Delete($migrationFixtureRoot, $true)
+
 Write-Host '== Conservative adaptive network planning ==' -ForegroundColor Cyan
 $entrySmall = Get-VpsConservativeNetworkPlan -Role RealityEntry -MemoryKiB 1048576 `
     -Mode AdaptiveConservative -BandwidthMbps 1000 -ReferenceRttMs 160
@@ -444,7 +570,7 @@ Assert-True ($branchQueue.Count -eq 0) 'branch-reset wizard consumed the expecte
 Assert-True (-not (Test-Path -LiteralPath $branchResetArchive)) 'in-memory branch-reset test writes no plan or archive'
 
 Write-Host '== Interactive navigation hierarchy ==' -ForegroundColor Cyan
-$hierarchyInput = (@('1', 'b', '2', 'b', '0') -join [Environment]::NewLine) + [Environment]::NewLine
+$hierarchyInput = (@('clear', '1', 'b', '2', 'b', 'cls', '0') -join [Environment]::NewLine) + [Environment]::NewLine
 $hierarchyResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
 ) -InputText $hierarchyInput -TimeoutSeconds 60
@@ -452,6 +578,7 @@ Assert-True ($hierarchyResult.ExitCode -eq 0) 'first new-deployment field and re
 Assert-True ($hierarchyResult.StdOut -match 'MXH VPS Deploy' -and `
     [regex]::Matches($hierarchyResult.StdOut, '(?m)^b\r?$').Count -eq 2) 'interactive hierarchy consumed back commands in both child workflows'
 Assert-True ($hierarchyResult.StdOut -notmatch '__MXH_VPS_WIZARD_' -and $hierarchyResult.StdErr -notmatch '__MXH_VPS_WIZARD_') 'navigation markers never leak to the console'
+Assert-True ($hierarchyResult.StdOut -match '(?m)^clear\r?$' -and $hierarchyResult.StdOut -match '(?m)^cls\r?$') 'clear and cls are consumed by live menu navigation'
 
 $providerPrefixInput = (@('1', 'BreadCloud', 'b', 'b', '0') -join [Environment]::NewLine) + [Environment]::NewLine
 $providerPrefixResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
@@ -459,6 +586,129 @@ $providerPrefixResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
 ) -InputText $providerPrefixInput -TimeoutSeconds 60
 Assert-True ($providerPrefixResult.ExitCode -eq 0) 'provider names beginning with b remain valid while exact b navigates back'
 Assert-True ($providerPrefixResult.StdOut -match '(?m)^BreadCloud\r?$') 'BreadCloud is accepted as a provider value, not parsed as a back command'
+
+$migrationDryRoot = Join-Path $ProjectRoot '.test-output\migration-dryrun-source'
+$migrationEntryRoot = Join-Path $ProjectRoot '.test-output\migration-validation-entry'
+if (Test-Path -LiteralPath $migrationDryRoot) { [IO.Directory]::Delete($migrationDryRoot, $true) }
+if (Test-Path -LiteralPath $migrationEntryRoot) { [IO.Directory]::Delete($migrationEntryRoot, $true) }
+[IO.Directory]::CreateDirectory($migrationDryRoot) | Out-Null
+[IO.Directory]::CreateDirectory($migrationEntryRoot) | Out-Null
+$migrationDryPlan = ($realitySource | ConvertTo-Json -Depth 40) | ConvertFrom-Json -AsHashtable
+$migrationDryPlan.Paths.Archive = $migrationDryRoot
+$migrationDryPlan.Paths.KeyDirectory = Join-Path $migrationDryRoot 'fixture-id_ed25519'
+[IO.Directory]::CreateDirectory([string]$migrationDryPlan.Paths.KeyDirectory) | Out-Null
+[IO.File]::WriteAllText((Join-Path $migrationDryPlan.Paths.KeyDirectory 'id_ed25519'), 'fixture-key')
+[IO.File]::WriteAllText((Join-Path $migrationDryPlan.Paths.KeyDirectory 'id_ed25519.pub'), 'fixture-public-key')
+$migrationDryPlanPath = Join-Path $migrationDryRoot 'deployment-plan.json'
+$migrationDryState = [ordered]@{
+    SchemaVersion = 1
+    CurrentManagementPort = [int]$migrationDryPlan.Ports.SshPrimary
+    Modules = [ordered]@{
+        'ssh-transition' = & $successState
+        'xray-reality' = & $successState
+        'nftables-transition' = & $successState
+        'final-validation' = & $successState
+        'ssh-cutover' = & $successState
+        'private-archive' = & $successState
+    }
+}
+Save-VpsJson -Value $migrationDryPlan -Path $migrationDryPlanPath -Private
+Save-VpsJson -Value $migrationDryState -Path (Join-Path $migrationDryRoot 'deployment-state.json') -Private
+Save-VpsJson -Value $migrationSourceSecrets -Path (Join-Path $migrationDryRoot 'deployment-secrets.private.json') -Private
+$migrationEntryPlan = ($realitySource | ConvertTo-Json -Depth 40) | ConvertFrom-Json -AsHashtable
+$migrationEntryPlan.Server.IPv4 = '192.0.2.70'
+$migrationEntryPlan.Paths.Archive = $migrationEntryRoot
+$migrationEntryPlan.Paths.KeyDirectory = Join-Path $migrationEntryRoot 'fixture-id_ed25519'
+[IO.Directory]::CreateDirectory([string]$migrationEntryPlan.Paths.KeyDirectory) | Out-Null
+[IO.File]::WriteAllText((Join-Path $migrationEntryPlan.Paths.KeyDirectory 'id_ed25519'), 'fixture-key')
+[IO.File]::WriteAllText((Join-Path $migrationEntryPlan.Paths.KeyDirectory 'id_ed25519.pub'), 'fixture-public-key')
+$migrationEntryPlanPath = Join-Path $migrationEntryRoot 'deployment-plan.json'
+$migrationEntryState = [ordered]@{
+    SchemaVersion = 1
+    CurrentManagementPort = [int]$migrationEntryPlan.Ports.SshPrimary
+    Audit = [ordered]@{ Architecture = 'x86_64' }
+    Modules = [ordered]@{
+        'xray-reality' = & $successState
+        'final-validation' = & $successState
+        'ssh-cutover' = & $successState
+    }
+}
+Save-VpsJson -Value $migrationEntryPlan -Path $migrationEntryPlanPath -Private
+Save-VpsJson -Value $migrationEntryState -Path (Join-Path $migrationEntryRoot 'deployment-state.json') -Private
+Save-VpsJson -Value $migrationSourceSecrets -Path (Join-Path $migrationEntryRoot 'deployment-secrets.private.json') -Private
+$migrationDryInput = (@('1', '2', '', '192.0.2.70', '', $migrationEntryPlanPath, 'n', 'n', '1') -join [Environment]::NewLine) + [Environment]::NewLine
+$migrationDryResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
+    '-Mode', 'Migrate', '-DryRun', '-PlanPath', $migrationDryPlanPath
+) -InputText $migrationDryInput -TimeoutSeconds 60
+Assert-True ($migrationDryResult.ExitCode -eq 0) 'existing Reality plan can enter Shadowsocks migration DryRun'
+foreach ($expectedId in @('migration-preflight', 'migration-arm-rollback', 'sing-box-shadowsocks', 'migration-shadowsocks-probe', 'migration-commit')) {
+    Assert-True ($migrationDryResult.StdOut -match [regex]::Escape($expectedId)) "migration DryRun displays $expectedId"
+}
+Assert-True ($migrationDryResult.StdOut -notmatch '(?m)\sbootstrap-access\s' -and $migrationDryResult.StdOut -notmatch '(?m)\sxray-reality\s') 'migration DryRun excludes clean-install and source protocol modules'
+[IO.Directory]::Delete($migrationDryRoot, $true)
+[IO.Directory]::Delete($migrationEntryRoot, $true)
+
+function New-TestMigrationSourceFixture {
+    param(
+        [Collections.IDictionary]$Template,
+        [string]$Root,
+        [string]$ProtocolModule
+    )
+    if (Test-Path -LiteralPath $Root) { [IO.Directory]::Delete($Root, $true) }
+    [IO.Directory]::CreateDirectory($Root) | Out-Null
+    $plan = ($Template | ConvertTo-Json -Depth 40) | ConvertFrom-Json -AsHashtable
+    $plan.Paths.Archive = $Root
+    $plan.Paths.KeyDirectory = Join-Path $Root 'fixture-id_ed25519'
+    [IO.Directory]::CreateDirectory([string]$plan.Paths.KeyDirectory) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $plan.Paths.KeyDirectory 'id_ed25519'), 'fixture-key')
+    [IO.File]::WriteAllText((Join-Path $plan.Paths.KeyDirectory 'id_ed25519.pub'), 'fixture-public-key')
+    $planPath = Join-Path $Root 'deployment-plan.json'
+    $state = [ordered]@{
+        SchemaVersion = 1
+        CurrentManagementPort = [int]$plan.Ports.SshPrimary
+        Modules = [ordered]@{
+            'ssh-transition' = & $successState
+            $ProtocolModule = & $successState
+            'nftables-transition' = & $successState
+            'final-validation' = & $successState
+            'ssh-cutover' = & $successState
+            'private-archive' = & $successState
+        }
+    }
+    Save-VpsJson -Value $plan -Path $planPath -Private
+    Save-VpsJson -Value $state -Path (Join-Path $Root 'deployment-state.json') -Private
+    Save-VpsJson -Value $migrationSourceSecrets -Path (Join-Path $Root 'deployment-secrets.private.json') -Private
+    return $planPath
+}
+
+$anyToRealityRoot = Join-Path $ProjectRoot '.test-output\migration-anytls-to-reality'
+$anyToRealityPlan = New-TestMigrationSourceFixture -Template $anyTlsSource -Root $anyToRealityRoot -ProtocolModule 'sing-box-anytls'
+$anyToRealityInput = (@('1', '1', '', '1', 'target.example.invalid', 'y', 'y', 'n', '1') -join [Environment]::NewLine) + [Environment]::NewLine
+$anyToRealityResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
+    '-Mode', 'Migrate', '-DryRun', '-PlanPath', $anyToRealityPlan
+) -InputText $anyToRealityInput -TimeoutSeconds 60
+Assert-True ($anyToRealityResult.ExitCode -eq 0) 'existing AnyTLS plan can enter external Reality migration DryRun'
+Assert-True ($anyToRealityResult.StdOut -match 'target-audit' -and $anyToRealityResult.StdOut -match 'xray-reality') 'AnyTLS to Reality DryRun selects target audit and Xray modules'
+Assert-True ($anyToRealityResult.StdOut -notmatch '(?m)\ssing-box-anytls\s') 'AnyTLS to Reality DryRun excludes the source service module'
+[IO.Directory]::Delete($anyToRealityRoot, $true)
+
+$ssToAnyRoot = Join-Path $ProjectRoot '.test-output\migration-ss-to-anytls'
+$ssToAnyPlan = New-TestMigrationSourceFixture -Template $shadowsocksSource -Root $ssToAnyRoot -ProtocolModule 'sing-box-shadowsocks'
+$ssTokenPath = Join-Path $ssToAnyRoot 'cloudflare-certbot-token.private.txt'
+[IO.File]::WriteAllText($ssTokenPath, 'fixture-token-value')
+$ssToAnyInput = (@(
+    '1', '2', 'edge.example.invalid', 'www.example.invalid', 'y', '', 'fixture@example.invalid', $ssTokenPath, 'n', '1'
+) -join [Environment]::NewLine) + [Environment]::NewLine
+$ssToAnyResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
+    '-Mode', 'Migrate', '-DryRun', '-PlanPath', $ssToAnyPlan
+) -InputText $ssToAnyInput -TimeoutSeconds 60
+Assert-True ($ssToAnyResult.ExitCode -eq 0) 'existing Shadowsocks plan can enter AnyTLS migration DryRun'
+Assert-True ($ssToAnyResult.StdOut -match 'certbot-dns' -and $ssToAnyResult.StdOut -match 'sing-box-anytls') 'Shadowsocks to AnyTLS DryRun selects certificate and AnyTLS modules'
+Assert-True ($ssToAnyResult.StdOut -notmatch '(?m)\ssing-box-shadowsocks\s') 'Shadowsocks to AnyTLS DryRun excludes the source service module'
+[IO.Directory]::Delete($ssToAnyRoot, $true)
 
 $directBackInput = 'b' + [Environment]::NewLine
 $directBackResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(

@@ -43,6 +43,18 @@
 
 `anytls-self-test.sh` 会以真实 AnyTLS+ECH 客户端完成 HTTPS 204、出口 IP 和 UDP DNS 往返。语法通过、443 可达或证书可读都不能替代这组功能测试。现场验收还应从另一台主机执行同样的外部探测。
 
+协议迁移不是重新运行新机模块。计划中的 `Migration.ModuleIds` 对模块集合做白名单筛选，只保留目标协议需要的步骤：
+
+- `migration-preflight`：复验源服务、双 SSH、源配置和当前 nftables；
+- 目标协议的 target/证书前置模块；
+- `migration-arm-rollback`：备份 nftables/sysctl 并部署 VPS 端独立回滚计时器；
+- 目标协议服务、角色网络调优、目标 nftables 和客户端导出；
+- Shadowsocks 目标额外运行 `migration-shadowsocks-probe`，从另一台白名单入口执行真实 TCP/UDP 探测；
+- `final-validation` 与 `migration-commit`：目标真实出口通过后停用源服务并撤销计时器；
+- `private-archive`：记录迁移状态并重新生成最终校验和。
+
+迁移失败时核心调用 `Invoke-MxhProtocolMigrationRollback` 立即触发回滚服务；若 SSH 已被错误防火墙暂时阻断，systemd timer 仍独立执行。回滚后只重置切换阶段及其后模块，证书/target 等安全前置结果可以按模块状态决定是否复用。
+
 ## 约定
 
 - 远端 Bash 放在 `assets/remote`，必须通过 `bash -n`；

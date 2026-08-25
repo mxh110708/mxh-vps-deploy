@@ -64,6 +64,7 @@
 | 新建 Reality，但希望未认证回落只到本机 | Reality 入口节点 + 本机 HTTPS target | 需要 Cloudflare DNS、Token 和自有域名 |
 | 新建 AnyTLS 主入口，使用可信 TLS 和 ECH | AnyTLS 入口节点 | 需要两个不同子域名、Cloudflare Token；固定 TCP 443 |
 | VPS 只作为链式最终出口 | Shadowsocks 2022 纯落地节点 | 端口只能对白名单入口 VPS 开放，不能作为用户直连入口 |
+| 把本工具已经完整部署的现有 VPS 改成另一协议 | 现有 VPS 协议迁移/维护 | Reality、AnyTLS、Shadowsocks 可双向转换；不重做 SSH/账号基础层 |
 | 只要 SSH 加固、防火墙和 Komari | 仅 SSH/防火墙/Komari 监控 | 仍会修改 SSH、nftables 和基础网络参数，不是只安装探针 |
 | 先查看系统情况，不部署服务 | 建立实例专用 SSH 公钥后执行审计 | 会向 root `authorized_keys` 添加实例公钥并写本地审计归档，除此之外不配置系统 |
 
@@ -115,6 +116,16 @@ AnyTLS 与 Reality 是互斥角色。不要让两个服务同时占用 TCP 443�
 向导中填写的是“入口 VPS 的公网 IP”，不是家宽 IP。服务端和服务商安全组都必须只允许这些来源访问落地 TCP/UDP 端口。
 
 主用户走普通 IPv4 出口。如果 VPS 有一个确实可用的独立 IPv6 地址，可以增加第二用户并绑定该 IPv6 出口。一般不要填写网卡名；只有多网卡或明确需要 `SO_BINDTODEVICE` 时才填写接口。
+
+### 2.5 已部署 VPS 的协议迁移
+
+不要用“新部署”覆盖正在使用的 VPS。主菜单中的“现有 VPS 协议迁移/维护”只接受本工具已经完整验收、仍保留私有计划/状态/凭据和实例专用 SSH 密钥的源实例，支持：
+
+- Reality → AnyTLS、Shadowsocks；
+- AnyTLS → Reality、Shadowsocks；
+- Shadowsocks → Reality、AnyTLS。
+
+迁移复用现有双高位 SSH、admin、Komari 和私有归档，只替换协议角色所需服务、客户端片段、防火墙端口和角色相关网络调优。它不接受手工拼装的计划，也不用于自动覆盖面板、Docker 或第三方复杂防火墙。
 
 ## 3. 使用前的安全前提
 
@@ -355,8 +366,10 @@ F:\VPS\MXH-VPS-Deploy\Start-VPSDeploy.cmd
 ```text
 1. 新部署
 2. 继续未完成部署
-3. 项目离线自检
-4. 退出
+3. 现有 VPS 协议迁移/维护
+4. 项目离线自检
+5. 退出
+0. 退出
 ```
 
 第一次选择 `1`。
@@ -377,6 +390,7 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode New
 - 编号菜单输入 `0` 或 `b`，返回上一个当前有效的输入项；
 - 部署摘要选择“返回修改上一项”，或输入 `0`/`b`，可继续修改；
 - 只有整项输入去除首尾空格后恰好等于小写或大写 `b` 才是返回命令；`BreadCloud`、`BandwagonHost` 等以 b 开头的名称仍是正常值；
+- 所有普通文本、是/否和编号菜单中，整项输入 `clear` 或 `cls` 会清除当前屏幕并重新显示当前提示；只有精确匹配才触发，`Clearwater` 等名称不受影响；
 - SSH 密码和 Komari Token 输入时屏幕不显示字符，这是正常行为。
 
 “当前有效”表示向导会自动跳过与角色无关的字段。例如选择 MonitorOnly 后，从 Komari 项返回会回到端口选择，而不会进入 Reality 或 AnyTLS 字段。回退并改变角色、初始认证方式、Reality target 模式、IPv6 或网络调优开关时，向导会清除新分支不应继承的旧值。
@@ -387,7 +401,8 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode New
 - 新部署的“服务商名称”输入 `b`：返回主菜单，不会把 `b` 保存为名称；
 - “继续未完成部署”的计划路径输入 `b`：返回主菜单；
 - Resume 计划摘要输入 `0`/`b`：返回计划路径选择；选择“取消”才返回主菜单；
-- 从命令行直接使用 `-Mode New` 或 `-Mode Resume` 时，在最外层返回会正常结束命令，不显示内部异常标记。
+- 迁移源计划或迁移目标协议第一项输入 `b`：逐层返回计划选择或主菜单；
+- 从命令行直接使用 `-Mode New`、`-Mode Resume` 或 `-Mode Migrate` 时，在最外层返回会正常结束命令，不显示内部异常标记。
 
 ## 9. 向导每一项怎么填写
 
@@ -575,6 +590,62 @@ US-West Entry
 确认摘要后，脚本会建立可恢复的私有部署计划并列出本次模块顺序。再次回答“确认按以上顺序开始”才会连接 VPS。此处输入 `b` 或选择否会安全返回主菜单（命令行直接模式则结束命令）；已经确认的计划会保留，可稍后使用 Resume 继续。如果想在不留下计划的情况下退出，应在前一个摘要页面选择“取消本次向导”。
 
 回退只覆盖“尚未开始新的远端模块”的规划和最终确认阶段。模块一旦开始，SSH、软件包、防火墙、证书或代理服务可能已经发生有序变更，脚本不会把这些操作伪装成可撤销的上一步。此后的安全确认使用 `y/n`；选择否会停止并保存状态，应按 Resume 流程继续或依据归档回滚。
+
+### 10.1 现有 VPS 协议迁移/维护
+
+从主菜单选择 `3`，或运行：
+
+```powershell
+pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Migrate `
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
+```
+
+源实例必须同时满足：
+
+- 当前角色是 Reality、AnyTLS 或 Shadowsocks；
+- `ssh-transition`、当前协议模块、`nftables-transition`、`final-validation`、`ssh-cutover`、`private-archive` 均为成功；
+- `deployment-plan.json`、`deployment-state.json`、`deployment-secrets.private.json` 和实例专用 SSH 私钥仍在原归档；
+- 当前管理端口仍是计划中的 SSH 主端口或救援端口；
+- 服务器当前运行的源协议与计划一致。
+
+向导只显示另外两个目标角色，不允许把协议“迁移”到自身。目标字段与新部署一致：
+
+- 迁移到 Reality：填写 Xray 救援端口、外部/本机 target、IPv4 出口和必要的可信 TLS 信息；
+- 迁移到 AnyTLS：填写内部 SNI、ECH public name、Cloudflare Zone、邮箱和 Token 文件；
+- 迁移到 Shadowsocks：填写高位 TCP/UDP 端口、可信入口白名单、客户端入口组和可选 IPv6 出口。
+
+在确认模块执行前，先在服务商安全组加入目标端口：Reality 加 TCP 443 和新的 Xray 救援端口；AnyTLS 加 TCP 443；Shadowsocks 只对白名单入口加入目标高位 TCP+UDP。迁移完成并确认新客户端长期可用后，再从服务商安全组删除只属于源协议的旧端口。
+
+迁移到 Shadowsocks 还必须选择另一台 Reality/AnyTLS 入口的 `deployment-plan.json`。该入口的 IPv4 必须在刚填写的白名单中，且不能就是正在改成落地机的同一台 VPS。防火墙应用后，脚本会通过这台入口远程运行临时 sing-box 客户端，验证：
+
+```text
+可信入口 → 新 Shadowsocks 落地 → HTTPS 出口 + UDP DNS
+```
+
+迁移执行顺序：
+
+1. 重新验证源计划、SSH 主/救援入口和当前源协议服务；
+2. 在实例归档的 `migration-backups` 下复制迁移前计划、状态、私有凭据文件、服务端快照和客户端片段；
+3. 对 Reality 外部 target 或可信 TLS 证书完成目标协议前置检查；
+4. VPS 端备份当前 `/etc/nftables.conf` 与网络调优配置；
+5. 启用独立的 `mxh-protocol-migration-rollback.timer`，默认 20 分钟；
+6. 部署目标协议、重新应用目标角色网络调优和 nftables；
+7. 生成目标客户端文件，并完成服务端、SSH、TCP/UDP 和真实出口测试；
+8. 全部通过后才停用源协议并撤销回滚计时器，最后重建私有归档和校验和。
+
+Reality 与 AnyTLS 都使用 TCP 443，切换时源服务会暂时停止；Shadowsocks 使用独立高位端口，但迁移仍以“最终只保留目标协议服务启用”为准。旧二进制和配置不会立刻删除，便于以后反向迁移，但旧服务会被禁用。
+
+任一已武装回滚之后的模块失败时，Windows 端会立即尝试让 VPS 恢复源协议、旧 nftables 和旧网络调优。即使 SSH 因防火墙问题暂时不可达，VPS 端计时器仍会独立执行。失败后的计划会记录 `RolledBack` 或 `RollbackPending`；不要新建第二个迁移，确认源服务恢复后使用“继续未完成部署”重试。
+
+如果状态为 `RollbackPending` 但你仍能通过 SSH 或服务商控制台进入 VPS，可以手动提前触发同一回滚服务：
+
+```bash
+sudo systemctl start mxh-protocol-migration-rollback.service
+```
+
+不要直接删除 rollback service/timer 文件，也不要在源服务尚未恢复时重启或继续下一次迁移。
+
+迁移到 Reality 或 AnyTLS 时，如果本机找不到可用 Mihomo 核心或真实出口测试未通过，脚本拒绝提交并回滚。迁移到 Shadowsocks 时，如果另一台可信入口无法完成链式探测，同样拒绝提交。
 
 ## 11. 部署过程中会发生什么
 
@@ -933,6 +1004,15 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode New -DryRun
 
 DryRun 仍会询问计划字段，并检查填写的 Token 文件是否存在，但不会连接 VPS、创建实例目录、生成真实凭据或改文件。
 
+预览现有实例的协议迁移：
+
+```powershell
+pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Migrate -DryRun `
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
+```
+
+迁移 DryRun 会验证本地源归档和目标字段并显示专用模块列表，但不会创建迁移备份、覆盖当前计划或连接源/验证入口 VPS。
+
 ### 16.2 NonInteractive
 
 `-NonInteractive` 主要用于已有完整计划的受控自动化：
@@ -993,6 +1073,8 @@ Token 未泄漏且仍用于其他证书时无需轮换；不再使用时应在 C
 - Certbot DNS-01、模拟续期、Reality 本机 target；
 - AnyTLS 可信 TLS、ECH、TCP/UDP、远程客户端出口；
 - 每实例 padding 与 Mihomo 稳定版/Alpha 运行兼容；
+- Reality、AnyTLS、Shadowsocks 六个迁移方向的计划生成、角色字段、专用模块筛选、本地备份和 Resume 状态重置；
+- `clear`/`cls`、跨层返回、摘要取消和迁移向导的真实交互 DryRun；
 - 项目离线断言、秘密扫描、固定核心解析和 ShellCheck。
 
 尚未覆盖所有系统和故障排列组合，包括：
@@ -1002,6 +1084,7 @@ Token 未泄漏且仍用于其他证书时无需轮换；不再使用时应在 C
 - MonitorOnly/AuditOnly 的所有服务商组合；
 - 等待证书自然到期后的真实定时续期；
 - 所有故意破坏后的自动回滚分支。
+- 六个协议迁移方向尚未全部在真实生产 VPS 上逐一执行；当前远端迁移脚本已通过 Bash 语法、配置生成和回滚结构测试，但首次实机使用仍必须保留控制台并观察回滚计时器。
 
 因此脚本仍应按分阶段、保留旧入口、保持服务商控制台可用的方式使用，不能把“自动化”理解为“无需验收”。详细变更和现场证据见项目根目录 `CHANGELOG.md`。
 

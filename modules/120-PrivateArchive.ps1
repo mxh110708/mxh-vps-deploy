@@ -123,6 +123,15 @@ Server Self Test: $($Context.State.ShadowsocksSelfTest | ConvertTo-Json -Compres
         else {
             'Network Tuning: Not recorded.'
         }
+        $migrationBlock = if ($Context.Plan.Contains('Migration') -and [bool]$Context.Plan.Migration.Enabled) {
+@"
+Protocol Migration: $($Context.Plan.Migration.SourceRole) -> $($Context.Plan.Migration.TargetRole)
+Migration Status: $($Context.State.Migration.Status)
+Local Pre-Migration Backup: $($Context.Plan.Migration.LocalBackupDirectory)
+Remote Rollback Backup: $($Context.State.Migration.RemoteBackupDirectory)
+"@
+        }
+        else { 'Protocol Migration: Not applicable.' }
         $content = @"
 MXH VPS DEPLOY - PRIVATE FINAL ARCHIVE
 Generated: $((Get-Date).ToString('o'))
@@ -151,6 +160,8 @@ $shadowsocksBlock
 
 $networkTuningBlock
 
+$migrationBlock
+
 Komari Enabled: $($Context.Plan.Komari.Enabled)
 Komari Endpoint: $($Context.Plan.Komari.Endpoint)
 Komari Agent Version: $($Context.Plan.Komari.AgentVersion)
@@ -167,6 +178,16 @@ SECURITY: This file contains active credentials. Keep it only in local private a
         [IO.File]::WriteAllText($archivePath, $content, [Text.UTF8Encoding]::new($false))
         Protect-VpsPrivateFile $archivePath
 
+        $Context.State.FinalArchive = $archivePath
+        if ($Context.Plan.Contains('Migration') -and [bool]$Context.Plan.Migration.Enabled -and
+            $Context.State.Contains('Migration') -and [bool]$Context.State.Migration.Committed) {
+            $Context.State.Migration.Status = 'Completed'
+            $Context.State.Migration.CompletedAt = (Get-Date).ToString('o')
+            $Context.Plan.Migration.Status = 'Completed'
+            Save-VpsJson -Value $Context.Plan -Path $Context.PlanPath -Private
+        }
+        Save-VpsContext -Context $Context
+
         $checksumPath = Join-Path $Context.ArchivePath 'SHA256SUMS-private.txt'
         $files = Get-ChildItem -LiteralPath $Context.ArchivePath -File -Recurse | Where-Object FullName -ne $checksumPath
         $lines = foreach ($file in $files) {
@@ -176,7 +197,5 @@ SECURITY: This file contains active credentials. Keep it only in local private a
         }
         [IO.File]::WriteAllText($checksumPath, (($lines | Sort-Object) -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
         Protect-VpsPrivateFile $checksumPath
-        $Context.State.FinalArchive = $archivePath
-        Save-VpsContext -Context $Context
     }
 }

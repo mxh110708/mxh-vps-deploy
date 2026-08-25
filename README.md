@@ -7,6 +7,9 @@
 - 初始只读审计，发现 Docker、面板、复杂防火墙或既有代理服务时默认停止；
 - 初始入口同时支持 root 密码和服务商现有私钥（如 DMIT 的 key-only 模板）；
 - 新部署向导支持逐项返回修改，切换角色、认证方式或 target 模式时会清除不再适用的旧分支参数；
+- 已完成且由本工具管理的 Reality、AnyTLS、Shadowsocks 实例可在三种协议角色间双向迁移，不按干净新机重跑；
+- 协议迁移会先备份本地计划/状态/客户端片段，在 VPS 端保存旧 nftables/sysctl 并启用 20 分钟独立自动回滚；
+- 所有普通交互提示支持整项输入 `clear` 或 `cls` 清屏，不影响 `Clearwater` 等正常字段；
 - 为每台实例生成新的独立 Ed25519 密钥，并收紧 Windows ACL；
 - 创建 `admin` 管理用户，保留 root/admin 公钥登录，关闭 SSH 密码登录；
 - 分阶段迁移到主、救援两个随机高位 SSH 端口；
@@ -43,6 +46,8 @@ pwsh -File .\Start-VPSDeploy.ps1
 
 填写中发现上一项有误时，普通输入或是/否提示整项只输入 `b`，编号菜单输入 `0` 或 `b`。只有去除首尾空格后恰好等于 `b` 才是返回命令，`BreadCloud` 等以 b 开头的正常名称不受影响。在新部署第一项返回会回到主菜单；继续部署的路径输入和计划摘要也有完整返回链路。最后的部署摘要可返回修改或无写入取消，只有选择“确认方案并继续”后才会创建部署计划。
 
+输出过长时，在普通文本、是/否或编号菜单中整项输入 `clear` 或 `cls` 即可清屏并重新显示当前提示；命令采用精确匹配，`Clearwater` 等正常值不会被截获。
+
 部署开始前，请先在服务商安全组临时放行向导生成的两个 SSH 高位端口。Reality 角色还需要 TCP 443 和 Xray 救援端口，AnyTLS 角色只额外需要 TCP 443；Shadowsocks 落地端口必须按可信入口地址同时限制 TCP/UDP。
 
 ## 安全边界
@@ -54,7 +59,7 @@ pwsh -File .\Start-VPSDeploy.ps1
 - Komari Token 通过隐藏输入取得，只经 SSH 标准输入传送，不写入命令行和普通日志。
 - Cloudflare API Token 从实例私有文件读取，只经 SSH 标准输入传送，并在服务器保存为 root-only 的 Certbot 凭据；Token 值不进入部署计划、普通日志或 Git。
 - 远程配置每次修改前建立带时间戳备份；失败即停止，不连续跨层“盲修”。
-- nftables 模块面向干净 VPS。已有 Docker、面板或复杂规则时必须单独审计，不能强制套用。
+- 新部署的 nftables 模块面向干净 VPS；协议迁移只复用本工具已验收并可回滚的规则。第三方 Docker、面板或复杂规则仍必须单独审计，不能强制套用。
 
 详细设计见 [安全模型](docs/SECURITY.md) 和 [模块开发](docs/MODULES.md)。
 
@@ -84,6 +89,10 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New
 pwsh -File .\Start-VPSDeploy.ps1 -Mode Resume `
   -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
 
+# 将本工具已完整验收的现有实例迁移到另一协议角色
+pwsh -File .\Start-VPSDeploy.ps1 -Mode Migrate `
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
+
 # 只做项目离线自检
 pwsh -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
 
@@ -92,6 +101,8 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New -DryRun
 ```
 
 `-OnlyModule` 是维护模式，只运行指定模块及其必要检查。不要用它跳过首次部署的 SSH/防火墙安全顺序。
+
+`-Mode Migrate` 不是任意服务器覆盖器。源实例必须由本工具完成部署并保留成功的 SSH、防火墙、协议、最终验收、收口和私有归档状态。迁移支持 Reality、AnyTLS、Shadowsocks 三者六个有向转换；失败时优先立即恢复源协议，SSH 不可达时由 VPS 端计时器独立恢复。迁移到 Shadowsocks 还必须提供另一台可信入口的计划，以完成入口→落地链式实测。
 
 ## Reality target 与 AnyTLS 的选择
 
@@ -120,7 +131,7 @@ Certbot 安装在实际持有证书的每台 VPS 上。脚本会申请 ECDSA P-2
 ## 当前明确不自动处理的内容
 
 - 服务商网页安全组、VNC/救援控制台；
-- 已有 Docker、3x-ui/s-ui、复杂 nftables 或生产服务的主机；
+- 不属于本工具完整归档管理的 Docker、3x-ui/s-ui、复杂 nftables 或生产服务主机；
 - 服务商专有的附加 IPv6 获取脚本、策略路由或网络命名空间；
 - Hysteria 等其他备用协议；
 - 同一台 VPS 上同时运行 Xray Reality 与 AnyTLS，或让两者同时占用 TCP 443；

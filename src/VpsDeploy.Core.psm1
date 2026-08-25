@@ -30,6 +30,20 @@ function Write-VpsUi {
     Write-Host ($prefix + $Message) -ForegroundColor $color
 }
 
+function Test-VpsClearCommand {
+    param([AllowNull()] [string]$Value)
+    if ($null -eq $Value) { return $false }
+    return $Value.Trim().ToLowerInvariant() -in @('clear', 'cls')
+}
+
+function Clear-VpsScreen {
+    try { Clear-Host }
+    catch {
+        try { [Console]::Clear() }
+        catch { }
+    }
+}
+
 function Read-VpsText {
     [CmdletBinding()]
     param(
@@ -45,6 +59,10 @@ function Read-VpsText {
         $suffix = if ($Default) { " [$Default]" } else { '' }
         $backHint = if ($AllowBack) { '（输入 b 返回）' } else { '' }
         $value = Read-Host ($Prompt + $suffix + $backHint)
+        if (Test-VpsClearCommand $value) {
+            Clear-VpsScreen
+            continue
+        }
         if ($AllowBack -and $value.Trim().Equals('b', [StringComparison]::OrdinalIgnoreCase)) {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
         }
@@ -75,6 +93,10 @@ function Read-VpsYesNo {
     if ($AllowBack) { $hint += ' [b=返回]' }
     while ($true) {
         $answer = (Read-Host "$Prompt $hint").Trim().ToLowerInvariant()
+        if (Test-VpsClearCommand $answer) {
+            Clear-VpsScreen
+            continue
+        }
         if ($AllowBack -and $answer -eq 'b') {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
         }
@@ -95,14 +117,23 @@ function Read-VpsMenu {
         [string]$BackLabel = '返回上一步'
     )
 
-    Write-Host ''
-    Write-Host $Title -ForegroundColor Cyan
-    for ($i = 0; $i -lt $Options.Count; $i++) {
-        Write-Host ("  {0}. {1}" -f ($i + 1), $Options[$i])
+    $showMenu = {
+        Write-Host ''
+        Write-Host $Title -ForegroundColor Cyan
+        for ($i = 0; $i -lt $Options.Count; $i++) {
+            Write-Host ("  {0}. {1}" -f ($i + 1), $Options[$i])
+        }
+        if ($AllowBack) { Write-Host ("  0. {0}" -f $BackLabel) }
+        Write-Host '  clear / cls. 清除当前屏幕输出' -ForegroundColor DarkGray
     }
-    if ($AllowBack) { Write-Host ("  0. {0}" -f $BackLabel) }
+    & $showMenu
     while ($true) {
         $raw = Read-Host "请选择 [$Default]"
+        if (Test-VpsClearCommand $raw) {
+            Clear-VpsScreen
+            & $showMenu
+            continue
+        }
         if ($AllowBack -and ($raw.Trim() -eq '0' -or $raw.Trim().Equals('b', [StringComparison]::OrdinalIgnoreCase))) {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
         }
@@ -2029,6 +2060,10 @@ function Invoke-VpsModulePipeline {
     $selected = @($modules | Where-Object {
             $Context.Plan.Role -in @($_.Roles) -and (& $_.IsEnabled $Context)
         })
+    if ($Context.Plan.Contains('Migration') -and [bool]$Context.Plan.Migration.Enabled) {
+        $migrationIds = @($Context.Plan.Migration.ModuleIds | ForEach-Object { [string]$_ })
+        $selected = @($selected | Where-Object Id -in $migrationIds)
+    }
     if ($OnlyModule) {
         $missing = @($OnlyModule | Where-Object { $_ -notin @($modules.Id) })
         if ($missing) { throw "未知模块：$($missing -join ', ')" }
@@ -2071,7 +2106,13 @@ function Invoke-VpsModulePipeline {
             Set-VpsModuleState -Context $Context -Id $module.Id -Status Failed -Message $safeMessage
             Write-VpsLog -Context $Context -Level ERROR -Message "Module $($module.Id) failed: $safeMessage"
             Write-VpsUi "$($module.Name) 失败：$safeMessage" Error
-            Write-VpsUi '后续模块已停止；旧 SSH 入口不会由核心自动关闭。修复后使用继续模式。' Warning
+            if ($Context.Plan.Contains('Migration') -and [bool]$Context.Plan.Migration.Enabled) {
+                Invoke-MxhProtocolMigrationRollback -Context $Context -Reason $safeMessage
+                Write-VpsUi '迁移后续模块已停止；请确认源协议恢复状态，再使用继续模式。' Warning
+            }
+            else {
+                Write-VpsUi '后续模块已停止；旧 SSH 入口不会由核心自动关闭。修复后使用继续模式。' Warning
+            }
             throw
         }
     }
@@ -2121,6 +2162,10 @@ function Show-VpsPlanSummary {
     }
     Write-Host "  Komari：$($Plan.Komari.Enabled)"
     Write-Host "  私有归档：$($Plan.Paths.Archive)"
+    if ($Plan.Contains('Migration') -and [bool]$Plan.Migration.Enabled) {
+        Write-Host "  协议迁移：$($Plan.Migration.SourceRole) -> $($Plan.Migration.TargetRole)（$($Plan.Migration.Status)）"
+        Write-Host "  自动回滚：$($Plan.Migration.RollbackTimeoutMinutes) 分钟"
+    }
     if ($Plan.Role -eq 'RealityEntry') {
         Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口、443 和 Xray 救援端口。' Warning
     }
@@ -2207,7 +2252,7 @@ function Invoke-VpsDeploymentSession {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$ProjectRoot,
-        [Parameter(Mandatory)] [ValidateSet('New', 'Resume')] [string]$Mode,
+        [Parameter(Mandatory)] [ValidateSet('New', 'Resume', 'Migrate')] [string]$Mode,
         [string]$PlanPath,
         [string[]]$OnlyModule,
         [Parameter(Mandatory)] [string]$InstanceRoot,
@@ -2217,12 +2262,17 @@ function Invoke-VpsDeploymentSession {
 
     if ($Mode -eq 'New') {
         $plan = New-VpsInteractivePlan -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot
+        $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan -DryRun:$DryRun -NonInteractive:$NonInteractive
+    }
+    elseif ($Mode -eq 'Migrate') {
+        $migrationResult = New-VpsProtocolMigrationPlanInteractive -ProjectRoot $ProjectRoot -PlanPath $PlanPath
+        $context = Initialize-MxhProtocolMigrationContext -ProjectRoot $ProjectRoot -MigrationResult $migrationResult `
+            -DryRun:$DryRun -NonInteractive:$NonInteractive
     }
     else {
         $plan = Read-VpsResumePlan -PlanPath $PlanPath -NonInteractive:$NonInteractive
+        $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan -DryRun:$DryRun -NonInteractive:$NonInteractive
     }
-
-    $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan -DryRun:$DryRun -NonInteractive:$NonInteractive
     try {
         Invoke-VpsModulePipeline -Context $context -OnlyModule $OnlyModule
         if (-not $DryRun) {
@@ -2240,7 +2290,7 @@ function Start-VpsDeploy {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$ProjectRoot,
-        [ValidateSet('Interactive', 'New', 'Resume', 'ValidateProject')] [string]$Mode = 'Interactive',
+        [ValidateSet('Interactive', 'New', 'Resume', 'Migrate', 'ValidateProject')] [string]$Mode = 'Interactive',
         [string]$PlanPath,
         [string[]]$OnlyModule,
         [string]$InstanceRoot = 'F:\VPS\VPS-Instances',
@@ -2256,14 +2306,20 @@ function Start-VpsDeploy {
     if ($Mode -eq 'Interactive') {
         while ($true) {
             try {
-                $choice = Read-VpsMenu '请选择操作' @('新部署', '继续未完成部署', '项目离线自检', '退出') 1 `
+                $choice = Read-VpsMenu '请选择操作' @(
+                    '新部署',
+                    '继续未完成部署',
+                    '现有 VPS 协议迁移/维护',
+                    '项目离线自检',
+                    '退出'
+                ) 1 `
                     -AllowBack -BackLabel '退出'
             }
             catch {
                 if (Test-VpsWizardBackError $_) { return }
                 throw
             }
-            $selectedMode = @('New', 'Resume', 'ValidateProject', 'Exit')[$choice - 1]
+            $selectedMode = @('New', 'Resume', 'Migrate', 'ValidateProject', 'Exit')[$choice - 1]
             if ($selectedMode -eq 'Exit') { return }
             if ($selectedMode -eq 'ValidateProject') {
                 Test-VpsProject -ProjectRoot $ProjectRoot
@@ -2295,6 +2351,8 @@ function Start-VpsDeploy {
     }
 }
 
+. (Join-Path $PSScriptRoot 'VpsDeploy.Migration.ps1')
+
 Export-ModuleMember -Function @(
     'Start-VpsDeploy', 'Write-VpsUi', 'Write-VpsLog', 'Read-VpsYesNo', 'Read-VpsText',
     'ConvertFrom-VpsSecureString', 'Invoke-VpsRemoteScript', 'Invoke-VpsSshCommand',
@@ -2308,5 +2366,6 @@ Export-ModuleMember -Function @(
     'New-MxhAnyTlsPaddingScheme', 'Get-MxhAnyTlsPaddingScheme',
     'ConvertFrom-MxhEchKeyPairText', 'New-MxhAnyTlsServerConfig', 'New-MxhAnyTlsClientOutbound', 'New-MxhAnyTlsMihomoProfileText',
     'New-MxhRandomBase64Key', 'New-MxhShadowsocksServerConfig', 'New-MxhLandingMihomoProfileText',
-    'New-VpsRemoteScriptPayload'
+    'New-VpsRemoteScriptPayload', 'Get-MxhMigrationModuleIds', 'Test-MxhProtocolMigrationSource',
+    'New-MxhProtocolMigrationPlan'
 )

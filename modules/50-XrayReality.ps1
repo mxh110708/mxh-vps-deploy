@@ -44,6 +44,11 @@
             BACKUP_PORT = [string]$Context.Plan.Ports.XrayBackup
             TARGET = [string]$target.TargetAddress
         }
+        if ($Context.Plan.Contains('Migration') -and [bool]$Context.Plan.Migration.Enabled -and
+            $Context.Plan.Migration.SourceRole -eq 'AnyTlsEntry') {
+            Invoke-VpsSshCommand -Context $Context -User root -Port ([int]$Context.State.CurrentManagementPort) `
+                -Command 'systemctl stop sing-box-anytls.service' | Out-Null
+        }
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'xray-apply-config.sh' -Parameters $applyParameters -TimeoutSeconds 600 -SensitiveOutput
         $backup = Get-VpsMarkerValue $result.StdOut BACKUP_DIR -Required
         if (-not $Context.State.Contains('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
