@@ -2,7 +2,7 @@
     Id        = 'nftables-transition'
     Name      = '应用保留旧 SSH 的过渡 nftables'
     Order     = 70
-    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('ssh-transition')
     IsEnabled = { param($Context) $true }
     Invoke    = {
@@ -16,6 +16,9 @@
         if ($Context.Plan.Role -eq 'RealityEntry') {
             $ports += [int]$Context.Plan.Ports.XrayPrimary
             $ports += [int]$Context.Plan.Ports.XrayBackup
+        }
+        elseif ($Context.Plan.Role -eq 'AnyTlsEntry') {
+            $ports += [int]$Context.Plan.Ports.AnyTlsPrimary
         }
         $ports = @($ports | Sort-Object -Unique)
         $nftParameters = @{

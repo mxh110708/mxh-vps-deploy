@@ -2,7 +2,7 @@
     Id        = 'final-validation'
     Name      = '服务端总验收与协议真实出口测试'
     Order     = 100
-    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('nftables-transition')
     IsEnabled = { param($Context) $true }
     Invoke    = {
@@ -13,6 +13,17 @@
             SSH_RESCUE = [string]$Context.Plan.Ports.SshRescue
             XRAY_PRIMARY = [string]$Context.Plan.Ports.XrayPrimary
             XRAY_BACKUP = [string]$Context.Plan.Ports.XrayBackup
+            ANYTLS_PORT = [string]$Context.Plan.Ports.AnyTlsPrimary
+            ANYTLS_SERVER_NAME = if ($Context.Plan.Role -eq 'AnyTlsEntry') { [string]$Context.Plan.AnyTls.ServerName } else { '' }
+            REALITY_TARGET_MODE = if ($Context.Plan.Role -eq 'RealityEntry' -and $Context.Plan.Reality.Contains('TargetMode')) {
+                [string]$Context.Plan.Reality.TargetMode
+            } else { 'ExternalAudited' }
+            REALITY_SERVER_NAME = if ($Context.Plan.Role -eq 'RealityEntry') {
+                [string]((Get-MxhRealityTargetSettings -Plan $Context.Plan).ServerName)
+            } else { '' }
+            LOCAL_HTTPS_PORT = if ($Context.Plan.Role -eq 'RealityEntry' -and $Context.Plan.Reality.Contains('LocalHttpsPort')) {
+                [string]$Context.Plan.Reality.LocalHttpsPort
+            } else { '' }
             LANDING_PORT = [string]$Context.Plan.Ports.LandingShadowsocks
             TRUSTED_ADDRESSES = if ($Context.Plan.Role -eq 'ShadowsocksLanding') {
                 (@($Context.Plan.Shadowsocks.TrustedEntryIPv4s) + @($Context.Plan.Shadowsocks.TrustedEntryIPv6s)) -join ','
@@ -51,6 +62,24 @@
             else {
                 $Context.State.RealityEgressTest = [ordered]@{ Status = 'NotRun'; Reason = 'Mihomo core not found' }
                 Write-VpsUi '未找到稳定版 Mihomo，真实 Reality 握手留待客户端人工完成。' Warning
+            }
+        }
+        elseif ($Context.Plan.Role -eq 'AnyTlsEntry') {
+            $core = 'D:\Program Files\Clash Verge\verge-mihomo.exe'
+            if (Test-Path -LiteralPath $core) {
+                $egress = Invoke-MxhMihomoEgressTest -Context $Context -CorePath $core `
+                    -ProfilePath $Context.State.AnyTlsClientExports.MihomoProfile `
+                    -MixedPort ([int]$Context.State.AnyTlsClientExports.MihomoMixedPort) -Label 'anytls'
+                $Context.State.AnyTlsEgressTest = [ordered]@{
+                    Status = 'Passed'
+                    Egress = $egress
+                    TestedAt = (Get-Date).ToString('o')
+                }
+                Write-VpsUi 'AnyTLS 已完成受信证书、ECH、HTTP 204 与真实出口测试。' Success
+            }
+            else {
+                $Context.State.AnyTlsEgressTest = [ordered]@{ Status = 'NotRun'; Reason = 'Mihomo core not found' }
+                Write-VpsUi '未找到稳定版 Mihomo，AnyTLS 真实客户端测试留待人工完成。' Warning
             }
         }
         Save-VpsContext -Context $Context

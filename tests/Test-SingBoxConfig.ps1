@@ -71,6 +71,85 @@ try {
         & $SingBoxPath check -c $config
         if ($LASTEXITCODE -ne 0) { throw "sing-box config check failed: $config" }
     }
+
+    $echOutput = (& $SingBoxPath generate ech-keypair 'www.example.invalid' 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw 'sing-box ECH keypair generation failed' }
+    $ech = ConvertFrom-MxhEchKeyPairText -Text $echOutput
+    $echKeyPath = Join-Path $work 'ech-key.pem'
+    $echConfigPath = Join-Path $work 'ech-config.pem'
+    [IO.File]::WriteAllText($echKeyPath, $ech.ServerKeyPem, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($echConfigPath, $ech.ClientConfigPem, [Text.UTF8Encoding]::new($false))
+
+    $rsa = [Security.Cryptography.RSA]::Create(2048)
+    try {
+        $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
+            'CN=edge.example.invalid', $rsa, [Security.Cryptography.HashAlgorithmName]::SHA256,
+            [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $san = [Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
+        $san.AddDnsName('edge.example.invalid')
+        $san.AddDnsName('www.example.invalid')
+        $request.CertificateExtensions.Add($san.Build())
+        $cert = $request.CreateSelfSigned((Get-Date).AddMinutes(-5), (Get-Date).AddDays(3))
+        try {
+            $certPath = Join-Path $work 'anytls-cert.pem'
+            $keyPath = Join-Path $work 'anytls-key.pem'
+            [IO.File]::WriteAllText($certPath, $cert.ExportCertificatePem(), [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText($keyPath, $rsa.ExportPkcs8PrivateKeyPem(), [Text.UTF8Encoding]::new($false))
+        }
+        finally { $cert.Dispose() }
+    }
+    finally { $rsa.Dispose() }
+
+    $anyTlsContext = [pscustomobject]@{
+        Plan = [ordered]@{
+            NodeName = 'Example-US.AnyTLS'
+            Server = [ordered]@{ IPv4 = '192.0.2.40'; IPv6 = '2001:db8::40' }
+            Ports = [ordered]@{ AnyTlsPrimary = 443 }
+            AnyTls = [ordered]@{
+                ServerName = 'edge.example.invalid'
+                EchPublicName = 'www.example.invalid'
+                ForceIpv4Egress = $true
+                PaddingSchemeMode = 'PerInstanceConservativeV1'
+                PaddingScheme = @(
+                    'stop=8', '0=28-64', '1=120-360',
+                    '2=420-540,c,520-900,c,540-920,c,560-940,c,580-960',
+                    '3=12-20,520-920', '4=500-880', '5=540-940', '6=560-980', '7=600-1000'
+                )
+            }
+        }
+        Secrets = [ordered]@{
+            AnyTls = [ordered]@{
+                Password = [Convert]::ToBase64String([byte[]](49..80))
+                EchServerKeyPem = $ech.ServerKeyPem
+                EchClientConfigPem = $ech.ClientConfigPem
+                EchClientConfigBase64 = $ech.ClientConfigBase64
+            }
+        }
+    }
+    $anyTlsServer = New-MxhAnyTlsServerConfig -Context $anyTlsContext
+    if ($anyTlsServer.route.Contains('auto_detect_interface')) {
+        throw 'AnyTLS server must not require interface auto-detection under the low-privilege service account.'
+    }
+    if (@($anyTlsServer.inbounds[0].padding_scheme).Count -ne 9) {
+        throw 'AnyTLS server padding scheme was not generated.'
+    }
+    $anyTlsServer.inbounds[0].tls.certificate_path = $certPath
+    $anyTlsServer.inbounds[0].tls.key_path = $keyPath
+    $anyTlsServer.inbounds[0].tls.ech.key_path = $echKeyPath
+    $anyTlsServerPath = Join-Path $work 'anytls-server.json'
+    [IO.File]::WriteAllText($anyTlsServerPath, ($anyTlsServer | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
+
+    $anyTlsClientPath = Join-Path $work 'anytls-client.json'
+    $anyTlsClient = [ordered]@{
+        log = [ordered]@{ level = 'warn' }
+        outbounds = @((New-MxhAnyTlsClientOutbound -Context $anyTlsContext -Server '192.0.2.40' -Tag 'anytls-out'))
+        route = [ordered]@{ final = 'anytls-out' }
+    }
+    [IO.File]::WriteAllText($anyTlsClientPath, ($anyTlsClient | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
+    foreach ($config in @($anyTlsServerPath, $anyTlsClientPath)) {
+        & $SingBoxPath check -c $config
+        if ($LASTEXITCODE -ne 0) { throw "sing-box AnyTLS/ECH config check failed: $config" }
+    }
     Write-Host 'Exact sing-box core checks passed.' -ForegroundColor Green
 }
 finally {

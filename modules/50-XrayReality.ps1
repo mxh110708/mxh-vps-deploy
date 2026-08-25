@@ -3,7 +3,7 @@
     Name      = '安装固定版 Xray 并部署双入口 REALITY'
     Order     = 50
     Roles     = @('RealityEntry')
-    Requires  = @('target-audit')
+    Requires  = @('ssh-transition')
     IsEnabled = { param($Context) $true }
     Invoke    = {
         param($Context)
@@ -35,14 +35,14 @@
             Save-VpsContext -Context $Context
         }
 
-        $target = [string]$Context.Plan.Reality.Target
+        $target = Get-MxhRealityTargetSettings -Plan $Context.Plan
         $config = New-MxhXrayServerConfig -Context $Context
         $configJson = $config | ConvertTo-Json -Depth 30
         $applyParameters = @{
             CONFIG_JSON = $configJson
             PRIMARY_PORT = [string]$Context.Plan.Ports.XrayPrimary
             BACKUP_PORT = [string]$Context.Plan.Ports.XrayBackup
-            TARGET = $target
+            TARGET = [string]$target.TargetAddress
         }
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'xray-apply-config.sh' -Parameters $applyParameters -TimeoutSeconds 600 -SensitiveOutput
         $backup = Get-VpsMarkerValue $result.StdOut BACKUP_DIR -Required

@@ -1,0 +1,87 @@
+{
+  "SchemaVersion": 2,
+  "CreatedAt": "2026-01-01T00:00:00Z",
+  "Provider": "ExampleProvider",
+  "Instance": "ExampleAnyTls",
+  "NodeName": "Example-US.AnyTLS",
+  "Role": "AnyTlsEntry",
+  "Server": {
+    "IPv4": "192.0.2.40",
+    "IPv6": "2001:db8::40",
+    "BootstrapUser": "root",
+    "BootstrapSshPort": 22,
+    "BootstrapAuth": "Password",
+    "BootstrapKeyPath": null
+  },
+  "AdminUser": "admin",
+  "Ports": {
+    "SshPrimary": 30125,
+    "SshRescue": 31236,
+    "XrayPrimary": null,
+    "XrayBackup": null,
+    "AnyTlsPrimary": 443,
+    "LandingShadowsocks": null
+  },
+  "Reality": {
+    "Target": null,
+    "TargetMode": "ExternalAudited",
+    "ServerName": null,
+    "TargetAddress": null,
+    "LocalHttpsPort": 8443,
+    "ForceIpv4Egress": true,
+    "TargetSamples": 20,
+    "TargetMaxMedianMs": 15,
+    "XrayVersion": "26.3.27"
+  },
+  "AnyTls": {
+    "Enabled": true,
+    "ServerName": "edge.example.invalid",
+    "EchPublicName": "www.example.invalid",
+    "SingBoxVersion": "1.13.19",
+    "ForceIpv4Egress": true,
+    "PaddingSchemeMode": "PerInstanceConservativeV1",
+    "PaddingScheme": [
+      "stop=8",
+      "0=28-64",
+      "1=120-360",
+      "2=420-540,c,520-900,c,540-920,c,560-940,c,580-960",
+      "3=12-20,520-920",
+      "4=500-880",
+      "5=540-940",
+      "6=560-980",
+      "7=600-1000"
+    ]
+  },
+  "TrustedTls": {
+    "Enabled": true,
+    "ZoneName": "example.invalid",
+    "CertbotEmail": "admin@example.invalid",
+    "CloudflareTokenFile": "DRY-RUN-TOKEN-SENTINEL",
+    "AnyTlsCertificateName": "mxh-anytls",
+    "RealityCertificateName": "mxh-reality-target"
+  },
+  "Shadowsocks": {
+    "Method": "2022-blake3-aes-128-gcm",
+    "SingBoxVersion": "1.13.19",
+    "TrustedEntryIPv4s": [],
+    "TrustedEntryIPv6s": [],
+    "ClientTransitTag": null,
+    "SecondaryIpv6Enabled": false,
+    "SecondaryIpv6Address": null,
+    "SecondaryBindInterface": null
+  },
+  "NetworkTuning": {
+    "Mode": "AdaptiveConservative",
+    "BandwidthMbps": 1000,
+    "ReferenceRttMs": 160
+  },
+  "Komari": {
+    "Enabled": false,
+    "Endpoint": "https://status.example.invalid",
+    "AgentVersion": "1.2.60"
+  },
+  "Paths": {
+    "Archive": "DRY-RUN-ANYTLS-SENTINEL-SHOULD-NOT-EXIST",
+    "KeyDirectory": "DRY-RUN-ANYTLS-SENTINEL-SHOULD-NOT-EXIST\\key"
+  }
+}

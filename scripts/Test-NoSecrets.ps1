@@ -10,11 +10,13 @@ $excludedDirectories = @('.git', '.test-output', '.tmp', 'TestResults')
 $textExtensions = @('.ps1', '.psm1', '.psd1', '.sh', '.md', '.json', '.yml', '.yaml', '.txt', '.cmd')
 $patterns = [ordered]@{
     'Private key block' = '-----BEGIN (?:OPENSSH |RSA |EC )?PRIVATE KEY-----'
+    'ECH server key block' = '-----BEGIN ECH KEYS-----\s*[A-Za-z0-9+/=\r\n]{80,}\s*-----END ECH KEYS-----'
     'GitHub token' = '\b(?:ghp|github_pat)_[A-Za-z0-9_]{20,}\b'
     'Cloudflare tunnel token' = '\beyJ[a-zA-Z0-9_-]{40,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\b'
     'Concrete UUID' = '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b'
     'Accidental root credential file' = '(?i)(^|[\\/])root\.txt$'
     'Accidental params file' = '(?i)(^|[\\/])params\.json$'
+    'Accidental Cloudflare credential file' = '(?i)(^|[\\/])cloudflare-(?:certbot|dns|api)[^\\/]*\.(?:txt|ini)$'
 }
 
 $findings = [Collections.Generic.List[object]]::new()

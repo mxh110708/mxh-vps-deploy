@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+- 新增 `AnyTlsEntry` 角色，使用独立低权限 sing-box 服务部署 AnyTLS、公共 CA 可信 TLS 和 ECH。
+- 新增 Cloudflare DNS-01 Certbot 签发、两次每日 systemd 自动续期和证书部署 hook。
+- Reality 入口新增外部严格审计 target 与自有域名本机 HTTPS target 两种模式。
+- AnyTLS 与 Xray 通过 systemd `Conflicts` 强制互斥，避免同时占用 TCP 443。
+- AnyTLS 低权限服务仅授予绑定 443 所需的 `CAP_NET_BIND_SERVICE`，并保留路由订阅所需 `AF_NETLINK`。
+- AnyTLS 服务器直连出站不启用接口自动探测，TCP/UDP 功能测试均可在不授予 `CAP_NET_RAW` 的条件下通过；切换失败会恢复原 Xray 状态。
+- 新部署为每台实例生成并持久化保守的独立 AnyTLS padding scheme；旧计划显式回退到官方默认，客户端通过协议自动接收而无需重复配置。
+- 关闭发行版重复的 `certbot.timer`，只保留带证书部署 hook 的专用续期计时器。
+- 新增 sing-box/Mihomo AnyTLS+ECH 客户端片段、TCP/UDP、证书、ECH 和真实出口验证。
+- 已在 Debian 13 既有 Xray 主机完成 Certbot DNS-01、模拟续期、本机 HTTPS target、Reality 主/救援入口、AnyTLS TCP/UDP/ECH 与远程客户端集成测试；清理后 SSH、Xray、nftables 配置校验和保持不变。
+
 ## 0.3.1
 
 - 将 Shadowsocks 落地自测从“TCP 真实出口 + UDP 监听检查”提升为 TCP、UDP 双协议真实功能测试。

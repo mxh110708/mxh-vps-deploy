@@ -1,0 +1,75 @@
+{
+  "SchemaVersion": 2,
+  "CreatedAt": "2026-01-01T00:00:00Z",
+  "Provider": "ExampleProvider",
+  "Instance": "ExampleLocalReality",
+  "NodeName": "Example-US.LocalReality",
+  "Role": "RealityEntry",
+  "Server": {
+    "IPv4": "192.0.2.50",
+    "IPv6": "2001:db8::50",
+    "BootstrapUser": "root",
+    "BootstrapSshPort": 22,
+    "BootstrapAuth": "Password",
+    "BootstrapKeyPath": null
+  },
+  "AdminUser": "admin",
+  "Ports": {
+    "SshPrimary": 30126,
+    "SshRescue": 31237,
+    "XrayPrimary": 443,
+    "XrayBackup": 32347,
+    "AnyTlsPrimary": null,
+    "LandingShadowsocks": null
+  },
+  "Reality": {
+    "Target": "portal.example.invalid",
+    "TargetMode": "LocalOwnedTls",
+    "ServerName": "portal.example.invalid",
+    "TargetAddress": "127.0.0.1:8443",
+    "LocalHttpsPort": 8443,
+    "ForceIpv4Egress": true,
+    "TargetSamples": 20,
+    "TargetMaxMedianMs": 15,
+    "XrayVersion": "26.3.27"
+  },
+  "AnyTls": {
+    "Enabled": false,
+    "ServerName": null,
+    "EchPublicName": null,
+    "SingBoxVersion": "1.13.19",
+    "ForceIpv4Egress": true
+  },
+  "TrustedTls": {
+    "Enabled": true,
+    "ZoneName": "example.invalid",
+    "CertbotEmail": "admin@example.invalid",
+    "CloudflareTokenFile": "DRY-RUN-TOKEN-SENTINEL",
+    "AnyTlsCertificateName": "mxh-anytls",
+    "RealityCertificateName": "mxh-reality-target"
+  },
+  "Shadowsocks": {
+    "Method": "2022-blake3-aes-128-gcm",
+    "SingBoxVersion": "1.13.19",
+    "TrustedEntryIPv4s": [],
+    "TrustedEntryIPv6s": [],
+    "ClientTransitTag": null,
+    "SecondaryIpv6Enabled": false,
+    "SecondaryIpv6Address": null,
+    "SecondaryBindInterface": null
+  },
+  "NetworkTuning": {
+    "Mode": "AdaptiveConservative",
+    "BandwidthMbps": 1000,
+    "ReferenceRttMs": 160
+  },
+  "Komari": {
+    "Enabled": false,
+    "Endpoint": "https://status.example.invalid",
+    "AgentVersion": "1.2.60"
+  },
+  "Paths": {
+    "Archive": "DRY-RUN-LOCAL-REALITY-SENTINEL-SHOULD-NOT-EXIST",
+    "KeyDirectory": "DRY-RUN-LOCAL-REALITY-SENTINEL-SHOULD-NOT-EXIST\\key"
+  }
+}

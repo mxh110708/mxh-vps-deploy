@@ -60,15 +60,17 @@ jobs:
       - name: Validate conservative adaptive network template
         shell: bash
         run: |
-          env \
-            VPS_PARAM_ROLE='RealityEntry' \
-            VPS_PARAM_MEMORY_KIB='1048576' \
-            VPS_PARAM_MODE='AdaptiveConservative' \
-            VPS_PARAM_BANDWIDTH_MBPS='100' \
-            VPS_PARAM_REFERENCE_RTT_MS='160' \
-            VPS_PARAM_BUFFER_TARGET_BYTES='4000000' \
-            VPS_PARAM_BUFFER_CAP_BYTES='8388608' \
-            VPS_PARAM_QUEUE_FLOOR='1024' \
-            VPS_PARAM_PROFILE='entry-small-adaptive' \
-            VPS_PARAM_CHECK_ONLY='true' \
-            bash assets/remote/network-tuning.sh | grep -Fx 'VPSDEPLOY_NETWORK_CHECK_OK'
+          for role in RealityEntry AnyTlsEntry; do
+            env \
+              VPS_PARAM_ROLE="$role" \
+              VPS_PARAM_MEMORY_KIB='1048576' \
+              VPS_PARAM_MODE='AdaptiveConservative' \
+              VPS_PARAM_BANDWIDTH_MBPS='100' \
+              VPS_PARAM_REFERENCE_RTT_MS='160' \
+              VPS_PARAM_BUFFER_TARGET_BYTES='4000000' \
+              VPS_PARAM_BUFFER_CAP_BYTES='8388608' \
+              VPS_PARAM_QUEUE_FLOOR='1024' \
+              VPS_PARAM_PROFILE='entry-small-adaptive' \
+              VPS_PARAM_CHECK_ONLY='true' \
+              bash assets/remote/network-tuning.sh | grep -Fx 'VPSDEPLOY_NETWORK_CHECK_OK'
+          done

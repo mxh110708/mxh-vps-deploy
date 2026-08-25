@@ -2,7 +2,7 @@
     Id        = 'network-tuning'
     Name      = '按角色、内存、带宽和 RTT 应用保守网络调优'
     Order     = 60
-    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('ssh-transition')
     IsEnabled = { param($Context) $true }
     Invoke    = {

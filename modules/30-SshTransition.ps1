@@ -2,7 +2,7 @@
     Id        = 'ssh-transition'
     Name      = '过渡到初始 + 主/救援双高位 SSH'
     Order     = 30
-    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('base-system')
     IsEnabled = { param($Context) $true }
     Invoke    = {

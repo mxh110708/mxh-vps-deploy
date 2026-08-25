@@ -35,6 +35,6 @@ for port in "$VPS_PARAM_PRIMARY_PORT" "$VPS_PARAM_BACKUP_PORT"; do
 done
 
 if command -v timeout >/dev/null 2>&1; then
-  timeout 30 /usr/local/bin/xray tls ping "${VPS_PARAM_TARGET}:443" >/dev/null 2>&1 || true
+  timeout 30 /usr/local/bin/xray tls ping "$VPS_PARAM_TARGET" >/dev/null 2>&1 || true
 fi
 printf 'VPSDEPLOY_BACKUP_DIR_B64=%s\n' "$(printf '%s' "$backup_dir" | base64 | tr -d '\n')"

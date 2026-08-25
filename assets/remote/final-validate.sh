@@ -23,6 +23,42 @@ if [[ "$VPS_PARAM_ROLE" == 'RealityEntry' ]]; then
   systemctl is-active --quiet xray.service
   ss -H -lntp "sport = :${VPS_PARAM_XRAY_PRIMARY}" | grep -q xray
   ss -H -lntp "sport = :${VPS_PARAM_XRAY_BACKUP}" | grep -q xray
+  if [[ "${VPS_PARAM_REALITY_TARGET_MODE:-ExternalAudited}" == 'LocalOwnedTls' ]]; then
+    : "${VPS_PARAM_LOCAL_HTTPS_PORT:?}"
+    : "${VPS_PARAM_REALITY_SERVER_NAME:?}"
+    systemctl is-active --quiet nginx.service
+    ss -H -lntp "sport = :${VPS_PARAM_LOCAL_HTTPS_PORT}" | grep -F nginx >/dev/null
+    ! ss -H -lntp "sport = :80" | grep -F nginx >/dev/null
+    ! ss -H -lntp "sport = :443" | grep -F nginx >/dev/null
+    echo | openssl s_client -connect "127.0.0.1:${VPS_PARAM_LOCAL_HTTPS_PORT}" \
+      -servername "$VPS_PARAM_REALITY_SERVER_NAME" -alpn h2 \
+      -verify_hostname "$VPS_PARAM_REALITY_SERVER_NAME" 2>/dev/null | \
+      grep -F 'Verify return code: 0 (ok)' >/dev/null
+    systemctl is-active --quiet mxh-certbot-renew.timer
+  fi
+fi
+
+if [[ "$VPS_PARAM_ROLE" == 'AnyTlsEntry' ]]; then
+  : "${VPS_PARAM_ANYTLS_PORT:?}"
+  : "${VPS_PARAM_ANYTLS_SERVER_NAME:?}"
+  /usr/local/bin/sing-box-anytls check -c /etc/sing-box-anytls/config.json
+  python3 - /etc/sing-box-anytls/config.json <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding='utf-8') as handle:
+    config = json.load(handle)
+scheme = config['inbounds'][0].get('padding_scheme')
+assert isinstance(scheme, list) and len(scheme) >= 3
+PY
+  systemctl is-active --quiet sing-box-anytls.service
+  ! systemctl is-active --quiet xray.service
+  ss -H -lntp "sport = :${VPS_PARAM_ANYTLS_PORT}" | grep -F sing-box-anytl >/dev/null
+  openssl x509 -in /etc/mxh-tls/anytls/fullchain.pem -noout \
+    -checkhost "$VPS_PARAM_ANYTLS_SERVER_NAME" >/dev/null
+  [[ "$(stat -c '%a' /etc/sing-box-anytls/config.json)" == '640' ]]
+  [[ "$(stat -c '%a' /etc/sing-box-anytls/ech-key.pem)" == '640' ]]
+  systemctl is-active --quiet mxh-certbot-renew.timer
 fi
 
 if [[ "$VPS_PARAM_ROLE" == 'ShadowsocksLanding' ]]; then

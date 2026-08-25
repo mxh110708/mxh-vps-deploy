@@ -4,7 +4,10 @@
     Order     = 40
     Roles     = @('RealityEntry')
     Requires  = @('ssh-transition')
-    IsEnabled = { param($Context) $true }
+    IsEnabled = {
+        param($Context)
+        -not $Context.Plan.Reality.Contains('TargetMode') -or $Context.Plan.Reality.TargetMode -ne 'LocalOwnedTls'
+    }
     Invoke    = {
         param($Context)
         while ($true) {

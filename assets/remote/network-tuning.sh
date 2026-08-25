@@ -11,7 +11,7 @@ set -euo pipefail
 check_only="${VPS_PARAM_CHECK_ONLY:-false}"
 
 case "$VPS_PARAM_ROLE" in
-  RealityEntry|ShadowsocksLanding|MonitorOnly) ;;
+  RealityEntry|AnyTlsEntry|ShadowsocksLanding|MonitorOnly) ;;
   *) echo 'Invalid network tuning role.' >&2; exit 1 ;;
 esac
 case "$VPS_PARAM_MODE" in

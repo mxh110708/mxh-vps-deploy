@@ -2,7 +2,7 @@
     Id        = 'private-archive'
     Name      = '下载配置并生成最终私有归档'
     Order     = 120
-    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('ssh-cutover')
     IsEnabled = { param($Context) $true }
     Invoke    = {
@@ -16,6 +16,19 @@
         }
         if ($Context.Plan.Role -eq 'RealityEntry') {
             $downloads['/usr/local/etc/xray/config.json'] = Join-Path $serverDir 'xray-config.json'
+            if ($Context.Plan.Reality.Contains('TargetMode') -and $Context.Plan.Reality.TargetMode -eq 'LocalOwnedTls') {
+                $downloads['/etc/nginx/sites-available/mxh-reality-target'] = Join-Path $serverDir 'nginx-reality-target.conf'
+                $downloads['/etc/mxh-tls/reality-target/fullchain.pem'] = Join-Path $serverDir 'reality-target-fullchain.pem'
+                $downloads['/etc/mxh-tls/reality-target/privkey.pem'] = Join-Path $serverDir 'reality-target-privkey.private.pem'
+            }
+        }
+        elseif ($Context.Plan.Role -eq 'AnyTlsEntry') {
+            $downloads['/etc/sing-box-anytls/config.json'] = Join-Path $serverDir 'sing-box-anytls-config.private.json'
+            $downloads['/etc/sing-box-anytls/ech-key.pem'] = Join-Path $serverDir 'anytls-ech-key.private.pem'
+            $downloads['/etc/sing-box-anytls/ech-config.pem'] = Join-Path $serverDir 'anytls-ech-client-config.pem'
+            $downloads['/etc/systemd/system/sing-box-anytls.service'] = Join-Path $serverDir 'sing-box-anytls.service'
+            $downloads['/etc/mxh-tls/anytls/fullchain.pem'] = Join-Path $serverDir 'anytls-fullchain.pem'
+            $downloads['/etc/mxh-tls/anytls/privkey.pem'] = Join-Path $serverDir 'anytls-privkey.private.pem'
         }
         elseif ($Context.Plan.Role -eq 'ShadowsocksLanding') {
             $downloads['/etc/sing-box/config.json'] = Join-Path $serverDir 'sing-box-config.private.json'
@@ -28,6 +41,11 @@
             $downloads['/etc/komari-agent/config.json'] = Join-Path $serverDir 'komari-agent-config.private.json'
             $downloads['/etc/systemd/system/komari-agent.service'] = Join-Path $serverDir 'komari-agent.service'
         }
+        if ($Context.Plan.Contains('TrustedTls') -and [bool]$Context.Plan.TrustedTls.Enabled) {
+            $downloads['/etc/systemd/system/mxh-certbot-renew.service'] = Join-Path $serverDir 'mxh-certbot-renew.service'
+            $downloads['/etc/systemd/system/mxh-certbot-renew.timer'] = Join-Path $serverDir 'mxh-certbot-renew.timer'
+            $downloads['/usr/local/libexec/mxh-certbot-deploy'] = Join-Path $serverDir 'mxh-certbot-deploy'
+        }
         foreach ($remote in $downloads.Keys) {
             Invoke-VpsScpDownload -Context $Context -RemotePath $remote -LocalPath $downloads[$remote]
         }
@@ -37,11 +55,14 @@
         $bootstrapAuth = if ($Context.Plan.Server.Contains('BootstrapAuth')) { $Context.Plan.Server.BootstrapAuth } else { 'Password' }
         $bootstrapKeyPath = if ($Context.Plan.Server.Contains('BootstrapKeyPath')) { $Context.Plan.Server.BootstrapKeyPath } else { $null }
         $xrayBlock = if ($Context.Plan.Role -eq 'RealityEntry') {
+            $targetSettings = Get-MxhRealityTargetSettings -Plan $Context.Plan
 @"
 Xray Version: $($Context.Plan.Reality.XrayVersion)
 Xray Primary Port: $($Context.Plan.Ports.XrayPrimary)
 Xray Rescue Port: $($Context.Plan.Ports.XrayBackup)
-Reality Target: $($Context.Plan.Reality.Target)
+Reality Target Mode: $($targetSettings.Mode)
+Reality Target Address: $($targetSettings.TargetAddress)
+Reality Server Name: $($targetSettings.ServerName)
 UUID: $($s.Uuid)
 Reality PrivateKey: $($s.RealityPrivateKey)
 Reality ClientKey: $($s.RealityClientKey)
@@ -51,6 +72,25 @@ Reality Egress Test: $($Context.State.RealityEgressTest | ConvertTo-Json -Compre
 "@
         }
         else { 'Xray: Not installed by this deployment role.' }
+        $anyTlsBlock = if ($Context.Plan.Role -eq 'AnyTlsEntry') {
+            $anyTls = $Context.Secrets.AnyTls
+@"
+sing-box AnyTLS Version: $($Context.Plan.AnyTls.SingBoxVersion)
+AnyTLS Port: $($Context.Plan.Ports.AnyTlsPrimary)
+AnyTLS Server Name: $($Context.Plan.AnyTls.ServerName)
+ECH Public Name: $($Context.Plan.AnyTls.EchPublicName)
+AnyTLS Password: $($anyTls.Password)
+ECH Server Key PEM: $($anyTls.EchServerKeyPem)
+ECH Client Config PEM: $($anyTls.EchClientConfigPem)
+ECH Client Config Base64: $($anyTls.EchClientConfigBase64)
+Force IPv4 Egress: $($Context.Plan.AnyTls.ForceIpv4Egress)
+Padding Scheme Mode: $(if ($Context.Plan.AnyTls.Contains('PaddingSchemeMode')) { $Context.Plan.AnyTls.PaddingSchemeMode } else { 'OfficialDefault' })
+Padding Scheme: $((Get-MxhAnyTlsPaddingScheme -Plan $Context.Plan) | ConvertTo-Json -Compress)
+AnyTLS Validation: $($Context.State.AnyTls | ConvertTo-Json -Compress -Depth 8)
+AnyTLS Client Egress Test: $($Context.State.AnyTlsEgressTest | ConvertTo-Json -Compress -Depth 5)
+"@
+        }
+        else { 'AnyTLS: Not installed by this deployment role.' }
         $shadowsocksBlock = if ($Context.Plan.Role -eq 'ShadowsocksLanding') {
             $ss = $Context.Secrets.Shadowsocks
             $primaryPassword = ([string]$ss.ServerKey) + ':' + ([string]$ss.PrimaryUserKey)
@@ -105,6 +145,8 @@ SSH private key: $(Get-VpsSshKeyPath $Context)
 
 $xrayBlock
 
+$anyTlsBlock
+
 $shadowsocksBlock
 
 $networkTuningBlock
@@ -115,7 +157,7 @@ Komari Agent Version: $($Context.Plan.Komari.AgentVersion)
 
 Server config snapshots: $serverDir
 Client exports: $(Join-Path $Context.ArchivePath 'client-exports')
-Target audit: $(if ($Context.Plan.Role -eq 'RealityEntry') { Join-Path $Context.ArchivePath 'target-audit.json' } else { '<not applicable>' })
+Target audit: $(if ($Context.Plan.Role -eq 'RealityEntry' -and (-not $Context.Plan.Reality.Contains('TargetMode') -or $Context.Plan.Reality.TargetMode -ne 'LocalOwnedTls')) { Join-Path $Context.ArchivePath 'target-audit.json' } else { '<not applicable>' })
 Deployment plan: $($Context.PlanPath)
 Deployment state: $($Context.StatePath)
 Remote backup directories: $($Context.State.BackupDirectories | ConvertTo-Json -Compress -Depth 8)

@@ -2,7 +2,7 @@
     Id        = 'ssh-cutover'
     Name      = '最终关闭服务商初始 SSH 端口'
     Order     = 110
-    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('final-validation')
     IsEnabled = { param($Context) $true }
     Invoke    = {
@@ -33,6 +33,9 @@
         if ($Context.Plan.Role -eq 'RealityEntry') {
             $ports += [int]$Context.Plan.Ports.XrayPrimary
             $ports += [int]$Context.Plan.Ports.XrayBackup
+        }
+        elseif ($Context.Plan.Role -eq 'AnyTlsEntry') {
+            $ports += [int]$Context.Plan.Ports.AnyTlsPrimary
         }
         $nftParameters = @{
             TCP_PORTS = (($ports | Sort-Object -Unique) -join ',')

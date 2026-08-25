@@ -11,6 +11,9 @@
 - 分阶段迁移到主、救援两个随机高位 SSH 端口；
 - 对 REALITY target 做 TLS 1.3、h2、证书、跳转、CDN 特征与 20 次握手时延审计；
 - 固定安装 Xray 26.3.27，部署 VLESS + TCP + REALITY + Vision 主/救援入口；
+- REALITY 可改用自有域名和仅监听回环地址的静态 HTTPS target，避免把未认证流量转发到第三方共享入口；
+- 可选择互斥的 AnyTLS 入口角色，在 TCP 443 部署公共 CA 可信 TLS、ECH 和低权限 sing-box 服务；
+- 通过 Cloudflare DNS-01 与 Certbot 签发 ECDSA 证书，验证模拟续期，并用专用 systemd 计时器自动续期和热部署；
 - 可选择纯落地角色，固定安装 sing-box 1.13.19 并部署多用户 Shadowsocks 2022；
 - Shadowsocks 主 IPv4 用户和可选 IPv6 用户都会执行 HTTPS 出口及 UDP DNS 往返功能测试；
 - Shadowsocks 端口同时支持 TCP/UDP，但只允许向导中填写的可信入口 VPS 地址；
@@ -35,15 +38,16 @@ pwsh -File .\Start-VPSDeploy.ps1
 - 密码：工具不读取或保存密码，由 `ssh.exe` 自己显示密码提示；
 - 现有私钥：填写 OpenSSH 私钥文件路径，工具只用它完成一次引导并写入新生成的实例专用公钥。现有私钥内容不会复制到源码目录或上传 GitHub。
 
-部署开始前，请先在服务商安全组临时放行向导生成的两个 SSH 高位端口、443 和可选 Xray 救援端口。
+部署开始前，请先在服务商安全组临时放行向导生成的两个 SSH 高位端口。Reality 角色还需要 TCP 443 和 Xray 救援端口，AnyTLS 角色只额外需要 TCP 443；Shadowsocks 落地端口必须按可信入口地址同时限制 TCP/UDP。
 
 ## 安全边界
 
 - 源码目录和 Git 仓库内不保存任何实例信息或秘密。
-- 每台实例的计划、状态、日志、SSH 私钥、UUID、Reality 密钥、short-id、Komari 配置和客户端片段只写入：
+- 每台实例的计划、状态、日志、SSH 私钥、UUID、Reality 密钥、short-id、AnyTLS 密码、TLS 私钥、ECH 服务端密钥、Komari 配置和客户端片段只写入：
   `F:\VPS\VPS-Instances\<服务商>\<实例名>`。
 - 工具不修改 Clash Verge AppData，也不自动合并 `Clash_General.yaml` 或 `sing-box-general.json`；它只在实例私有归档中生成待审计片段。
 - Komari Token 通过隐藏输入取得，只经 SSH 标准输入传送，不写入命令行和普通日志。
+- Cloudflare API Token 从实例私有文件读取，只经 SSH 标准输入传送，并在服务器保存为 root-only 的 Certbot 凭据；Token 值不进入部署计划、普通日志或 Git。
 - 远程配置每次修改前建立带时间戳备份；失败即停止，不连续跨层“盲修”。
 - nftables 模块面向干净 VPS。已有 Docker、面板或复杂规则时必须单独审计，不能强制套用。
 
@@ -84,12 +88,37 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New -DryRun
 
 `-OnlyModule` 是维护模式，只运行指定模块及其必要检查。不要用它跳过首次部署的 SSH/防火墙安全顺序。
 
+## Reality target 与 AnyTLS 的选择
+
+入口协议在向导中三选一使用，不叠加占用 443：
+
+- Reality + 外部 target：保留经过严格实测的大学、机构或成熟企业站点，不需要自有证书；
+- Reality + 本机 target：Certbot 为自有域名签发证书，nginx 只监听 `127.0.0.1/[::1]:8443`，Xray 的未认证回落只到本机；
+- AnyTLS + 可信 TLS + ECH：独立低权限 sing-box 服务监听 TCP 443，Xray 会停止并禁用，二者由 systemd `Conflicts` 保证互斥。
+
+AnyTLS 的 padding 只配置在服务端。新部署计划会生成一组每实例不同、范围保守且长期固定的 `PerInstanceConservativeV1` 方案；客户端首次会话使用协议默认值，随后自动接收服务端方案，因此 Mihomo 和 sing-box 客户端片段不重复填写 padding。旧计划没有该字段时显式使用官方默认方案。不要为了“更随机”随意扩大到超大分包范围；修改后必须重新做 TCP、UDP 和真实出口测试。
+
+本机 Reality target 更容易控制回落流量，代价是伪装内容和域名由自己维护；外部 target 的站点外观更自然，但需要持续复核 CDN、证书、延迟与握手稳定性。工具不把两种方案宣称为“绝对抗封锁”，应根据网络环境选择。
+
+### Cloudflare 与 Certbot 准备
+
+需要可信 TLS 的角色，先完成以下准备：
+
+1. 在 Cloudflare 创建 DNS-only（灰云）的 A/AAAA 记录。AnyTLS 使用两个不同名称：内部证书/SNI 域名和 ECH public name；本机 Reality target 使用一个独立域名。
+2. 创建只作用于该 Zone 的 API Token：`Zone / DNS / Edit` 与 `Zone / Zone / Read`。不要使用 Global API Key 或 Origin CA Key。
+3. 如设置客户端 IP 白名单，必须包含实际运行 Certbot 的每台 VPS 公网出口地址；地址变化前先更新 Token，否则自动续期会失败。
+4. 将 Token 作为唯一一行保存到实例私有归档中的 `cloudflare-certbot-token.private.txt`，不要粘贴到聊天、源码或公开文档。
+5. 准备有效的 ACME 联系邮箱。Certbot 是本工具采用的 ACME 客户端；文件或旧 Token 名称中出现 `acme` 不代表部署了另一个证书程序。
+
+Certbot 安装在实际持有证书的每台 VPS 上。脚本会申请 ECDSA P-256 证书、执行 staging 模拟续期、关闭发行版的重复 `certbot.timer`，并启用 `mxh-certbot-renew.timer` 每日两次运行。续期成功后，部署 hook 会以原子方式复制证书并重启 AnyTLS 或 reload 本机 nginx target。
+
 ## 当前明确不自动处理的内容
 
 - 服务商网页安全组、VNC/救援控制台；
 - 已有 Docker、3x-ui/s-ui、复杂 nftables 或生产服务的主机；
 - 服务商专有的附加 IPv6 获取脚本、策略路由或网络命名空间；
-- AnyTLS/Hysteria 等其他备用协议；
+- Hysteria 等其他备用协议；
+- 同一台 VPS 上同时运行 Xray Reality 与 AnyTLS，或让两者同时占用 TCP 443；
 - 对权威 Clash/sing-box 多节点配置的自动合并；
 - Cloudflare Tunnel Token、Komari 主控和数据库迁移。
 

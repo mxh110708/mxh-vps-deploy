@@ -52,6 +52,10 @@ Assert-True ($modules[-1].Id -eq 'private-archive') 'archive last'
 Assert-True ('ssh-cutover' -in $modules.Id) 'safe SSH cutover module exists'
 Assert-True ('sing-box-shadowsocks' -in $modules.Id) 'Shadowsocks server module exists'
 Assert-True ('landing-client-export' -in $modules.Id) 'Shadowsocks client export module exists'
+Assert-True ('certbot-dns' -in $modules.Id) 'Certbot DNS-01 module exists'
+Assert-True ('local-https-target' -in $modules.Id) 'local Reality HTTPS target module exists'
+Assert-True ('sing-box-anytls' -in $modules.Id) 'AnyTLS trusted TLS server module exists'
+Assert-True ('anytls-client-export' -in $modules.Id) 'AnyTLS client export module exists'
 $shadowsocksSelfTest = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\shadowsocks-self-test.sh')
 Assert-True ($shadowsocksSelfTest -match 'VPSDEPLOY_UDP_B64') 'Shadowsocks self-test reports functional UDP result'
 Assert-True ($shadowsocksSelfTest -match '"type": "direct"') 'Shadowsocks self-test creates a UDP tunnel inbound'
@@ -61,6 +65,22 @@ Assert-True ($externalProbe -match 'sha256sum --check --status') 'external Shado
 Assert-True ($externalProbe -match 'VPS_PARAM_SELF_TEST_SCRIPT') 'external probe reuses the canonical TCP/UDP self-test'
 $singBoxInstaller = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\sing-box-install.sh')
 Assert-True ($singBoxInstaller -match 'RestrictAddressFamilies=[^\r\n]*AF_NETLINK') 'sing-box systemd sandbox permits route-update netlink'
+$anyTlsInstaller = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\sing-box-anytls-install.sh')
+Assert-True ($anyTlsInstaller -match 'Conflicts=xray\.service') 'AnyTLS and Xray services are mutually exclusive'
+Assert-True ($anyTlsInstaller -match 'RestrictAddressFamilies=[^\r\n]*AF_NETLINK') 'AnyTLS sandbox permits route-update netlink'
+Assert-True ($anyTlsInstaller -match 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE') 'AnyTLS receives only the privileged-port bind capability'
+Assert-True ($anyTlsInstaller -notmatch '(?m)^User=root$') 'AnyTLS never runs as root'
+$certbotSetup = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\certbot-dns-setup.sh')
+Assert-True ($certbotSetup -match 'dns-cloudflare') 'Certbot uses Cloudflare DNS-01 plugin'
+Assert-True ($certbotSetup -match 'mxh-certbot-renew\.timer') 'Certbot renewal timer is installed'
+Assert-True ($certbotSetup -match 'disable --now certbot\.timer') 'distribution Certbot timer is disabled to avoid duplicate renewal owners'
+Assert-True ($certbotSetup -notmatch 'echo\s+.*CLOUDFLARE_TOKEN') 'Certbot setup never prints the Cloudflare token'
+$anyTlsApply = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\anytls-apply-config.sh')
+Assert-True ($anyTlsApply -match "rollback_needed='yes'") 'AnyTLS cutover arms automatic rollback'
+Assert-True ($anyTlsApply -match 'systemctl start xray\.service') 'AnyTLS cutover restores an originally active Xray service on failure'
+$localHttpsSetup = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\local-https-target.sh')
+Assert-True ($localHttpsSetup -match 'mask nginx\.service') 'nginx is masked while the package default site could start'
+Assert-True ($localHttpsSetup -match 'unmask nginx\.service') 'nginx is unmasked only after package installation checks'
 
 Write-Host '== Bootstrap authentication arguments ==' -ForegroundColor Cyan
 $sshArgumentContext = [pscustomobject]@{
@@ -121,6 +141,18 @@ $serverConfig = New-MxhXrayServerConfig -Context $fixtureContext
 $serverConfigRoundTrip = $serverConfig | ConvertTo-Json -Depth 30 | ConvertFrom-Json
 Assert-True (@($serverConfigRoundTrip.routing.rules).Count -eq 1) 'Xray routing rules remain a JSON array with one rule'
 Assert-True ($serverConfigRoundTrip.routing.rules[0].outboundTag -eq 'block') 'Xray IPv6 egress block rule preserved'
+$localRealityPlan = [ordered]@{
+    Reality = [ordered]@{
+        Target = 'portal.example.invalid'
+        TargetMode = 'LocalOwnedTls'
+        ServerName = 'portal.example.invalid'
+        TargetAddress = '127.0.0.1:8443'
+    }
+}
+$localRealityTarget = Get-MxhRealityTargetSettings -Plan $localRealityPlan
+Assert-True ($localRealityTarget.Mode -eq 'LocalOwnedTls') 'local Reality target mode is preserved'
+Assert-True ($localRealityTarget.TargetAddress -eq '127.0.0.1:8443') 'local Reality target never loops to public 443'
+Assert-True ($localRealityTarget.ServerName -eq 'portal.example.invalid') 'local Reality SNI uses owned domain'
 [IO.Directory]::Delete($fixtureRoot, $true)
 
 Write-Host '== Shadowsocks landing fixture ==' -ForegroundColor Cyan
@@ -172,6 +204,56 @@ Assert-True (($landingOutbounds.outbounds[0].password -split ':').Count -eq 2) '
 Assert-True ($landingOutbounds.outbounds[0].detour -eq 'US-West Entry') 'sing-box detour points to transit tag'
 [IO.Directory]::Delete($landingFixtureRoot, $true)
 
+Write-Host '== AnyTLS trusted TLS and ECH fixture ==' -ForegroundColor Cyan
+$generatedPadding = @(New-MxhAnyTlsPaddingScheme)
+Assert-True ($generatedPadding.Count -eq 9) 'per-instance AnyTLS padding has stop plus packet 0-7 rules'
+Assert-True ($generatedPadding[0] -eq 'stop=8') 'conservative AnyTLS padding stops after the initial packet window'
+Assert-True (@($generatedPadding | Where-Object { $_ -notmatch '^(?:stop=8|[0-7]=[0-9,c-]+)$' }).Count -eq 0) 'generated AnyTLS padding uses valid restricted syntax'
+$paddingNumbers = @([regex]::Matches(($generatedPadding -join ','), '\d+') | ForEach-Object { [int]$_.Value })
+Assert-True (($paddingNumbers | Measure-Object -Maximum).Maximum -le 1100) 'generated AnyTLS padding stays below conservative plaintext maximum'
+$legacyPadding = @(Get-MxhAnyTlsPaddingScheme -Plan ([ordered]@{ AnyTls = [ordered]@{} }))
+Assert-True ($legacyPadding[2] -eq '1=100-400') 'legacy AnyTLS plans fall back to the official padding scheme'
+$fakeEchConfig = "-----BEGIN ECH CONFIGS-----`nQUJDRA==`n-----END ECH CONFIGS-----`n"
+$fakeEchKeys = "-----BEGIN ECH KEYS-----`nRUZHSA==`n-----END ECH KEYS-----`n"
+$parsedEch = ConvertFrom-MxhEchKeyPairText -Text ($fakeEchConfig + $fakeEchKeys)
+Assert-True ($parsedEch.ClientConfigBase64 -eq 'QUJDRA==') 'ECH client base64 is extracted without headers'
+$anyTlsContext = [pscustomobject]@{
+    Plan = [ordered]@{
+        NodeName = 'Example-US.AnyTLS'
+        Server = [ordered]@{ IPv4 = '192.0.2.40'; IPv6 = '2001:db8::40' }
+        Ports = [ordered]@{ AnyTlsPrimary = 443 }
+        AnyTls = [ordered]@{
+            ServerName = 'edge.example.invalid'
+            EchPublicName = 'www.example.invalid'
+            ForceIpv4Egress = $true
+            PaddingSchemeMode = 'PerInstanceConservativeV1'
+            PaddingScheme = $generatedPadding
+        }
+    }
+    Secrets = [ordered]@{
+        AnyTls = [ordered]@{
+            Password = [Convert]::ToBase64String([byte[]](49..80))
+            EchServerKeyPem = $fakeEchKeys
+            EchClientConfigPem = $fakeEchConfig
+            EchClientConfigBase64 = $parsedEch.ClientConfigBase64
+        }
+    }
+}
+$anyTlsServerConfig = New-MxhAnyTlsServerConfig -Context $anyTlsContext
+$anyTlsRoundTrip = $anyTlsServerConfig | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+Assert-True ($anyTlsRoundTrip.inbounds[0].type -eq 'anytls') 'AnyTLS server inbound generated'
+Assert-True ($anyTlsRoundTrip.inbounds[0].tls.min_version -eq '1.3') 'AnyTLS requires TLS 1.3'
+Assert-True ($anyTlsRoundTrip.inbounds[0].tls.ech.enabled) 'AnyTLS server ECH enabled'
+Assert-True ((@($anyTlsRoundTrip.inbounds[0].padding_scheme) -join "`n") -eq ($generatedPadding -join "`n")) 'AnyTLS server preserves the per-instance padding scheme'
+Assert-True (@($anyTlsRoundTrip.route.rules).Count -eq 1) 'AnyTLS IPv4-only rule remains an array'
+$anyTlsClient = New-MxhAnyTlsClientOutbound -Context $anyTlsContext -Server '192.0.2.40' -Tag 'anytls-out'
+Assert-True ($anyTlsClient.tls.ech.enabled) 'sing-box AnyTLS client ECH enabled'
+Assert-True (-not $anyTlsClient.tls.Contains('insecure')) 'sing-box AnyTLS client does not disable certificate verification'
+$anyTlsMihomo = New-MxhAnyTlsMihomoProfileText -Context $anyTlsContext -MixedPort 17894
+Assert-True ($anyTlsMihomo -match 'type: anytls') 'Mihomo AnyTLS profile generated'
+Assert-True ($anyTlsMihomo -match 'skip-cert-verify: false') 'Mihomo AnyTLS keeps certificate verification enabled'
+Assert-True ($anyTlsMihomo -match 'ech-opts:') 'Mihomo AnyTLS profile includes ECH'
+
 Write-Host '== Conservative adaptive network planning ==' -ForegroundColor Cyan
 $entrySmall = Get-VpsConservativeNetworkPlan -Role RealityEntry -MemoryKiB 1048576 `
     -Mode AdaptiveConservative -BandwidthMbps 1000 -ReferenceRttMs 160
@@ -187,6 +269,10 @@ $landingSmall = Get-VpsConservativeNetworkPlan -Role ShadowsocksLanding -MemoryK
     -Mode AdaptiveConservative -BandwidthMbps 1000 -ReferenceRttMs 5
 Assert-True ($landingSmall.BufferTargetBytes -eq 1250000) 'nearby landing uses entry-to-landing RTT BDP'
 Assert-True ($landingSmall.QueueFloor -eq 2048) 'landing queue floor reflects fan-in role'
+$anyTlsSmall = Get-VpsConservativeNetworkPlan -Role AnyTlsEntry -MemoryKiB 1048576 `
+    -Mode AdaptiveConservative -BandwidthMbps 1000 -ReferenceRttMs 160
+Assert-True ($anyTlsSmall.Profile -eq 'entry-small-adaptive') 'AnyTLS uses conservative entry tuning profile'
+Assert-True ($anyTlsSmall.BufferCapBytes -eq 8MB) 'AnyTLS entry respects memory cap'
 $monitor = Get-VpsConservativeNetworkPlan -Role MonitorOnly -MemoryKiB 1048576 -Mode BaselineOnly
 Assert-True ($monitor.BufferTargetBytes -eq 0) 'monitor baseline does not tune buffers'
 Assert-True ($monitor.QueueFloor -eq 0) 'monitor baseline does not pin proxy queues'
@@ -255,6 +341,27 @@ finally {
     Pop-Location
 }
 Assert-True (-not (Test-Path -LiteralPath $landingDryRunArchive)) 'landing dry run creates no instance data'
+
+foreach ($case in @(
+        @{ Name = 'anytls'; Fixture = 'dry-run-anytls-plan.json'; Sentinel = 'DRY-RUN-ANYTLS-SENTINEL-SHOULD-NOT-EXIST' },
+        @{ Name = 'local Reality'; Fixture = 'dry-run-local-reality-plan.json'; Sentinel = 'DRY-RUN-LOCAL-REALITY-SENTINEL-SHOULD-NOT-EXIST' }
+    )) {
+    $sentinel = Join-Path $ProjectRoot $case.Sentinel
+    if (Test-Path -LiteralPath $sentinel) { throw "Dry-run sentinel path already exists: $sentinel" }
+    Push-Location $ProjectRoot
+    try {
+        Start-VpsDeploy -ProjectRoot $ProjectRoot -Mode Resume `
+            -PlanPath (Join-Path $ProjectRoot (Join-Path 'tests\fixtures' $case.Fixture)) -DryRun -NonInteractive
+    }
+    finally { Pop-Location }
+    Assert-True (-not (Test-Path -LiteralPath $sentinel)) "$($case.Name) dry run creates no instance data"
+}
+
+$testOutputRoot = Join-Path $ProjectRoot '.test-output'
+if (Test-Path -LiteralPath $testOutputRoot) {
+    $remainingTestOutput = @(Get-ChildItem -LiteralPath $testOutputRoot -Force)
+    if ($remainingTestOutput.Count -eq 0) { [IO.Directory]::Delete($testOutputRoot, $false) }
+}
 
 Write-Host '== Secret scan ==' -ForegroundColor Cyan
 & (Join-Path $ProjectRoot 'scripts\Test-NoSecrets.ps1') -ProjectRoot $ProjectRoot

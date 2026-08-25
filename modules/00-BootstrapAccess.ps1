@@ -2,7 +2,7 @@
     Id        = 'bootstrap-access'
     Name      = '建立本机独立 SSH 公钥入口'
     Order     = 0
-    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly', 'AuditOnly')
+    Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly', 'AuditOnly')
     Requires  = @()
     IsEnabled = { param($Context) $true }
     Invoke    = {

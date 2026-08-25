@@ -139,9 +139,70 @@ function Get-VpsRandomPort {
     throw '无法生成不冲突的高位端口。'
 }
 
+function Get-MxhAnyTlsOfficialPaddingScheme {
+    return @(
+        'stop=8',
+        '0=30-30',
+        '1=100-400',
+        '2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000',
+        '3=9-9,500-1000',
+        '4=500-1000',
+        '5=500-1000',
+        '6=500-1000',
+        '7=500-1000'
+    )
+}
+
+function New-MxhAnyTlsPaddingScheme {
+    [CmdletBinding()]
+    param()
+
+    # Keep the reference scheme's initial eight-write shape while varying each
+    # instance once.  The 1100-byte ceiling leaves room below a typical MTU
+    # after TLS/TCP/IP overhead and avoids turning fingerprint variation into a
+    # throughput or fragmentation experiment.
+    $newRange = {
+        param([int]$LowMinimum, [int]$LowMaximum, [int]$HighMinimum, [int]$HighMaximum)
+        $low = [Security.Cryptography.RandomNumberGenerator]::GetInt32($LowMinimum, $LowMaximum + 1)
+        $highFloor = [Math]::Max($low, $HighMinimum)
+        $high = [Security.Cryptography.RandomNumberGenerator]::GetInt32($highFloor, $HighMaximum + 1)
+        return "$low-$high"
+    }
+    $newLargeRange = { & $newRange 480 600 800 1100 }
+    $packet2 = @(
+        (& $newRange 384 464 480 576),
+        (& $newLargeRange),
+        (& $newLargeRange),
+        (& $newLargeRange),
+        (& $newLargeRange)
+    )
+    return @(
+        'stop=8',
+        "0=$(& $newRange 24 48 48 80)",
+        "1=$(& $newRange 96 160 320 448)",
+        "2=$($packet2 -join ',c,')",
+        "3=$(& $newRange 8 16 16 24),$(& $newLargeRange)",
+        "4=$(& $newLargeRange)",
+        "5=$(& $newLargeRange)",
+        "6=$(& $newLargeRange)",
+        "7=$(& $newLargeRange)"
+    )
+}
+
+function Get-MxhAnyTlsPaddingScheme {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Plan)
+
+    if ($Plan.Contains('AnyTls') -and $Plan.AnyTls.Contains('PaddingScheme')) {
+        $configured = @($Plan.AnyTls.PaddingScheme | ForEach-Object { [string]$_ } | Where-Object { $_ })
+        if ($configured.Count -gt 0) { return $configured }
+    }
+    return @(Get-MxhAnyTlsOfficialPaddingScheme)
+}
+
 function Read-VpsNetworkTuningSettings {
     [CmdletBinding()]
-    param([Parameter(Mandatory)] [ValidateSet('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')] [string]$Role)
+    param([Parameter(Mandatory)] [ValidateSet('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')] [string]$Role)
 
     if ($Role -eq 'MonitorOnly') {
         return [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
@@ -155,7 +216,7 @@ function Read-VpsNetworkTuningSettings {
             $n = 0
             [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 100000
         } -ValidationMessage '请输入 1–100000 之间的整数 Mbps。')
-    $rttPrompt = if ($Role -eq 'RealityEntry') {
+    $rttPrompt = if ($Role -in @('RealityEntry', 'AnyTlsEntry')) {
         '主要使用地到该入口 VPS 的典型 RTT（ms）'
     }
     else {
@@ -176,7 +237,7 @@ function Read-VpsNetworkTuningSettings {
 function Get-VpsConservativeNetworkPlan {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [ValidateSet('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')] [string]$Role,
+        [Parameter(Mandatory)] [ValidateSet('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')] [string]$Role,
         [Parameter(Mandatory)] [long]$MemoryKiB,
         [ValidateSet('BaselineOnly', 'AdaptiveConservative')] [string]$Mode = 'BaselineOnly',
         [int]$BandwidthMbps = 0,
@@ -203,11 +264,13 @@ function Get-VpsConservativeNetworkPlan {
     }
     $roleSlug = switch ($Role) {
         'RealityEntry' { 'entry' }
+        'AnyTlsEntry' { 'entry' }
         'ShadowsocksLanding' { 'landing' }
         default { 'monitor' }
     }
     $queueFloor = switch ($Role) {
         'RealityEntry' { 1024 }
+        'AnyTlsEntry' { 1024 }
         'ShadowsocksLanding' { 2048 }
         default { 0 }
     }
@@ -218,7 +281,7 @@ function Get-VpsConservativeNetworkPlan {
         if ($BandwidthMbps -lt 1 -or $BandwidthMbps -gt 100000) { throw '标称带宽必须在 1–100000 Mbps。' }
         if ($ReferenceRttMs -lt 1 -or $ReferenceRttMs -gt 2000) { throw '参考 RTT 必须在 1–2000 ms。' }
         $bdpBytes = [long]$BandwidthMbps * [long]$ReferenceRttMs * 125L
-        $minimum = if ($Role -eq 'RealityEntry') { 2MB } else { 1MB }
+        $minimum = if ($Role -in @('RealityEntry', 'AnyTlsEntry')) { 2MB } else { 1MB }
         $wanted = [Math]::Max([long]$minimum, $bdpBytes * 2L)
         $bufferTarget = [Math]::Min([long]$bufferCap, [long]$wanted)
     }
@@ -340,11 +403,12 @@ function New-VpsInteractivePlan {
 
     $roleChoice = Read-VpsMenu '这台 VPS 的部署角色' @(
         'Reality 入口节点（推荐）',
+        'AnyTLS + 可信 TLS + ECH 入口节点',
         'Shadowsocks 2022 纯落地节点',
         '仅 SSH/防火墙/Komari 监控',
         '只读审计，不做变更'
     ) 1
-    $role = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly', 'AuditOnly')[$roleChoice - 1]
+    $role = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly', 'AuditOnly')[$roleChoice - 1]
 
     $adminUser = Read-VpsText '日常管理用户' -Default 'admin' `
         -Validate { param($v) $v -match '^[a-z_][a-z0-9_-]{0,30}$' -and $v -ne 'root' } `
@@ -378,16 +442,72 @@ function New-VpsInteractivePlan {
         }
     }
 
+    $archivePath = Join-Path (Join-Path $InstanceRoot $provider) $instance
     $target = $null
+    $targetMode = 'ExternalAudited'
+    $realityServerName = $null
+    $realityTargetAddress = $null
+    $localHttpsPort = 8443
+    $anyTlsServerName = $null
+    $echPublicName = $null
+    $anyTlsPaddingScheme = @()
+    $trustedTlsEnabled = $false
+    $certbotEmail = $null
+    $cloudflareTokenFile = $null
+    $cloudflareZoneName = $null
     $forceIpv4 = $true
     if ($role -eq 'RealityEntry') {
-        $target = Read-VpsText 'REALITY target（只填域名，不含 https://）' `
-            -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入规范域名。'
-        Write-VpsUi 'target 应是预期长期运营的大学、机构或成熟企业网站，不能只凭品牌或一次 ping 判断。' Warning
-        if (-not (Read-VpsYesNo '你确认该候选不是个人小站，并允许脚本从 VPS 严格审计？' $true)) {
-            throw '用户取消：请准备更合适的 REALITY target 后重试。'
+        $targetModeChoice = Read-VpsMenu 'REALITY target 模式' @(
+            '外部大学/机构/企业 target（严格审计）',
+            '自有域名 + 本机静态 HTTPS target'
+        ) 1
+        if ($targetModeChoice -eq 2) {
+            $targetMode = 'LocalOwnedTls'
+            $target = Read-VpsText '本机 HTTPS target 域名（只填域名）' `
+                -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入规范域名。'
+            $realityServerName = $target
+            $realityTargetAddress = "127.0.0.1:$localHttpsPort"
+            $trustedTlsEnabled = $true
+            Write-VpsUi 'Xray 将回落到 127.0.0.1 的静态 HTTPS 服务，不会把自有域名解析回公网 443。' Info
+        }
+        else {
+            $target = Read-VpsText 'REALITY target（只填域名，不含 https://）' `
+                -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入规范域名。'
+            $realityServerName = $target
+            $realityTargetAddress = "${target}:443"
+            Write-VpsUi 'target 应是预期长期运营的大学、机构或成熟企业网站，不能只凭品牌或一次 ping 判断。' Warning
+            if (-not (Read-VpsYesNo '你确认该候选不是个人小站，并允许脚本从 VPS 严格审计？' $true)) {
+                throw '用户取消：请准备更合适的 REALITY target 后重试。'
+            }
         }
         $forceIpv4 = Read-VpsYesNo '是否强制代理网站流量从 VPS IPv4 出口？' $true
+    }
+    elseif ($role -eq 'AnyTlsEntry') {
+        $anyTlsServerName = Read-VpsText 'AnyTLS 证书域名/内部 SNI（只填域名）' `
+            -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入规范域名。'
+        $echPublicName = Read-VpsText 'ECH 对外 public name（必须与内部 SNI 不同）' `
+            -Validate { param($v) (Test-VpsHostName $v) -and $v -ne $anyTlsServerName } `
+            -ValidationMessage '请输入另一个规范域名，不能与 AnyTLS 内部 SNI 相同。'
+        $trustedTlsEnabled = $true
+        $anyTlsPaddingScheme = @(New-MxhAnyTlsPaddingScheme)
+        $forceIpv4 = Read-VpsYesNo '是否强制代理网站流量从 VPS IPv4 出口？' $true
+    }
+
+    if ($trustedTlsEnabled) {
+        $domainForZone = if ($role -eq 'AnyTlsEntry') { $anyTlsServerName } else { $realityServerName }
+        $labels = @($domainForZone -split '\.')
+        $suggestedZone = if ($labels.Count -ge 2) { ($labels[-2..-1] -join '.') } else { $domainForZone }
+        $cloudflareZoneName = Read-VpsText 'Cloudflare Zone 根域名' -Default $suggestedZone `
+            -Validate ${function:Test-VpsHostName} -ValidationMessage '请输入 Cloudflare 中的完整根域名。'
+        $certbotEmail = Read-VpsText 'ACME/Let''s Encrypt 联系邮箱' -Validate {
+            param($v) $v -match '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+        } -ValidationMessage '请输入有效邮箱地址。'
+        $defaultTokenPath = Join-Path $archivePath 'cloudflare-certbot-token.private.txt'
+        $cloudflareTokenFile = Read-VpsText 'Cloudflare Certbot Token 本地私有文件' -Default $defaultTokenPath `
+            -Validate { param($v) Test-Path -LiteralPath $v -PathType Leaf } `
+            -ValidationMessage '找不到 Token 文件；请先保存到实例私有归档。'
+        $cloudflareTokenFile = (Resolve-Path -LiteralPath $cloudflareTokenFile).Path
+        Write-VpsUi 'Token 只会通过 SSH 标准输入传到服务器 root-only 凭据文件，不写入计划、日志或 Git。' Info
     }
 
     $trustedEntryIps = [ordered]@{ IPv4 = @(); IPv6 = @() }
@@ -420,7 +540,7 @@ function New-VpsInteractivePlan {
         Write-VpsUi '落地端口不会向全网开放；nftables 仅允许上面填写的可信入口 IP 访问 TCP+UDP。' Warning
     }
 
-    $networkTuning = if ($role -in @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')) {
+    $networkTuning = if ($role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')) {
         Read-VpsNetworkTuningSettings -Role $role
     }
     else {
@@ -437,13 +557,12 @@ function New-VpsInteractivePlan {
         }
     }
 
-    $archivePath = Join-Path (Join-Path $InstanceRoot $provider) $instance
     $existingPlan = Join-Path $archivePath 'deployment-plan.json'
     if (Test-Path -LiteralPath $existingPlan) {
         throw "该实例已有部署计划：${existingPlan}。请使用【继续未完成部署】，不要新建覆盖。"
     }
     return [ordered]@{
-        SchemaVersion = 1
+        SchemaVersion = 2
         CreatedAt = (Get-Date).ToString('o')
         Provider = $provider
         Instance = $instance
@@ -463,14 +582,36 @@ function New-VpsInteractivePlan {
             SshRescue = $sshRescue
             XrayPrimary = 443
             XrayBackup = if ($role -eq 'RealityEntry') { $xrayBackup } else { $null }
+            AnyTlsPrimary = if ($role -eq 'AnyTlsEntry') { 443 } else { $null }
             LandingShadowsocks = if ($role -eq 'ShadowsocksLanding') { $landingPort } else { $null }
         }
         Reality = [ordered]@{
             Target = $target
+            TargetMode = $targetMode
+            ServerName = $realityServerName
+            TargetAddress = $realityTargetAddress
+            LocalHttpsPort = $localHttpsPort
             ForceIpv4Egress = $forceIpv4
             TargetSamples = [int]$versions.target_audit.samples
             TargetMaxMedianMs = [int]$versions.target_audit.maximum_median_ms
             XrayVersion = $versions.xray.version
+        }
+        AnyTls = [ordered]@{
+            Enabled = ($role -eq 'AnyTlsEntry')
+            ServerName = $anyTlsServerName
+            EchPublicName = $echPublicName
+            SingBoxVersion = $versions.sing_box.version
+            ForceIpv4Egress = $forceIpv4
+            PaddingSchemeMode = if ($role -eq 'AnyTlsEntry') { 'PerInstanceConservativeV1' } else { $null }
+            PaddingScheme = @($anyTlsPaddingScheme)
+        }
+        TrustedTls = [ordered]@{
+            Enabled = $trustedTlsEnabled
+            ZoneName = $cloudflareZoneName
+            CertbotEmail = $certbotEmail
+            CloudflareTokenFile = $cloudflareTokenFile
+            AnyTlsCertificateName = 'mxh-anytls'
+            RealityCertificateName = 'mxh-reality-target'
         }
         Shadowsocks = [ordered]@{
             Method = '2022-blake3-aes-128-gcm'
@@ -1006,13 +1147,37 @@ function Invoke-VpsScpDownload {
     Protect-VpsPrivateFile -Path $LocalPath
 }
 
+function Get-MxhRealityTargetSettings {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Plan)
+
+    $targetMode = if ($Plan.Reality.Contains('TargetMode') -and $Plan.Reality.TargetMode) {
+        [string]$Plan.Reality.TargetMode
+    }
+    else { 'ExternalAudited' }
+    $serverName = if ($Plan.Reality.Contains('ServerName') -and $Plan.Reality.ServerName) {
+        [string]$Plan.Reality.ServerName
+    }
+    else { [string]$Plan.Reality.Target }
+    $targetAddress = if ($Plan.Reality.Contains('TargetAddress') -and $Plan.Reality.TargetAddress) {
+        [string]$Plan.Reality.TargetAddress
+    }
+    else { "$([string]$Plan.Reality.Target):443" }
+    return [ordered]@{
+        Mode = $targetMode
+        ServerName = $serverName
+        TargetAddress = $targetAddress
+    }
+}
+
 function New-MxhXrayInbound {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$Tag,
         [Parameter(Mandatory)] [int]$Port,
         [Parameter(Mandatory)] [Collections.IDictionary]$Secrets,
-        [Parameter(Mandatory)] [string]$Target
+        [Parameter(Mandatory)] [string]$TargetAddress,
+        [Parameter(Mandatory)] [string]$ServerName
     )
     return [ordered]@{
         tag = $Tag
@@ -1032,9 +1197,9 @@ function New-MxhXrayInbound {
             security = 'reality'
             realitySettings = [ordered]@{
                 show = $false
-                target = "${Target}:443"
+                target = $TargetAddress
                 xver = 0
-                serverNames = @($Target)
+                serverNames = @($ServerName)
                 privateKey = $Secrets.RealityPrivateKey
                 shortIds = @($Secrets.ShortId)
             }
@@ -1047,10 +1212,10 @@ function New-MxhXrayServerConfig {
     param([Parameter(Mandatory)] $Context)
 
     $xraySecrets = $Context.Secrets.Xray
-    $target = [string]$Context.Plan.Reality.Target
+    $target = Get-MxhRealityTargetSettings -Plan $Context.Plan
     $inbounds = @(
-        (New-MxhXrayInbound -Tag 'reality-primary' -Port ([int]$Context.Plan.Ports.XrayPrimary) -Secrets $xraySecrets -Target $target),
-        (New-MxhXrayInbound -Tag 'reality-backup' -Port ([int]$Context.Plan.Ports.XrayBackup) -Secrets $xraySecrets -Target $target)
+        (New-MxhXrayInbound -Tag 'reality-primary' -Port ([int]$Context.Plan.Ports.XrayPrimary) -Secrets $xraySecrets -TargetAddress $target.TargetAddress -ServerName $target.ServerName),
+        (New-MxhXrayInbound -Tag 'reality-backup' -Port ([int]$Context.Plan.Ports.XrayBackup) -Secrets $xraySecrets -TargetAddress $target.TargetAddress -ServerName $target.ServerName)
     )
     $directSettings = if ($Context.Plan.Reality.ForceIpv4Egress) { [ordered]@{ domainStrategy = 'ForceIPv4' } } else { @{} }
     [object[]]$routingRules = @()
@@ -1075,6 +1240,127 @@ function New-MxhRandomBase64Key {
     $bytes = [byte[]]::new($Length)
     [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
     return [Convert]::ToBase64String($bytes)
+}
+
+function ConvertFrom-MxhEchKeyPairText {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string]$Text)
+
+    $configMatch = [regex]::Match($Text, '(?s)(-----BEGIN ECH CONFIGS-----\s+.+?\s+-----END ECH CONFIGS-----)')
+    $keyMatch = [regex]::Match($Text, '(?s)(-----BEGIN ECH KEYS-----\s+.+?\s+-----END ECH KEYS-----)')
+    if (-not $configMatch.Success -or -not $keyMatch.Success) { throw '无法解析 sing-box ECH 密钥对输出。' }
+    $configPem = ($configMatch.Groups[1].Value -replace "`r`n", "`n").Trim() + "`n"
+    $keyPem = ($keyMatch.Groups[1].Value -replace "`r`n", "`n").Trim() + "`n"
+    $payload = (($configPem -split "`n") | Where-Object { $_ -and $_ -notmatch '^-----' }) -join ''
+    if ($payload -notmatch '^[A-Za-z0-9+/=]+$') { throw 'ECH client config 的 Base64 载荷异常。' }
+    return [ordered]@{
+        ClientConfigPem = $configPem
+        ClientConfigBase64 = $payload
+        ServerKeyPem = $keyPem
+    }
+}
+
+function New-MxhAnyTlsServerConfig {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Context)
+
+    $password = [string]$Context.Secrets.AnyTls.Password
+    if ([string]::IsNullOrWhiteSpace($password)) { throw 'AnyTLS 密码尚未生成。' }
+    $forceIpv4 = [bool]$Context.Plan.AnyTls.ForceIpv4Egress
+    $paddingScheme = @(Get-MxhAnyTlsPaddingScheme -Plan $Context.Plan)
+    $direct = [ordered]@{
+        type = 'direct'
+        tag = 'direct'
+        domain_resolver = [ordered]@{ server = 'local'; strategy = if ($forceIpv4) { 'ipv4_only' } else { 'prefer_ipv4' } }
+    }
+    [object[]]$rules = @()
+    if ($forceIpv4) {
+        $rules = ,([ordered]@{ ip_version = 6; action = 'reject' })
+    }
+    return [ordered]@{
+        log = [ordered]@{ level = 'warn'; timestamp = $true }
+        dns = [ordered]@{ servers = @([ordered]@{ type = 'local'; tag = 'local' }) }
+        inbounds = @([ordered]@{
+                type = 'anytls'
+                tag = 'anytls-in'
+                listen = if ($Context.Plan.Server.IPv6) { '::' } else { '0.0.0.0' }
+                listen_port = [int]$Context.Plan.Ports.AnyTlsPrimary
+                users = @([ordered]@{ name = 'primary'; password = $password })
+                padding_scheme = $paddingScheme
+                tls = [ordered]@{
+                    enabled = $true
+                    server_name = [string]$Context.Plan.AnyTls.ServerName
+                    min_version = '1.3'
+                    certificate_path = '/etc/mxh-tls/anytls/fullchain.pem'
+                    key_path = '/etc/mxh-tls/anytls/privkey.pem'
+                    ech = [ordered]@{
+                        enabled = $true
+                        key_path = '/etc/sing-box-anytls/ech-key.pem'
+                    }
+                }
+            })
+        outbounds = @($direct)
+        route = [ordered]@{
+            rules = $rules
+            final = 'direct'
+        }
+    }
+}
+
+function New-MxhAnyTlsClientOutbound {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] [string]$Server,
+        [Parameter(Mandatory)] [string]$Tag
+    )
+    $configPem = [string]$Context.Secrets.AnyTls.EchClientConfigPem
+    if ([string]::IsNullOrWhiteSpace($configPem)) { throw 'ECH client config 尚未生成。' }
+    return [ordered]@{
+        type = 'anytls'
+        tag = $Tag
+        server = $Server
+        server_port = [int]$Context.Plan.Ports.AnyTlsPrimary
+        password = [string]$Context.Secrets.AnyTls.Password
+        tls = [ordered]@{
+            enabled = $true
+            server_name = [string]$Context.Plan.AnyTls.ServerName
+            min_version = '1.3'
+            ech = [ordered]@{
+                enabled = $true
+                config = @($configPem.TrimEnd() -split "`n")
+            }
+        }
+    }
+}
+
+function New-MxhAnyTlsMihomoProfileText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] [int]$MixedPort
+    )
+    $nodeName = "$($Context.Plan.NodeName)-AnyTLS-IPv4"
+    $lines = [Collections.Generic.List[string]]::new()
+    foreach ($line in @(
+            "mixed-port: $MixedPort", 'allow-lan: false', 'bind-address: 127.0.0.1',
+            'mode: rule', 'log-level: warning', 'ipv6: true', '', 'proxies:',
+            "  - name: $(ConvertTo-MxhYamlString $nodeName)",
+            '    type: anytls',
+            "    server: $(ConvertTo-MxhYamlString ([string]$Context.Plan.Server.IPv4))",
+            "    port: $([int]$Context.Plan.Ports.AnyTlsPrimary)",
+            "    password: $(ConvertTo-MxhYamlString ([string]$Context.Secrets.AnyTls.Password))",
+            '    udp: true',
+            "    sni: $(ConvertTo-MxhYamlString ([string]$Context.Plan.AnyTls.ServerName))",
+            '    skip-cert-verify: false',
+            '    ech-opts:',
+            '      enable: true',
+            "      config: $(ConvertTo-MxhYamlString ([string]$Context.Secrets.AnyTls.EchClientConfigBase64))",
+            '', 'proxy-groups:',
+            "  - name: $(ConvertTo-MxhYamlString 'Proxy')", '    type: select', '    proxies:',
+            "      - $(ConvertTo-MxhYamlString $nodeName)", '', 'rules:', '  - MATCH,Proxy'
+        )) { $lines.Add($line) }
+    return ($lines -join "`n") + "`n"
 }
 
 function New-MxhShadowsocksServerConfig {
@@ -1166,6 +1452,7 @@ function New-MxhMihomoProfileText {
         [switch]$IncludeIpv6
     )
     $s = $Context.Secrets.Xray
+    $realityTarget = Get-MxhRealityTargetSettings -Plan $Context.Plan
     $nodeBase = [string]$Context.Plan.NodeName
     $node4 = "$nodeBase-IPv4"
     $lines = [Collections.Generic.List[string]]::new()
@@ -1183,7 +1470,7 @@ function New-MxhMihomoProfileText {
         $lines.Add('    network: tcp')
         $lines.Add('    tls: true')
         $lines.Add('    udp: true')
-        $lines.Add("    servername: $(ConvertTo-MxhYamlString ([string]$Context.Plan.Reality.Target))")
+        $lines.Add("    servername: $(ConvertTo-MxhYamlString ([string]$realityTarget.ServerName))")
         $lines.Add("    flow: $(ConvertTo-MxhYamlString 'xtls-rprx-vision')")
         $lines.Add("    client-fingerprint: $(ConvertTo-MxhYamlString 'chrome')")
         $lines.Add('    reality-opts:')
@@ -1415,7 +1702,15 @@ function Show-VpsPlanSummary {
     Write-Host "  初始认证：$bootstrapAuthLabel"
     Write-Host "  SSH：$($Plan.Server.BootstrapSshPort) -> $($Plan.Ports.SshPrimary) + $($Plan.Ports.SshRescue)"
     if ($Plan.Role -eq 'RealityEntry') {
-        Write-Host "  Xray：443 + $($Plan.Ports.XrayBackup)，target=$($Plan.Reality.Target)"
+        $target = Get-MxhRealityTargetSettings -Plan $Plan
+        Write-Host "  Xray：443 + $($Plan.Ports.XrayBackup)，target=$($target.TargetAddress)，SNI=$($target.ServerName)"
+    }
+    elseif ($Plan.Role -eq 'AnyTlsEntry') {
+        Write-Host "  AnyTLS：443，SNI=$($Plan.AnyTls.ServerName)，ECH public name=$($Plan.AnyTls.EchPublicName)"
+        $paddingMode = if ($Plan.AnyTls.Contains('PaddingSchemeMode') -and $Plan.AnyTls.PaddingSchemeMode) {
+            [string]$Plan.AnyTls.PaddingSchemeMode
+        } else { 'OfficialDefault' }
+        Write-Host "  Padding：$paddingMode"
     }
     elseif ($Plan.Role -eq 'ShadowsocksLanding') {
         $allowCount = @($Plan.Shadowsocks.TrustedEntryIPv4s).Count + @($Plan.Shadowsocks.TrustedEntryIPv6s).Count
@@ -1432,6 +1727,9 @@ function Show-VpsPlanSummary {
     Write-Host "  私有归档：$($Plan.Paths.Archive)"
     if ($Plan.Role -eq 'RealityEntry') {
         Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口、443 和 Xray 救援端口。' Warning
+    }
+    elseif ($Plan.Role -eq 'AnyTlsEntry') {
+        Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口和 TCP 443；AnyTLS 与 Xray 必须互斥。' Warning
     }
     elseif ($Plan.Role -eq 'ShadowsocksLanding') {
         Write-VpsUi '请放行两个 SSH 高位端口；Shadowsocks TCP+UDP 端口必须只允许上面填写的可信入口 IP。' Warning
@@ -1498,7 +1796,9 @@ Export-ModuleMember -Function @(
     'Invoke-VpsProcess', 'Get-VpsCommandPath', 'Get-VpsModules', 'Get-VpsRandomPort',
     'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',
     'Read-VpsNetworkTuningSettings', 'Get-VpsConservativeNetworkPlan',
-    'New-MxhXrayInbound', 'New-MxhXrayServerConfig', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest',
+    'Get-MxhRealityTargetSettings', 'New-MxhXrayInbound', 'New-MxhXrayServerConfig', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest',
+    'New-MxhAnyTlsPaddingScheme', 'Get-MxhAnyTlsPaddingScheme',
+    'ConvertFrom-MxhEchKeyPairText', 'New-MxhAnyTlsServerConfig', 'New-MxhAnyTlsClientOutbound', 'New-MxhAnyTlsMihomoProfileText',
     'New-MxhRandomBase64Key', 'New-MxhShadowsocksServerConfig', 'New-MxhLandingMihomoProfileText',
     'New-VpsRemoteScriptPayload'
 )

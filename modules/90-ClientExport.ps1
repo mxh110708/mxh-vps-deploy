@@ -21,6 +21,7 @@
         Protect-VpsPrivateFile $backupPath
 
         $s = $Context.Secrets.Xray
+        $realityTarget = Get-MxhRealityTargetSettings -Plan $Context.Plan
         $outbounds = [Collections.Generic.List[object]]::new()
         foreach ($entry in @(
                 @{ Tag = "$($Context.Plan.NodeName)-IPv4"; Server = [string]$Context.Plan.Server.IPv4 },
@@ -37,7 +38,7 @@
                     packet_encoding = 'xudp'
                     tls = [ordered]@{
                         enabled = $true
-                        server_name = [string]$Context.Plan.Reality.Target
+                        server_name = [string]$realityTarget.ServerName
                         utls = [ordered]@{ enabled = $true; fingerprint = 'chrome' }
                         reality = [ordered]@{
                             enabled = $true

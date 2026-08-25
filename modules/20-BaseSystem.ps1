@@ -2,7 +2,7 @@
     Id        = 'base-system'
     Name      = '安装基础工具、时间同步并创建 admin'
     Order     = 20
-    Roles     = @('RealityEntry', 'ShadowsocksLanding', 'MonitorOnly')
+    Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('audit')
     IsEnabled = { param($Context) $true }
     Invoke    = {
