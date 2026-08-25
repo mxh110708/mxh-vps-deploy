@@ -42,6 +42,15 @@ try {
     $clientPath = Join-Path $work 'client.json'
     $clientConfig = [ordered]@{
         log = [ordered]@{ level = 'warn' }
+        inbounds = @([ordered]@{
+                type = 'direct'
+                tag = 'udp-test-in'
+                listen = '127.0.0.1'
+                listen_port = 35353
+                network = 'udp'
+                override_address = '1.1.1.1'
+                override_port = 53
+            })
         outbounds = @(
             [ordered]@{ type = 'direct'; tag = 'US-West Entry' },
             [ordered]@{

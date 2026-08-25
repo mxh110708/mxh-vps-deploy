@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1
+
+- 将 Shadowsocks 落地自测从“TCP 真实出口 + UDP 监听检查”提升为 TCP、UDP 双协议真实功能测试。
+- UDP 自测通过临时本地隧道发送 DNS 报文，经 SS2022 转发后校验响应，不再把端口监听等同于 UDP 可用。
+- 部署状态和最终私有归档会分别记录主 IPv4 用户及可选 IPv6 用户的 UDP 验证结果。
+- 增加使用固定版本和固定 SHA-256 临时核心的外部入口探针，用于上线前验证真实远程 TCP/UDP，而不在入口 VPS 留下客户端程序或配置。
+- 修复 systemd `RestrictAddressFamilies` 缺少 `AF_NETLINK`，导致启用 `auto_detect_interface` 的 sing-box 通过语法检查却无法启动的问题。
+- 已在 Debian 13 的既有 Xray 主机上完成一次性集成验证：服务端与远程可信入口的 IPv4/IPv6 用户均通过 TCP、UDP 和出口族检查，卸载后原 SSH、Xray、nftables 配置校验和保持不变。
+
 ## 0.3.0
 
 - 新增按部署角色、实际内存、用户填写的标称带宽与代表性 RTT 计算的保守自适应网络调优。

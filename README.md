@@ -12,6 +12,7 @@
 - 对 REALITY target 做 TLS 1.3、h2、证书、跳转、CDN 特征与 20 次握手时延审计；
 - 固定安装 Xray 26.3.27，部署 VLESS + TCP + REALITY + Vision 主/救援入口；
 - 可选择纯落地角色，固定安装 sing-box 1.13.19 并部署多用户 Shadowsocks 2022；
+- Shadowsocks 主 IPv4 用户和可选 IPv6 用户都会执行 HTTPS 出口及 UDP DNS 往返功能测试；
 - Shadowsocks 端口同时支持 TCP/UDP，但只允许向导中填写的可信入口 VPS 地址；
 - 可选为第二个 SS2022 用户绑定独立 IPv6 源地址/网卡，实现同端口不同出口；
 - 应用最小 nftables，并按角色、内存、标称带宽和代表性 RTT 计算保守 BBR/fq 与 TCP 参数；
@@ -96,7 +97,7 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New -DryRun
 
 ## Shadowsocks 落地角色
 
-向导会要求填写允许访问落地端口的入口 VPS 公网 IP。sing-box 使用 `2022-blake3-aes-128-gcm` 多用户结构，主用户走普通 IPv4 出口；存在可用 IPv6 时，可增加第二用户并绑定指定 IPv6 地址和可选接口。
+向导会要求填写允许访问落地端口的入口 VPS 公网 IP。sing-box 使用 `2022-blake3-aes-128-gcm` 多用户结构，主用户走普通 IPv4 出口；存在可用 IPv6 时，可增加第二用户并绑定指定 IPv6 地址和可选接口。部署自测会分别验证 TCP HTTPS 出口和经 SS2022 转发的 UDP DNS 响应，避免只凭监听状态判断 UDP 可用。
 
 生成的 Mihomo 节点使用 `dialer-proxy`，sing-box 出站使用 `detour`，都指向向导填写的入口组/tag。工具只生成实例私有片段，不直接修改权威多节点配置。
 

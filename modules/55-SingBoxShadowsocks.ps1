@@ -61,7 +61,13 @@
             TEST_SERVER = $testServer
         } -TimeoutSeconds 180 -SensitiveOutput
         $primaryEgress = Get-VpsMarkerValue $primaryTest.StdOut EGRESS -Required
-        $testState = [ordered]@{ PrimaryIpv4Egress = $primaryEgress; TestedAt = (Get-Date).ToString('o') }
+        $primaryUdp = Get-VpsMarkerValue $primaryTest.StdOut UDP -Required
+        if ($primaryUdp -ne 'yes') { throw 'Shadowsocks 主用户 UDP 功能自测失败。' }
+        $testState = [ordered]@{
+            PrimaryIpv4Egress = $primaryEgress
+            PrimaryUdp = 'Passed'
+            TestedAt = (Get-Date).ToString('o')
+        }
 
         if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
             $secondaryPassword = ([string]$credentials.ServerKey) + ':' + ([string]$credentials.SecondaryUserKey)
@@ -73,6 +79,9 @@
                 TEST_SERVER = $testServer
             } -TimeoutSeconds 180 -SensitiveOutput
             $testState.SecondaryIpv6Egress = Get-VpsMarkerValue $secondaryTest.StdOut EGRESS -Required
+            $secondaryUdp = Get-VpsMarkerValue $secondaryTest.StdOut UDP -Required
+            if ($secondaryUdp -ne 'yes') { throw 'Shadowsocks IPv6 用户 UDP 功能自测失败。' }
+            $testState.SecondaryUdp = 'Passed'
         }
         $Context.State.ShadowsocksSelfTest = $testState
         $Context.State.SingBoxVersion = $version
