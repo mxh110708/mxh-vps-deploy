@@ -405,6 +405,21 @@ function Test-VpsSafePathSegment {
         $Value -notmatch '[\\/]' -and $Value -notin @('.', '..')
 }
 
+function Test-VpsArchiveRoot {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+    try {
+        $candidate = $Value.Trim().Trim('"')
+        if (-not [IO.Path]::IsPathFullyQualified($candidate)) { return $false }
+        $rawFullPath = [IO.Path]::GetFullPath($candidate)
+        $fullPath = $rawFullPath.TrimEnd('\', '/')
+        $pathRoot = [IO.Path]::GetPathRoot($rawFullPath).TrimEnd('\', '/')
+        return -not [string]::IsNullOrWhiteSpace($fullPath) -and
+            -not $fullPath.Equals($pathRoot, [StringComparison]::OrdinalIgnoreCase)
+    }
+    catch { return $false }
+}
+
 function Test-VpsNodeName {
     param([string]$Value)
     return -not [string]::IsNullOrWhiteSpace($Value) -and $Value -match '^[A-Za-z0-9][A-Za-z0-9._-]{1,79}$'
@@ -439,7 +454,10 @@ function New-VpsInteractivePlan {
     Write-Host '支持初始密码或服务商现有私钥；密码只由 OpenSSH 询问，现有私钥只用于一次性引导。' -ForegroundColor DarkGray
     Write-Host '普通文本和是/否输入 b 可返回；编号菜单输入 0 或 b 可返回。第一项返回主菜单。' -ForegroundColor DarkGray
 
+    $defaultInstanceRoot = [IO.Path]::GetFullPath($InstanceRoot.Trim().Trim('"')).TrimEnd('\', '/')
+
     $wizard = [ordered]@{
+        InstanceRoot = $defaultInstanceRoot
         Provider = $null
         Instance = $null
         NodeName = $null
@@ -486,7 +504,7 @@ function New-VpsInteractivePlan {
     }
 
     $getArchivePath = {
-        Join-Path (Join-Path $InstanceRoot ([string]$wizard.Provider)) ([string]$wizard.Instance)
+        Join-Path (Join-Path ([string]$wizard.InstanceRoot) ([string]$wizard.Provider)) ([string]$wizard.Instance)
     }
     $ensureAutoPorts = {
         $basis = [string]$wizard.BootstrapPort
@@ -545,6 +563,14 @@ function New-VpsInteractivePlan {
 
     $steps = @(
         [pscustomobject]@{
+            Id = 'archive-root'; ShouldRun = { $true }; Run = {
+                $value = Read-VpsText 'VPS 私有归档根目录（不会立即创建）' `
+                    -Default ([string]$wizard.InstanceRoot) -AllowBack -Validate ${function:Test-VpsArchiveRoot} `
+                    -ValidationMessage '请输入不是磁盘根目录的完整绝对路径，例如 F:\VPS\VPS-Instances。'
+                $wizard.InstanceRoot = [IO.Path]::GetFullPath($value.Trim().Trim('"')).TrimEnd('\', '/')
+            }
+        },
+        [pscustomobject]@{
             Id = 'provider'; ShouldRun = { $true }; Run = {
                 $old = [string]$wizard.Provider
                 $value = Read-VpsText '服务商名称' -Default $old -AllowBack -Validate ${function:Test-VpsSafePathSegment} `
@@ -562,7 +588,7 @@ function New-VpsInteractivePlan {
                 while ($true) {
                     $value = Read-VpsText '实例名称' -Default $old -AllowBack -Validate ${function:Test-VpsSafePathSegment} `
                         -ValidationMessage '名称不能包含路径分隔符或 Windows 非法字符。'
-                    $candidatePlan = Join-Path (Join-Path $InstanceRoot ([string]$wizard.Provider)) `
+                    $candidatePlan = Join-Path (Join-Path ([string]$wizard.InstanceRoot) ([string]$wizard.Provider)) `
                         (Join-Path $value 'deployment-plan.json')
                     if (-not (Test-Path -LiteralPath $candidatePlan)) { break }
                     Write-VpsUi "该实例已有部署计划：$candidatePlan" Warning

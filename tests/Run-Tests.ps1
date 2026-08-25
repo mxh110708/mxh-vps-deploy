@@ -345,6 +345,16 @@ $clearCommandResult = & (Get-Module VpsDeploy.Core) {
 }
 Assert-True ($clearCommandResult.Clear -and $clearCommandResult.Cls) 'clear and cls are exact global clear commands'
 Assert-True (-not $clearCommandResult.BreadCloud -and -not $clearCommandResult.Clearwater) 'clear command never uses prefix matching'
+$archiveRootValidation = & (Get-Module VpsDeploy.Core) {
+    param($AbsolutePath, $DriveRoot)
+    [ordered]@{
+        Absolute = Test-VpsArchiveRoot $AbsolutePath
+        Relative = Test-VpsArchiveRoot 'relative\archive'
+        DriveRoot = Test-VpsArchiveRoot $DriveRoot
+    }
+} $ProjectRoot ([IO.Path]::GetPathRoot($ProjectRoot))
+Assert-True ($archiveRootValidation.Absolute) 'archive root accepts a fully qualified non-root path'
+Assert-True (-not $archiveRootValidation.Relative -and -not $archiveRootValidation.DriveRoot) 'archive root rejects relative paths and a bare drive root'
 
 $migrationFixtureRoot = Join-Path $ProjectRoot '.test-output\migration-context'
 if (Test-Path -LiteralPath $migrationFixtureRoot) { [IO.Directory]::Delete($migrationFixtureRoot, $true) }
@@ -505,6 +515,7 @@ $wizardInstanceRoot = Join-Path $ProjectRoot '.test-output\wizard-instance-root'
 $wizardArchive = Join-Path $wizardInstanceRoot 'ExampleProvider\RevisedInstance'
 if (Test-Path -LiteralPath $wizardArchive) { throw "Wizard dry-run archive already exists: $wizardArchive" }
 $wizardInputLines = @(
+    '',                  # accept the visible archive-root default
     'ExampleProvider',
     'OriginalInstance',
     'b',                 # return from node name to instance name
@@ -539,9 +550,10 @@ Assert-True ($wizardResult.StdOut -match 'bootstrap-port' -and $wizardResult.Std
 Assert-True (-not (Test-Path -LiteralPath $wizardArchive)) 'interactive wizard dry run writes no plan or archive'
 
 $branchResetRoot = Join-Path $ProjectRoot '.test-output\wizard-branch-reset'
+$branchDefaultRoot = Join-Path $ProjectRoot '.test-output\wizard-default-root'
 $branchResetArchive = Join-Path $branchResetRoot 'ExampleProvider\BranchReset'
 $branchInputs = @(
-    'ExampleProvider', 'BranchReset', '', '192.0.2.61', '', '', '1', '1', '', 'n',
+    $branchResetRoot, 'ExampleProvider', 'BranchReset', '', '192.0.2.61', '', '', '1', '1', '', 'n',
     '1', 'target.example.com', 'y', 'y', 'n', 'n', '2',
     'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', # Komari -> role
     '4', '', 'n', 'n', '1'                   # switch to MonitorOnly and confirm
@@ -562,10 +574,11 @@ $branchPlan = & $coreModule {
         Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
         Remove-Variable WizardTestInputQueue -Scope Script -ErrorAction SilentlyContinue
     }
-} $branchQueue $ProjectRoot $branchResetRoot 6>$null
+} $branchQueue $ProjectRoot $branchDefaultRoot 6>$null
 Assert-True ($branchPlan.Role -eq 'MonitorOnly') 'back navigation can replace a previously completed role branch'
 Assert-True (-not $branchPlan.Reality.Target -and -not $branchPlan.TrustedTls.Enabled -and -not $branchPlan.AnyTls.Enabled) 'role change clears stale proxy and trusted TLS fields'
 Assert-True ($branchPlan.NetworkTuning.Mode -eq 'BaselineOnly') 'role change clears stale adaptive tuning fields'
+Assert-True ([string]$branchPlan.Paths.Archive -eq $branchResetArchive) 'interactive archive root overrides the command-line default'
 Assert-True ($branchQueue.Count -eq 0) 'branch-reset wizard consumed the expected navigation path'
 Assert-True (-not (Test-Path -LiteralPath $branchResetArchive)) 'in-memory branch-reset test writes no plan or archive'
 
@@ -580,7 +593,7 @@ Assert-True ($hierarchyResult.StdOut -match 'MXH VPS Deploy' -and `
 Assert-True ($hierarchyResult.StdOut -notmatch '__MXH_VPS_WIZARD_' -and $hierarchyResult.StdErr -notmatch '__MXH_VPS_WIZARD_') 'navigation markers never leak to the console'
 Assert-True ($hierarchyResult.StdOut -match '(?m)^clear\r?$' -and $hierarchyResult.StdOut -match '(?m)^cls\r?$') 'clear and cls are consumed by live menu navigation'
 
-$providerPrefixInput = (@('1', 'BreadCloud', 'b', 'b', '0') -join [Environment]::NewLine) + [Environment]::NewLine
+$providerPrefixInput = (@('1', '', 'BreadCloud', 'b', 'b', 'b', '0') -join [Environment]::NewLine) + [Environment]::NewLine
 $providerPrefixResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
 ) -InputText $providerPrefixInput -TimeoutSeconds 60
@@ -728,7 +741,7 @@ Assert-True ($resumeNavigationResult.StdOut -match 'ExampleInstance') 'resume pa
 $cancelInstanceRoot = Join-Path $ProjectRoot '.test-output\wizard-cancel-root'
 $cancelArchive = Join-Path $cancelInstanceRoot 'ExampleProvider\CancelAtSummary'
 $cancelInput = (@(
-    '1', 'ExampleProvider', 'CancelAtSummary', '', '192.0.2.62', '', '', '1', '4', '', 'n', 'n', '3', '0'
+    '1', '', 'ExampleProvider', 'CancelAtSummary', '', '192.0.2.62', '', '', '1', '4', '', 'n', 'n', '3', '0'
 ) -join [Environment]::NewLine) + [Environment]::NewLine
 $cancelResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),

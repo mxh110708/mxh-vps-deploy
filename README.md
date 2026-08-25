@@ -44,6 +44,8 @@ pwsh -File .\Start-VPSDeploy.ps1
 - 密码：工具不读取或保存密码，由 `ssh.exe` 自己显示密码提示；
 - 现有私钥：填写 OpenSSH 私钥文件路径，工具只用它完成一次引导并写入新生成的实例专用公钥。现有私钥内容不会复制到源码目录或上传 GitHub。
 
+新部署第一项会显示 VPS 私有归档根目录，默认是 `F:\VPS\VPS-Instances`。它只是 `-InstanceRoot` 提供的可编辑默认值，不会在显示提示时创建；可以直接输入另一个完整绝对路径，最终目录始终为 `<根目录>\<服务商>\<实例>`。
+
 填写中发现上一项有误时，普通输入或是/否提示整项只输入 `b`，编号菜单输入 `0` 或 `b`。只有去除首尾空格后恰好等于 `b` 才是返回命令，`BreadCloud` 等以 b 开头的正常名称不受影响。在新部署第一项返回会回到主菜单；继续部署的路径输入和计划摘要也有完整返回链路。最后的部署摘要可返回修改或无写入取消，只有选择“确认方案并继续”后才会创建部署计划。
 
 输出过长时，在普通文本、是/否或编号菜单中整项输入 `clear` 或 `cls` 即可清屏并重新显示当前提示；命令采用精确匹配，`Clearwater` 等正常值不会被截获。
@@ -84,6 +86,9 @@ pwsh -File .\scripts\Check-UpstreamVersions.ps1
 ```powershell
 # 新部署
 pwsh -File .\Start-VPSDeploy.ps1 -Mode New
+
+# 使用另一个默认归档根目录；向导中仍会显示并允许修改
+pwsh -File .\Start-VPSDeploy.ps1 -Mode New -InstanceRoot 'D:\Private-VPS-Archive'
 
 # 从实例私有归档中的计划继续
 pwsh -File .\Start-VPSDeploy.ps1 -Mode Resume `
