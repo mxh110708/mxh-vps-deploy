@@ -1,8 +1,8 @@
 @{
     Id        = 'migration-arm-rollback'
-    Name      = '部署协议迁移独立自动回滚'
+    Name      = '部署协议生命周期变更独立自动回滚'
     Order     = 49
-    Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding')
+    Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('migration-preflight')
     IsEnabled = {
         param($Context)
@@ -16,7 +16,7 @@
             TIMEOUT_MINUTES = [string]$Context.Plan.Migration.RollbackTimeoutMinutes
         } -TimeoutSeconds 180
         if ($result.StdOut -notmatch 'VPSDEPLOY_MIGRATION_ROLLBACK_ARMED') {
-            throw '协议迁移回滚计时器未成功启用。'
+            throw '协议生命周期变更回滚计时器未成功启用。'
         }
         $backup = Get-VpsMarkerValue $result.StdOut BACKUP_DIR -Required
         if (-not $Context.State.Contains('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
@@ -26,6 +26,6 @@
         $Context.State.Migration.RemoteBackupDirectory = $backup
         $Context.State.Migration.RollbackDeadlineMinutes = [int]$Context.Plan.Migration.RollbackTimeoutMinutes
         Save-VpsContext -Context $Context
-        Write-VpsUi 'VPS 端独立回滚计时器已启用；后续失败会恢复源协议和旧 nftables。' Success
+        Write-VpsUi 'VPS 端独立回滚计时器已启用；后续失败会恢复变更前的全部协议文件、启用状态和旧 nftables。' Success
     }
 }

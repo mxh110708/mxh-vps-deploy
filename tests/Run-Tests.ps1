@@ -86,11 +86,35 @@ $migrationArm = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\re
 Assert-True ($migrationArm -match 'mxh-protocol-migration-rollback\.timer') 'protocol migration installs a VPS-side rollback timer'
 Assert-True ($migrationArm -match 'cp -a /etc/nftables\.conf') 'protocol migration backs up the source firewall'
 $migrationCommit = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\protocol-migration-commit.sh')
-Assert-True ($migrationCommit -match 'systemctl disable --now "\$source_service"') 'migration commit disables only the source protocol service'
+Assert-True ($migrationCommit -match 'FINAL_REALITY_ENABLED' -and $migrationCommit -match 'FINAL_ANYTLS_ENABLED') 'lifecycle commit applies explicit final service states'
 Assert-True ($migrationCommit -match 'systemctl stop mxh-protocol-migration-rollback\.timer') 'migration commit cancels rollback only after target validation'
+$lifecycleUninstall = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\protocol-lifecycle-uninstall.sh')
+Assert-True ($lifecycleUninstall -match 'systemctl is-enabled' -and $lifecycleUninstall -match 'VPSDEPLOY_PROTOCOL_UNINSTALLED') 'uninstall refuses active protocols and returns a success marker'
+$backupPrune = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\protocol-backup-prune.sh')
+Assert-True ($backupPrune -match 'mxh-protocol-migration-rollback\.timer' -and $backupPrune -match 'protocol-lifecycle') 'backup cleanup protects active rollback and limits its remote scope'
 $localHttpsSetup = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\local-https-target.sh')
 Assert-True ($localHttpsSetup -match 'mask nginx\.service') 'nginx is masked while the package default site could start'
 Assert-True ($localHttpsSetup -match 'unmask nginx\.service') 'nginx is unmasked only after package installation checks'
+$targetAuditModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\40-TargetAudit.ps1')
+Assert-True ($targetAuditModule -match 'ACCEPT-TARGET-RISK' -and $targetAuditModule -match 'manual_override') 'failed target audits support an explicit recorded manual override'
+Assert-True ($targetAuditModule -match 'NonInteractive.*禁止人工覆写') 'noninteractive target audit cannot silently bypass automatic requirements'
+$importAudit = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\existing-vps-import-audit.sh')
+Assert-True ($importAudit -match 'IMPORT_PRIVATE' -and $importAudit -match 'RealityEntry') 'existing VPS import discovers supported protocol state and private configuration'
+$importPythonMatch = [regex]::Match($importAudit, "(?s)python3 <<'PY'\n(.+?)\nPY")
+Assert-True $importPythonMatch.Success 'existing import Python audit payload is extractable'
+$pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+if ($pythonCommand) {
+    $importPythonPath = Join-Path $ProjectRoot '.test-output\existing-import-audit.py'
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $importPythonPath)) | Out-Null
+    [IO.File]::WriteAllText($importPythonPath, $importPythonMatch.Groups[1].Value, [Text.UTF8Encoding]::new($false))
+    $pythonSyntax = Invoke-VpsProcess -FilePath $pythonCommand.Source -ArgumentList @(
+        '-c', 'import pathlib,sys; compile(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"), sys.argv[1], "exec")', $importPythonPath
+    ) -TimeoutSeconds 30
+    Assert-True ($pythonSyntax.ExitCode -eq 0) 'existing import Python audit parses'
+    [IO.File]::Delete($importPythonPath)
+}
+$importSsh = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\existing-vps-import-ssh-keyonly.sh')
+Assert-True ($importSsh -match 'PasswordAuthentication no' -and $importSsh -match 'PubkeyAuthentication yes') 'existing VPS import enforces key-only SSH before management'
 
 Write-Host '== Bootstrap authentication arguments ==' -ForegroundColor Cyan
 $sshArgumentContext = [pscustomobject]@{
@@ -334,6 +358,53 @@ Assert-True (@($migrationPlans | Where-Object Role -eq 'ShadowsocksLanding' | Wh
 $localRealityMigrationIds = @(Get-MxhMigrationModuleIds -TargetRole RealityEntry -RealityTargetMode LocalOwnedTls)
 Assert-True ('certbot-dns' -in $localRealityMigrationIds -and 'local-https-target' -in $localRealityMigrationIds) 'local Reality migration includes certificate and loopback HTTPS modules'
 Assert-True ('target-audit' -notin $localRealityMigrationIds) 'local Reality migration excludes external target audit'
+
+Write-Host '== Protocol lifecycle inventory and state transitions ==' -ForegroundColor Cyan
+$standbyAnyTls = New-MxhProtocolMigrationPlan -SourcePlan $realitySource -SourcePlanPath $realitySourcePath `
+    -TargetRole AnyTlsEntry -Operation InstallStandby -TargetServicePort 443 `
+    -AnyTlsServerName 'edge.example.invalid' -EchPublicName 'www.example.invalid' `
+    -AnyTlsPaddingScheme @('stop=8', '0=10-20') -TrustedTlsEnabled $true `
+    -CloudflareZoneName 'example.invalid' -CertbotEmail 'fixture@example.invalid' `
+    -CloudflareTokenFile 'C:\fixture-token.private.txt' -NetworkTuning $baselineTuning
+Assert-True ($standbyAnyTls.ProtocolInventory.RealityEntry.Installed -and $standbyAnyTls.ProtocolInventory.RealityEntry.Enabled) 'standby install keeps Reality installed and enabled'
+Assert-True ($standbyAnyTls.ProtocolInventory.AnyTlsEntry.Installed -and -not $standbyAnyTls.ProtocolInventory.AnyTlsEntry.Enabled) 'standby install records AnyTLS as installed but disabled'
+Assert-True ($standbyAnyTls.Migration.ValidationInventory.AnyTlsEntry.Enabled) 'standby protocol is temporarily enabled for real validation'
+Assert-True ($standbyAnyTls.Migration.FinalRole -eq 'RealityEntry') 'standby install restores the original primary role'
+
+$enableAnyTls = New-MxhProtocolLifecyclePlan -SourcePlan $standbyAnyTls -SourcePlanPath $realitySourcePath `
+    -SourceInventory $standbyAnyTls.ProtocolInventory -TargetRole AnyTlsEntry -Operation Enable
+Assert-True ($enableAnyTls.Migration.FinalInventory.AnyTlsEntry.Enabled) 'enabling installed AnyTLS marks it enabled'
+Assert-True (-not $enableAnyTls.Migration.FinalInventory.RealityEntry.Enabled) 'enabling AnyTLS disables conflicting Reality without uninstalling it'
+Assert-True ($enableAnyTls.Migration.FinalInventory.RealityEntry.Installed) 'entry switch preserves Reality installation'
+Assert-True ('protocol-lifecycle-state' -in $enableAnyTls.Migration.ModuleIds -and 'sing-box-anytls' -notin $enableAnyTls.Migration.ModuleIds) 'switching installed protocols does not reinstall the target'
+
+$uninstallReality = New-MxhProtocolLifecyclePlan -SourcePlan $enableAnyTls -SourcePlanPath $realitySourcePath `
+    -SourceInventory $enableAnyTls.Migration.FinalInventory -TargetRole RealityEntry -Operation Uninstall
+Assert-True (-not $uninstallReality.Migration.FinalInventory.RealityEntry.Installed) 'uninstall removes the disabled protocol from final inventory'
+Assert-True ($uninstallReality.Migration.FinalInventory.AnyTlsEntry.Enabled) 'uninstall leaves the active peer entry enabled'
+Assert-True ('protocol-lifecycle-uninstall' -in $uninstallReality.Migration.ModuleIds) 'uninstall plan uses the dedicated removal module'
+Assert-True ('protocol-lifecycle-final-firewall' -in $uninstallReality.Migration.ModuleIds) 'uninstall plan performs final firewall convergence before commit'
+$activeUninstallRejected = $false
+try {
+    New-MxhProtocolLifecyclePlan -SourcePlan $enableAnyTls -SourcePlanPath $realitySourcePath `
+        -SourceInventory $enableAnyTls.Migration.FinalInventory -TargetRole AnyTlsEntry -Operation Uninstall | Out-Null
+}
+catch { $activeUninstallRejected = $_.Exception.Message -match '只能卸载' }
+Assert-True $activeUninstallRejected 'active protocols cannot be uninstalled directly'
+
+$realityToSs = @($migrationPlans | Where-Object { $_.Migration.SourceRole -eq 'RealityEntry' -and $_.Migration.TargetRole -eq 'ShadowsocksLanding' })[0]
+Assert-True ($realityToSs.Migration.FinalInventory.RealityEntry.Enabled -and $realityToSs.Migration.FinalInventory.ShadowsocksLanding.Enabled) 'Shadowsocks can run concurrently with the entry protocol'
+$firewallFixtureState = [ordered]@{ BootstrapSshRemoved = $true }
+$firewallParameters = Get-MxhProtocolFirewallParameters -Plan $realityToSs -State $firewallFixtureState -Inventory $realityToSs.Migration.FinalInventory
+Assert-True ([string]$firewallParameters.TCP_PORTS -match '443' -and [string]$firewallParameters.TCP_PORTS -match [string]$realityToSs.Ports.XrayBackup) 'concurrent firewall retains Reality primary and rescue ports'
+Assert-True ([string]$firewallParameters.RESTRICTED_PORT -eq [string]$realityToSs.Ports.LandingShadowsocks) 'concurrent firewall keeps Shadowsocks as the restricted TCP and UDP port'
+$standaloneBaseline = [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
+$networkOnlyPlan = New-MxhNetworkTuningPlan -SourcePlan $realitySource -SourcePlanPath $realitySourcePath `
+    -TuningRole RealityEntry -NetworkTuning $standaloneBaseline
+Assert-True ($networkOnlyPlan.Migration.Operation -eq 'NetworkTune') 'standalone network tuning uses a dedicated lifecycle operation'
+Assert-True ('network-tuning' -in $networkOnlyPlan.Migration.ModuleIds) 'standalone network tuning includes the tuning module'
+Assert-True ('nftables-transition' -notin $networkOnlyPlan.Migration.ModuleIds -and 'protocol-lifecycle-final-firewall' -notin $networkOnlyPlan.Migration.ModuleIds) 'standalone network tuning does not rewrite the firewall'
+Assert-True ($networkOnlyPlan.NetworkTuning.Mode -eq 'BaselineOnly' -and $null -eq $networkOnlyPlan.NetworkTuning.ReferenceRttMs) 'baseline network tuning requires no RTT'
 
 $clearCommandResult = & (Get-Module VpsDeploy.Core) {
     [ordered]@{
@@ -649,7 +720,7 @@ $migrationEntryState = [ordered]@{
 Save-VpsJson -Value $migrationEntryPlan -Path $migrationEntryPlanPath -Private
 Save-VpsJson -Value $migrationEntryState -Path (Join-Path $migrationEntryRoot 'deployment-state.json') -Private
 Save-VpsJson -Value $migrationSourceSecrets -Path (Join-Path $migrationEntryRoot 'deployment-secrets.private.json') -Private
-$migrationDryInput = (@('1', '2', '', '192.0.2.70', '', $migrationEntryPlanPath, 'n', 'n', '1') -join [Environment]::NewLine) + [Environment]::NewLine
+$migrationDryInput = (@('1', '1', '2', '', '192.0.2.70', '', $migrationEntryPlanPath, 'n', 'n', '1') -join [Environment]::NewLine) + [Environment]::NewLine
 $migrationDryResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
     '-Mode', 'Migrate', '-DryRun', '-PlanPath', $migrationDryPlanPath
@@ -695,9 +766,24 @@ function New-TestMigrationSourceFixture {
     return $planPath
 }
 
+$backupCleanupRoot = Join-Path $ProjectRoot '.test-output\protocol-backup-cleanup-dryrun'
+$backupCleanupPlan = New-TestMigrationSourceFixture -Template $realitySource -Root $backupCleanupRoot -ProtocolModule 'xray-reality'
+$backupCleanupCandidate = Join-Path $backupCleanupRoot 'migration-backups\20260101-000000-Enable-RealityEntry'
+[IO.Directory]::CreateDirectory($backupCleanupCandidate) | Out-Null
+[IO.File]::WriteAllText((Join-Path $backupCleanupCandidate 'deployment-plan.json'), 'fixture')
+$backupCleanupInput = (@('1', '5', '1', '0', 'DELETE-BACKUPS', '3') -join [Environment]::NewLine) + [Environment]::NewLine
+$backupCleanupResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
+    '-Mode', 'Migrate', '-DryRun', '-PlanPath', $backupCleanupPlan
+) -InputText $backupCleanupInput -TimeoutSeconds 60
+Assert-True ($backupCleanupResult.ExitCode -eq 0) 'protocol backup cleanup DryRun exits cleanly'
+Assert-True ($backupCleanupResult.StdOut -match 'DryRun' -and $backupCleanupResult.StdOut -match 'migration-backups') 'backup cleanup DryRun reports its bounded local scope'
+Assert-True (Test-Path -LiteralPath $backupCleanupCandidate -PathType Container) 'backup cleanup DryRun deletes no local backup'
+[IO.Directory]::Delete($backupCleanupRoot, $true)
+
 $anyToRealityRoot = Join-Path $ProjectRoot '.test-output\migration-anytls-to-reality'
 $anyToRealityPlan = New-TestMigrationSourceFixture -Template $anyTlsSource -Root $anyToRealityRoot -ProtocolModule 'sing-box-anytls'
-$anyToRealityInput = (@('1', '1', '', '1', 'target.example.invalid', 'y', 'y', 'n', '1') -join [Environment]::NewLine) + [Environment]::NewLine
+$anyToRealityInput = (@('1', '1', '1', '', '1', 'target.example.invalid', 'y', 'y', 'n', '1') -join [Environment]::NewLine) + [Environment]::NewLine
 $anyToRealityResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
     '-Mode', 'Migrate', '-DryRun', '-PlanPath', $anyToRealityPlan
@@ -705,6 +791,13 @@ $anyToRealityResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
 Assert-True ($anyToRealityResult.ExitCode -eq 0) 'existing AnyTLS plan can enter external Reality migration DryRun'
 Assert-True ($anyToRealityResult.StdOut -match 'target-audit' -and $anyToRealityResult.StdOut -match 'xray-reality') 'AnyTLS to Reality DryRun selects target audit and Xray modules'
 Assert-True ($anyToRealityResult.StdOut -notmatch '(?m)\ssing-box-anytls\s') 'AnyTLS to Reality DryRun excludes the source service module'
+$networkTuneInput = (@('1', '', '1') -join [Environment]::NewLine) + [Environment]::NewLine
+$networkTuneResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
+    '-Mode', 'TuneNetwork', '-DryRun', '-PlanPath', $anyToRealityPlan
+) -InputText $networkTuneInput -TimeoutSeconds 60
+Assert-True ($networkTuneResult.ExitCode -eq 0) 'standalone network tuning enters DryRun on an existing managed VPS'
+Assert-True ($networkTuneResult.StdOut -notmatch '(?m)\snftables-transition\s') 'standalone network tuning DryRun does not include firewall application'
 [IO.Directory]::Delete($anyToRealityRoot, $true)
 
 $ssToAnyRoot = Join-Path $ProjectRoot '.test-output\migration-ss-to-anytls'
@@ -712,7 +805,7 @@ $ssToAnyPlan = New-TestMigrationSourceFixture -Template $shadowsocksSource -Root
 $ssTokenPath = Join-Path $ssToAnyRoot 'cloudflare-certbot-token.private.txt'
 [IO.File]::WriteAllText($ssTokenPath, 'fixture-token-value')
 $ssToAnyInput = (@(
-    '1', '2', 'edge.example.invalid', 'www.example.invalid', 'y', '', 'fixture@example.invalid', $ssTokenPath, 'n', '1'
+    '1', '1', '2', 'edge.example.invalid', 'www.example.invalid', 'y', '', 'fixture@example.invalid', $ssTokenPath, 'n', '1'
 ) -join [Environment]::NewLine) + [Environment]::NewLine
 $ssToAnyResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
@@ -723,12 +816,37 @@ Assert-True ($ssToAnyResult.StdOut -match 'certbot-dns' -and $ssToAnyResult.StdO
 Assert-True ($ssToAnyResult.StdOut -notmatch '(?m)\ssing-box-shadowsocks\s') 'Shadowsocks to AnyTLS DryRun excludes the source service module'
 [IO.Directory]::Delete($ssToAnyRoot, $true)
 
+$importRoot = Join-Path $ProjectRoot '.test-output\existing-import-dryrun-root'
+$importArchive = Join-Path $importRoot 'ExampleProvider\ExistingImport'
+$importKey = Join-Path $ProjectRoot '.test-output\existing-import-provider-key'
+if (Test-Path -LiteralPath $importRoot) { [IO.Directory]::Delete($importRoot, $true) }
+[IO.File]::WriteAllText($importKey, 'fixture-existing-key')
+$importInput = (@(
+    '', 'ExampleProvider', 'ExistingImport', 'Example-US.Imported', '192.0.2.90', '', '', '1', $importKey, '1'
+) -join [Environment]::NewLine) + [Environment]::NewLine
+$importResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
+    '-Mode', 'Import', '-DryRun', '-InstanceRoot', $importRoot
+) -InputText $importInput -TimeoutSeconds 60
+Assert-True ($importResult.ExitCode -eq 0) 'existing VPS import wizard supports a no-write DryRun without deployment-plan.json'
+Assert-True ($importResult.StdErr -notmatch 'Exception|Error') 'existing VPS import DryRun reports no execution error'
+Assert-True (-not (Test-Path -LiteralPath $importArchive)) 'existing VPS import DryRun creates no private archive or plan'
+[IO.File]::Delete($importKey)
+
 $directBackInput = 'b' + [Environment]::NewLine
 $directBackResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'New', '-DryRun'
 ) -InputText $directBackInput -TimeoutSeconds 60
 Assert-True ($directBackResult.ExitCode -eq 0) 'direct New mode exits cleanly when backing out of its first field'
 Assert-True ($directBackResult.StdOut -notmatch '__MXH_VPS_WIZARD_' -and $directBackResult.StdErr -notmatch '__MXH_VPS_WIZARD_') 'direct-mode back remains an internal control signal'
+
+$mainMenuExitResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
+) -InputText ("0" + [Environment]::NewLine) -TimeoutSeconds 60
+Assert-True ($mainMenuExitResult.ExitCode -eq 0) 'main menu exits cleanly with zero'
+$startVpsDeploySource = & $coreModule { (Get-Command Start-VpsDeploy).ScriptBlock.ToString() }
+Assert-True ($startVpsDeploySource -match "-AllowBack\s+-BackLabel\s+'退出'") 'main menu exposes zero as its canonical exit'
+Assert-True (([regex]::Matches($startVpsDeploySource, '退出')).Count -eq 1) 'main menu has no duplicate numbered exit'
 
 $resumeFixture = (Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json')
 $resumeNavigationInput = (@('2', ('"' + $resumeFixture + '"'), '0', 'b', '0') -join [Environment]::NewLine) + [Environment]::NewLine

@@ -8,13 +8,26 @@
     Invoke    = {
         param($Context)
         $serverDir = Join-Path $Context.ArchivePath 'server-configs'
-        $downloads = [ordered]@{
-            '/etc/ssh/sshd_config' = (Join-Path $serverDir 'sshd_config')
-            '/etc/ssh/sshd_config.d/00-00-local-access.conf' = (Join-Path $serverDir 'sshd-00-00-local-access.conf')
-            '/etc/nftables.conf' = (Join-Path $serverDir 'nftables.conf')
-            '/etc/sysctl.d/99-mxh-vps-deploy.conf' = (Join-Path $serverDir 'sysctl-99-mxh-vps-deploy.conf')
+        $realityInstalled = Test-MxhProtocolInstalled -Plan $Context.Plan -Role 'RealityEntry'
+        $anyTlsInstalled = Test-MxhProtocolInstalled -Plan $Context.Plan -Role 'AnyTlsEntry'
+        $shadowsocksInstalled = Test-MxhProtocolInstalled -Plan $Context.Plan -Role 'ShadowsocksLanding'
+        $importedExisting = $Context.Plan.Contains('Import') -and [bool]$Context.Plan.Import.Enabled
+        $downloads = [ordered]@{ '/etc/ssh/sshd_config' = (Join-Path $serverDir 'sshd_config') }
+        if ($importedExisting) {
+            if ($Context.Plan.Import.Contains('ManagedKeyOnlyDropIn') -and [bool]$Context.Plan.Import.ManagedKeyOnlyDropIn) {
+                $downloads['/etc/ssh/sshd_config.d/00-00-mxh-import-key-only.conf'] = Join-Path $serverDir 'sshd-00-00-mxh-import-key-only.conf'
+            }
+            if ($Context.State.Audit.NftRuleLines -gt 0) { $downloads['/etc/nftables.conf'] = Join-Path $serverDir 'nftables.conf' }
+            if ($Context.State.Contains('NetworkTuning')) {
+                $downloads['/etc/sysctl.d/99-mxh-vps-deploy.conf'] = Join-Path $serverDir 'sysctl-99-mxh-vps-deploy.conf'
+            }
         }
-        if ($Context.Plan.Role -eq 'RealityEntry') {
+        else {
+            $downloads['/etc/ssh/sshd_config.d/00-00-local-access.conf'] = Join-Path $serverDir 'sshd-00-00-local-access.conf'
+            $downloads['/etc/nftables.conf'] = Join-Path $serverDir 'nftables.conf'
+            $downloads['/etc/sysctl.d/99-mxh-vps-deploy.conf'] = Join-Path $serverDir 'sysctl-99-mxh-vps-deploy.conf'
+        }
+        if ($realityInstalled) {
             $downloads['/usr/local/etc/xray/config.json'] = Join-Path $serverDir 'xray-config.json'
             if ($Context.Plan.Reality.Contains('TargetMode') -and $Context.Plan.Reality.TargetMode -eq 'LocalOwnedTls') {
                 $downloads['/etc/nginx/sites-available/mxh-reality-target'] = Join-Path $serverDir 'nginx-reality-target.conf'
@@ -22,7 +35,7 @@
                 $downloads['/etc/mxh-tls/reality-target/privkey.pem'] = Join-Path $serverDir 'reality-target-privkey.private.pem'
             }
         }
-        elseif ($Context.Plan.Role -eq 'AnyTlsEntry') {
+        if ($anyTlsInstalled) {
             $downloads['/etc/sing-box-anytls/config.json'] = Join-Path $serverDir 'sing-box-anytls-config.private.json'
             $downloads['/etc/sing-box-anytls/ech-key.pem'] = Join-Path $serverDir 'anytls-ech-key.private.pem'
             $downloads['/etc/sing-box-anytls/ech-config.pem'] = Join-Path $serverDir 'anytls-ech-client-config.pem'
@@ -30,7 +43,7 @@
             $downloads['/etc/mxh-tls/anytls/fullchain.pem'] = Join-Path $serverDir 'anytls-fullchain.pem'
             $downloads['/etc/mxh-tls/anytls/privkey.pem'] = Join-Path $serverDir 'anytls-privkey.private.pem'
         }
-        elseif ($Context.Plan.Role -eq 'ShadowsocksLanding') {
+        if ($shadowsocksInstalled) {
             $downloads['/etc/sing-box/config.json'] = Join-Path $serverDir 'sing-box-config.private.json'
             $downloads['/etc/systemd/system/sing-box.service'] = Join-Path $serverDir 'sing-box.service'
             if ($Context.Plan.Shadowsocks.SecondaryBindInterface) {
@@ -50,11 +63,11 @@
             Invoke-VpsScpDownload -Context $Context -RemotePath $remote -LocalPath $downloads[$remote]
         }
 
-        $s = $Context.Secrets.Xray
+        $s = if ($realityInstalled) { $Context.Secrets.Xray } else { $null }
         $archivePath = Join-Path $Context.ArchivePath ($Context.Plan.NodeName + '-final-archive.txt')
         $bootstrapAuth = if ($Context.Plan.Server.Contains('BootstrapAuth')) { $Context.Plan.Server.BootstrapAuth } else { 'Password' }
         $bootstrapKeyPath = if ($Context.Plan.Server.Contains('BootstrapKeyPath')) { $Context.Plan.Server.BootstrapKeyPath } else { $null }
-        $xrayBlock = if ($Context.Plan.Role -eq 'RealityEntry') {
+        $xrayBlock = if ($realityInstalled) {
             $targetSettings = Get-MxhRealityTargetSettings -Plan $Context.Plan
 @"
 Xray Version: $($Context.Plan.Reality.XrayVersion)
@@ -72,7 +85,7 @@ Reality Egress Test: $($Context.State.RealityEgressTest | ConvertTo-Json -Compre
 "@
         }
         else { 'Xray: Not installed by this deployment role.' }
-        $anyTlsBlock = if ($Context.Plan.Role -eq 'AnyTlsEntry') {
+        $anyTlsBlock = if ($anyTlsInstalled) {
             $anyTls = $Context.Secrets.AnyTls
 @"
 sing-box AnyTLS Version: $($Context.Plan.AnyTls.SingBoxVersion)
@@ -91,7 +104,7 @@ AnyTLS Client Egress Test: $($Context.State.AnyTlsEgressTest | ConvertTo-Json -C
 "@
         }
         else { 'AnyTLS: Not installed by this deployment role.' }
-        $shadowsocksBlock = if ($Context.Plan.Role -eq 'ShadowsocksLanding') {
+        $shadowsocksBlock = if ($shadowsocksInstalled) {
             $ss = $Context.Secrets.Shadowsocks
             $primaryPassword = ([string]$ss.ServerKey) + ':' + ([string]$ss.PrimaryUserKey)
             $secondaryPassword = if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
@@ -125,9 +138,10 @@ Server Self Test: $($Context.State.ShadowsocksSelfTest | ConvertTo-Json -Compres
         }
         $migrationBlock = if ($Context.Plan.Contains('Migration') -and [bool]$Context.Plan.Migration.Enabled) {
 @"
-Protocol Migration: $($Context.Plan.Migration.SourceRole) -> $($Context.Plan.Migration.TargetRole)
-Migration Status: $($Context.State.Migration.Status)
-Local Pre-Migration Backup: $($Context.Plan.Migration.LocalBackupDirectory)
+Protocol Lifecycle Operation: $(if ($Context.Plan.Migration.Contains('Operation')) { $Context.Plan.Migration.Operation } else { 'LegacyConversion' })
+Lifecycle Target: $($Context.Plan.Migration.TargetRole)
+Lifecycle Status: $($Context.State.Migration.Status)
+Local Pre-Change Backup: $($Context.Plan.Migration.LocalBackupDirectory)
 Remote Rollback Backup: $($Context.State.Migration.RemoteBackupDirectory)
 "@
         }
@@ -140,6 +154,7 @@ Provider: $($Context.Plan.Provider)
 Instance: $($Context.Plan.Instance)
 Node Name: $($Context.Plan.NodeName)
 Role: $($Context.Plan.Role)
+Protocol Inventory: $($Context.Plan.ProtocolInventory | ConvertTo-Json -Compress -Depth 8)
 IPv4: $($Context.Plan.Server.IPv4)
 IPv6: $($Context.Plan.Server.IPv6)
 
@@ -168,7 +183,7 @@ Komari Agent Version: $($Context.Plan.Komari.AgentVersion)
 
 Server config snapshots: $serverDir
 Client exports: $(Join-Path $Context.ArchivePath 'client-exports')
-Target audit: $(if ($Context.Plan.Role -eq 'RealityEntry' -and (-not $Context.Plan.Reality.Contains('TargetMode') -or $Context.Plan.Reality.TargetMode -ne 'LocalOwnedTls')) { Join-Path $Context.ArchivePath 'target-audit.json' } else { '<not applicable>' })
+Target audit: $(if ($realityInstalled -and (-not $Context.Plan.Reality.Contains('TargetMode') -or $Context.Plan.Reality.TargetMode -ne 'LocalOwnedTls')) { Join-Path $Context.ArchivePath 'target-audit.json' } else { '<not applicable>' })
 Deployment plan: $($Context.PlanPath)
 Deployment state: $($Context.StatePath)
 Remote backup directories: $($Context.State.BackupDirectories | ConvertTo-Json -Compress -Depth 8)

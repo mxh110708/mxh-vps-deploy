@@ -6,23 +6,27 @@
 
 - 初始只读审计，发现 Docker、面板、复杂防火墙或既有代理服务时默认停止；
 - 初始入口同时支持 root 密码和服务商现有私钥（如 DMIT 的 key-only 模板）；
+- 可导入没有 `deployment-plan.json` 的现有标准 Xray Reality / AnyTLS / Shadowsocks VPS：建立实例专用密钥、收口为 key-only、识别协议配置并生成本地私有计划；
 - 新部署向导支持逐项返回修改，切换角色、认证方式或 target 模式时会清除不再适用的旧分支参数；
-- 已完成且由本工具管理的 Reality、AnyTLS、Shadowsocks 实例可在三种协议角色间双向迁移，不按干净新机重跑；
-- 协议迁移会先备份本地计划/状态/客户端片段，在 VPS 端保存旧 nftables/sysctl 并启用 20 分钟独立自动回滚；
+- 已完成且由本工具管理的实例支持 Reality、AnyTLS、Shadowsocks 生命周期管理：补充安装、安装为备用、启用/停用、切换和安全卸载，不按干净新机重跑；
+- Reality 与 AnyTLS 可同时保留完整安装，但共用 TCP 443，只允许其中一个开机启用并运行；Shadowsocks 使用独立高位端口，可与入口协议同时运行；
+- 每次协议变更会先备份本地计划/状态/凭据/客户端片段，并在 VPS 端保存全部协议文件、systemd 状态、nftables/sysctl，启用 20 分钟独立自动回滚；
+- 协议管理提供受限备份清理：本地与远端可分别操作并保留最近 N 份，活动回滚期间强制拒绝删除；
 - 所有普通交互提示支持整项输入 `clear` 或 `cls` 清屏，不影响 `Clearwater` 等正常字段；
 - 为每台实例生成新的独立 Ed25519 密钥，并收紧 Windows ACL；
 - 创建 `admin` 管理用户，保留 root/admin 公钥登录，关闭 SSH 密码登录；
 - 分阶段迁移到主、救援两个随机高位 SSH 端口；
-- 对 REALITY target 做 TLS 1.3、h2、证书、跳转、CDN 特征与 20 次握手时延审计；
+- 对 REALITY target 做 TLS 1.3、h2、证书、跳转、CDN 特征与多次握手时延审计；不通过时展示完整非敏感结果，默认更换，也允许输入确认短语并记录原因后人工覆写；
 - 固定安装 Xray 26.3.27，部署 VLESS + TCP + REALITY + Vision 主/救援入口；
 - REALITY 可改用自有域名和仅监听回环地址的静态 HTTPS target，避免把未认证流量转发到第三方共享入口；
-- 可选择互斥的 AnyTLS 入口角色，在 TCP 443 部署公共 CA 可信 TLS、ECH 和低权限 sing-box 服务；
+- 可选择 AnyTLS 入口角色，在 TCP 443 部署公共 CA 可信 TLS、ECH 和低权限 sing-box 服务；可与 Reality 同时安装但不能同时启用；
 - 通过 Cloudflare DNS-01 与 Certbot 签发 ECDSA 证书，验证模拟续期，并用专用 systemd 计时器自动续期和热部署；
 - 可选择纯落地角色，固定安装 sing-box 1.13.19 并部署多用户 Shadowsocks 2022；
 - Shadowsocks 主 IPv4 用户和可选 IPv6 用户都会执行 HTTPS 出口及 UDP DNS 往返功能测试；
 - Shadowsocks 端口同时支持 TCP/UDP，但只允许向导中填写的可信入口 VPS 地址；
 - 可选为第二个 SS2022 用户绑定独立 IPv6 源地址/网卡，实现同端口不同出口；
 - 应用最小 nftables，并按角色、内存、标称带宽和代表性 RTT 计算保守 BBR/fq 与 TCP 参数；
+- 参考 RTT 默认不要求：基础保守调优不依赖测速；网络调优另有独立维护入口，不随现有 VPS 的协议安装/切换强制重跑；
 - 可选安装低权限、无公网监听、关闭 Web SSH/自动更新的 Komari Agent；
 - 生成 Mihomo 与 sing-box 私有客户端片段、服务器配置快照和最终归档；
 - 只有新 SSH 入口、Xray、防火墙全部验收后，才关闭服务商初始 SSH 端口。
@@ -55,13 +59,13 @@ pwsh -File .\Start-VPSDeploy.ps1
 ## 安全边界
 
 - 源码目录和 Git 仓库内不保存任何实例信息或秘密。
-- 每台实例的计划、状态、日志、SSH 私钥、UUID、Reality 密钥、short-id、AnyTLS 密码、TLS 私钥、ECH 服务端密钥、Komari 配置和客户端片段只写入：
-  `F:\VPS\VPS-Instances\<服务商>\<实例名>`。
+- 每台实例的计划、状态、日志、SSH 私钥、UUID、Reality 密钥、short-id、AnyTLS 密码、TLS 私钥、ECH 服务端密钥、Komari 配置和客户端片段只写入向导选择的：
+  `<VPS 私有归档根目录>\<服务商>\<实例名>`（默认根目录为 `F:\VPS\VPS-Instances`）。
 - 工具不修改 Clash Verge AppData，也不自动合并 `Clash_General.yaml` 或 `sing-box-general.json`；它只在实例私有归档中生成待审计片段。
 - Komari Token 通过隐藏输入取得，只经 SSH 标准输入传送，不写入命令行和普通日志。
 - Cloudflare API Token 从实例私有文件读取，只经 SSH 标准输入传送，并在服务器保存为 root-only 的 Certbot 凭据；Token 值不进入部署计划、普通日志或 Git。
 - 远程配置每次修改前建立带时间戳备份；失败即停止，不连续跨层“盲修”。
-- 新部署的 nftables 模块面向干净 VPS；协议迁移只复用本工具已验收并可回滚的规则。第三方 Docker、面板或复杂规则仍必须单独审计，不能强制套用。
+- 新部署的 nftables 模块面向干净 VPS；协议生命周期管理只复用本工具已验收并可回滚的规则。第三方 Docker、面板或复杂规则仍必须单独审计，不能强制套用。
 
 详细设计见 [安全模型](docs/SECURITY.md) 和 [模块开发](docs/MODULES.md)。
 
@@ -94,8 +98,15 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New -InstanceRoot 'D:\Private-VPS-Archive
 pwsh -File .\Start-VPSDeploy.ps1 -Mode Resume `
   -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
 
-# 将本工具已完整验收的现有实例迁移到另一协议角色
+# 导入没有 deployment-plan.json 的现有 VPS
+pwsh -File .\Start-VPSDeploy.ps1 -Mode Import
+
+# 管理本工具已完整验收实例的协议（安装、备用、切换、停用、卸载、备份）
 pwsh -File .\Start-VPSDeploy.ps1 -Mode Migrate `
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
+
+# 对已纳管 VPS 单独执行网络调优；默认基础模式不需要 RTT
+pwsh -File .\Start-VPSDeploy.ps1 -Mode TuneNetwork `
   -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
 
 # 只做项目离线自检
@@ -107,15 +118,25 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New -DryRun
 
 `-OnlyModule` 是维护模式，只运行指定模块及其必要检查。不要用它跳过首次部署的 SSH/防火墙安全顺序。
 
-`-Mode Migrate` 不是任意服务器覆盖器。源实例必须由本工具完成部署并保留成功的 SSH、防火墙、协议、最终验收、收口和私有归档状态。迁移支持 Reality、AnyTLS、Shadowsocks 三者六个有向转换；失败时优先立即恢复源协议，SSH 不可达时由 VPS 端计时器独立恢复。迁移到 Shadowsocks 还必须提供另一台可信入口的计划，以完成入口→落地链式实测。
+`-Mode Migrate` 保留名称是为了兼容旧命令，现在进入的是协议生命周期管理器，不是任意服务器覆盖器。实例必须由本工具完成部署并保留成功的 SSH、防火墙、最终验收、收口和私有归档状态。可选择：
+
+- 安装新协议并切换使用：新协议完成真实测试后启用；冲突的旧 443 协议保留安装但停用；
+- 安装为备用：临时切换完成真实测试，然后恢复变更前状态，新协议保持已安装但停用；
+- 切换/启停：不重新安装，只修改已安装服务的 enabled/active 状态并重新验收；
+- 卸载：只允许卸载已经停用且未运行的协议，先备份再删除运行时、systemd 单元和服务端配置；
+- 清理备份：只处理实例归档中的 `migration-backups` 和 VPS 上本工具的 `protocol-lifecycle`/旧 `protocol-migration` 目录，可保留最近 N 份。
+
+失败时优先立即恢复变更前的全部协议文件、服务状态和防火墙；SSH 不可达时仍由 VPS 端计时器独立恢复。安装 Shadowsocks 还必须提供另一台可信入口计划，完成入口→落地链式实测。
+
+没有计划的现有 VPS 先使用 `-Mode Import`。导入器只支持标准路径和可解析的 VLESS+Reality、AnyTLS、Shadowsocks 配置；它会新增本工具的实例专用 root 公钥并确保 SSH key-only，但不改代理端口、不重装协议、不覆盖现有防火墙。导入计划使用 `PreserveExisting` 防火墙模式，因此可以在既有 Reality 的同一 TCP 443 上补装 AnyTLS 备用；新增 Shadowsocks 高位端口则必须另行审计和人工配置现有防火墙，脚本不会对未知规则执行 `flush ruleset`。
 
 ## Reality target 与 AnyTLS 的选择
 
-入口协议在向导中三选一使用，不叠加占用 443：
+Reality 和 AnyTLS 是两套可并存安装的入口实现，但运行时必须二选一占用 TCP 443：
 
 - Reality + 外部 target：保留经过严格实测的大学、机构或成熟企业站点，不需要自有证书；
 - Reality + 本机 target：Certbot 为自有域名签发证书，nginx 只监听 `127.0.0.1/[::1]:8443`，Xray 的未认证回落只到本机；
-- AnyTLS + 可信 TLS + ECH：独立低权限 sing-box 服务监听 TCP 443，Xray 会停止并禁用，二者由 systemd `Conflicts` 保证互斥。
+- AnyTLS + 可信 TLS + ECH：独立低权限 sing-box 服务监听 TCP 443；启用时 Xray 会停止并取消开机启用，但其二进制、配置、凭据和客户端片段可继续保留，二者由显式状态切换和 systemd `Conflicts` 双重保证运行互斥。
 
 AnyTLS 的 padding 只配置在服务端。新部署计划会生成一组每实例不同、范围保守且长期固定的 `PerInstanceConservativeV1` 方案；客户端首次会话使用协议默认值，随后自动接收服务端方案，因此 Mihomo 和 sing-box 客户端片段不重复填写 padding。旧计划没有该字段时显式使用官方默认方案。不要为了“更随机”随意扩大到超大分包范围；修改后必须重新做 TCP、UDP 和真实出口测试。
 

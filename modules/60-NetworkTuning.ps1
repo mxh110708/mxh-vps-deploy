@@ -1,6 +1,6 @@
 @{
     Id        = 'network-tuning'
-    Name      = '按角色、内存、带宽和 RTT 应用保守网络调优'
+    Name      = '应用独立保守网络调优（RTT 可选）'
     Order     = 60
     Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('ssh-transition')

@@ -4,6 +4,7 @@ function Get-MxhProtocolRoleLabel {
         'RealityEntry' { 'Reality 入口' }
         'AnyTlsEntry' { 'AnyTLS + 可信 TLS + ECH 入口' }
         'ShadowsocksLanding' { 'Shadowsocks 2022 落地' }
+        'MonitorOnly' { '仅管理/监控' }
         default { $Role }
     }
 }
@@ -18,6 +19,175 @@ function Get-MxhProtocolServiceName {
     }
 }
 
+function Get-MxhManagedProtocolRoles {
+    return @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding')
+}
+
+function Copy-MxhHashtable {
+    param([Parameter(Mandatory)] [Collections.IDictionary]$Value)
+    return ($Value | ConvertTo-Json -Depth 40) | ConvertFrom-Json -AsHashtable
+}
+
+function Get-MxhProtocolInventory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [Collections.IDictionary]$Plan,
+        [Collections.IDictionary]$State,
+        [Collections.IDictionary]$RemoteInventory
+    )
+
+    if ($RemoteInventory) {
+        $inventory = Copy-MxhHashtable -Value $RemoteInventory
+    }
+    elseif ($Plan.Contains('ProtocolInventory')) {
+        $inventory = Copy-MxhHashtable -Value $Plan.ProtocolInventory
+    }
+    else {
+        $inventory = [ordered]@{ SchemaVersion = 1 }
+        $moduleForRole = @{
+            RealityEntry = 'xray-reality'
+            AnyTlsEntry = 'sing-box-anytls'
+            ShadowsocksLanding = 'sing-box-shadowsocks'
+        }
+        foreach ($role in (Get-MxhManagedProtocolRoles)) {
+            $installed = [string]$Plan.Role -eq $role
+            if ($State -and (Test-MxhModuleSucceeded -State $State -Id $moduleForRole[$role])) { $installed = $true }
+            $enabled = [string]$Plan.Role -eq $role
+            $inventory[$role] = [ordered]@{
+                Installed = $installed
+                Enabled = $enabled
+                Active = $enabled
+                Partial = $false
+                Service = Get-MxhProtocolServiceName -Role $role
+            }
+        }
+    }
+
+    foreach ($role in (Get-MxhManagedProtocolRoles)) {
+        if (-not $inventory.Contains($role)) {
+            $inventory[$role] = [ordered]@{
+                Installed = $false; Enabled = $false; Active = $false; Partial = $false
+                Service = Get-MxhProtocolServiceName -Role $role
+            }
+        }
+        foreach ($field in @('Installed', 'Enabled', 'Active', 'Partial')) {
+            if (-not $inventory[$role].Contains($field)) { $inventory[$role][$field] = $false }
+            $inventory[$role][$field] = [bool]$inventory[$role][$field]
+        }
+        if (-not $inventory[$role].Contains('Service')) {
+            $inventory[$role].Service = Get-MxhProtocolServiceName -Role $role
+        }
+        if ($inventory[$role].Partial) { throw "检测到不完整的协议安装：$(Get-MxhProtocolRoleLabel -Role $role)。请先人工修复或恢复备份。" }
+        if (($inventory[$role].Enabled -or $inventory[$role].Active) -and -not $inventory[$role].Installed) {
+            throw "协议状态不一致：未完整安装但处于启用/运行状态：$(Get-MxhProtocolRoleLabel -Role $role)。"
+        }
+    }
+    if ($inventory.RealityEntry.Enabled -and $inventory.AnyTlsEntry.Enabled) {
+        throw 'Reality 与 AnyTLS 共用 TCP 443，不能同时设为开机启用。'
+    }
+    if ($inventory.RealityEntry.Active -and $inventory.AnyTlsEntry.Active) {
+        throw 'Reality 与 AnyTLS 共用 TCP 443，不能同时运行。'
+    }
+    return $inventory
+}
+
+function Get-MxhInventoryPrimaryRole {
+    param([Parameter(Mandatory)] [Collections.IDictionary]$Inventory)
+    foreach ($role in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding')) {
+        if ([bool]$Inventory[$role].Enabled) { return $role }
+    }
+    return 'MonitorOnly'
+}
+
+function Test-MxhProtocolInstalled {
+    param(
+        [Parameter(Mandatory)] [Collections.IDictionary]$Plan,
+        [Parameter(Mandatory)] [string]$Role
+    )
+    if ($Plan.Contains('ProtocolInventory') -and $Plan.ProtocolInventory.Contains($Role)) {
+        return [bool]$Plan.ProtocolInventory[$Role].Installed
+    }
+    return [string]$Plan.Role -eq $Role
+}
+
+function Show-MxhProtocolInventory {
+    param([Parameter(Mandatory)] [Collections.IDictionary]$Inventory)
+    Write-Host ''
+    Write-Host '协议安装与启用状态' -ForegroundColor White
+    foreach ($role in (Get-MxhManagedProtocolRoles)) {
+        $item = $Inventory[$role]
+        $installed = if ($item.Installed) { '已安装' } else { '未安装' }
+        $enabled = if ($item.Enabled) { '已启用' } else { '未启用' }
+        $active = if ($item.Active) { '运行中' } else { '未运行' }
+        Write-Host "  $(Get-MxhProtocolRoleLabel -Role $role)：$installed / $enabled / $active"
+    }
+    Write-VpsUi 'Reality 与 AnyTLS 可以同时保留在磁盘上，但因共用 TCP 443，只允许一个启用并运行；Shadowsocks 使用独立高位端口，可与入口协议同时运行。' Muted
+}
+
+function Get-MxhProtocolFirewallParameters {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [Collections.IDictionary]$Plan,
+        [Parameter(Mandatory)] [Collections.IDictionary]$State,
+        [Parameter(Mandatory)] [Collections.IDictionary]$Inventory
+    )
+
+    $ports = @([int]$Plan.Ports.SshPrimary, [int]$Plan.Ports.SshRescue)
+    $bootstrapRemoved = $State.Contains('BootstrapSshRemoved') -and [bool]$State.BootstrapSshRemoved
+    if (-not $bootstrapRemoved) { $ports += [int]$Plan.Server.BootstrapSshPort }
+    if ([bool]$Inventory.RealityEntry.Enabled) {
+        $ports += [int]$Plan.Ports.XrayPrimary
+        $ports += [int]$Plan.Ports.XrayBackup
+    }
+    if ([bool]$Inventory.AnyTlsEntry.Enabled) { $ports += [int]$Plan.Ports.AnyTlsPrimary }
+    $ports = @($ports | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
+
+    $parameters = [ordered]@{
+        TCP_PORTS = ($ports -join ',')
+        RESTRICTED_PORT = ''
+        ALLOWED_IPV4S = ''
+        ALLOWED_IPV6S = ''
+    }
+    if ([bool]$Inventory.ShadowsocksLanding.Enabled) {
+        $parameters.RESTRICTED_PORT = [string]$Plan.Ports.LandingShadowsocks
+        $parameters.ALLOWED_IPV4S = (@($Plan.Shadowsocks.TrustedEntryIPv4s) -join ',')
+        $parameters.ALLOWED_IPV6S = (@($Plan.Shadowsocks.TrustedEntryIPv6s) -join ',')
+    }
+    return $parameters
+}
+
+function Invoke-MxhProtocolFirewall {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] [Collections.IDictionary]$Inventory,
+        [Parameter(Mandatory)] [string]$BackupStateName
+    )
+    $firewallMode = if ($Context.Plan.Contains('Firewall') -and $Context.Plan.Firewall.Contains('Mode')) {
+        [string]$Context.Plan.Firewall.Mode
+    } else { 'ManagedNftables' }
+    if ($firewallMode -eq 'PreserveExisting') {
+        if ($Context.Plan.Contains('Migration') -and $Context.Plan.Migration.Contains('InitialInventory') -and
+            -not [bool]$Context.Plan.Migration.InitialInventory.ShadowsocksLanding.Installed -and
+            [bool]$Inventory.ShadowsocksLanding.Enabled) {
+            throw '导入实例使用“保留现有防火墙”模式；新增 Shadowsocks 高位端口需要单独审计并人工配置防火墙，脚本拒绝自动 flush/覆盖。'
+        }
+        $result = Invoke-VpsRemoteScript -Context $Context -Asset 'existing-firewall-validate.sh' -TimeoutSeconds 180
+        if ($result.StdOut -notmatch 'VPSDEPLOY_EXISTING_FIREWALL_OK') { throw '现有防火墙语法检查未返回成功标记。' }
+        if (-not $Context.State.Contains('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
+        $Context.State.BackupDirectories[$BackupStateName] = '<preserved-existing-firewall>'
+        Save-VpsContext -Context $Context
+        Write-VpsUi '已保留导入实例的现有防火墙，没有执行 flush ruleset 或端口重写。' Warning
+        return
+    }
+    $parameters = Get-MxhProtocolFirewallParameters -Plan $Context.Plan -State $Context.State -Inventory $Inventory
+    $result = Invoke-VpsRemoteScript -Context $Context -Asset 'nftables-apply.sh' -Parameters $parameters
+    $backup = Get-VpsMarkerValue $result.StdOut BACKUP_DIR -Required
+    if (-not $Context.State.Contains('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
+    $Context.State.BackupDirectories[$BackupStateName] = $backup
+    Save-VpsContext -Context $Context
+}
+
 function Test-MxhModuleSucceeded {
     param(
         [Parameter(Mandatory)] [Collections.IDictionary]$State,
@@ -29,14 +199,27 @@ function Test-MxhModuleSucceeded {
 
 function Get-MxhMigrationModuleIds {
     param(
-        [Parameter(Mandatory)] [ValidateSet('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding')]
+        [Parameter(Mandatory)] [ValidateSet('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')]
         [string]$TargetRole,
-        [string]$RealityTargetMode = 'ExternalAudited'
+        [string]$RealityTargetMode = 'ExternalAudited',
+        [ValidateSet('InstallActivate', 'InstallStandby', 'Enable', 'Disable', 'Uninstall', 'NetworkTune')]
+        [string]$Operation = 'InstallActivate'
     )
 
     $ids = [Collections.Generic.List[string]]::new()
     $ids.Add('migration-preflight')
-    if ($TargetRole -eq 'RealityEntry') {
+    if ($Operation -eq 'NetworkTune') {
+        $ids.Add('migration-arm-rollback')
+    }
+    elseif ($Operation -in @('Enable', 'Disable')) {
+        $ids.Add('migration-arm-rollback')
+        $ids.Add('protocol-lifecycle-state')
+    }
+    elseif ($Operation -eq 'Uninstall') {
+        $ids.Add('migration-arm-rollback')
+        $ids.Add('protocol-lifecycle-uninstall')
+    }
+    elseif ($TargetRole -eq 'RealityEntry') {
         if ($RealityTargetMode -eq 'LocalOwnedTls') {
             $ids.Add('certbot-dns')
             $ids.Add('local-https-target')
@@ -58,9 +241,10 @@ function Get-MxhMigrationModuleIds {
         $ids.Add('landing-client-export')
         $ids.Add('migration-shadowsocks-probe')
     }
-    $ids.Add('network-tuning')
-    $ids.Add('nftables-transition')
+    if ($Operation -eq 'NetworkTune') { $ids.Add('network-tuning') }
+    if ($Operation -ne 'NetworkTune') { $ids.Add('nftables-transition') }
     $ids.Add('final-validation')
+    if ($Operation -ne 'NetworkTune') { $ids.Add('protocol-lifecycle-final-firewall') }
     $ids.Add('migration-commit')
     $ids.Add('private-archive')
     return $ids.ToArray()
@@ -74,9 +258,9 @@ function Test-MxhProtocolMigrationSource {
         [Parameter(Mandatory)] [Collections.IDictionary]$State
     )
 
-    $supported = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding')
+    $supported = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     if ([string]$Plan.Role -notin $supported) {
-        throw '协议迁移只支持 Reality、AnyTLS 和 Shadowsocks 三种已完成角色。'
+        throw '协议管理只支持由本工具验收的 Reality、AnyTLS、Shadowsocks 或已停用全部协议的实例。'
     }
     foreach ($section in @('Server', 'Ports', 'Paths', 'NetworkTuning', 'Komari')) {
         if (-not $Plan.Contains($section)) { throw "部署计划缺少 $section 段。" }
@@ -85,26 +269,29 @@ function Test-MxhProtocolMigrationSource {
     $planParent = [IO.Path]::GetFullPath((Split-Path -Parent $resolvedPlan)).TrimEnd('\', '/')
     $archive = [IO.Path]::GetFullPath([string]$Plan.Paths.Archive).TrimEnd('\', '/')
     if (-not $planParent.Equals($archive, [StringComparison]::OrdinalIgnoreCase)) {
-        throw '计划文件不在其声明的实例私有归档根目录中，拒绝迁移。'
+        throw '计划文件不在其声明的实例私有归档根目录中，拒绝协议管理。'
     }
     $requiredModules = @('ssh-transition', 'nftables-transition', 'final-validation', 'ssh-cutover', 'private-archive')
-    $protocolModule = switch ([string]$Plan.Role) {
-        'RealityEntry' { 'xray-reality' }
-        'AnyTlsEntry' { 'sing-box-anytls' }
-        'ShadowsocksLanding' { 'sing-box-shadowsocks' }
+    $inventory = Get-MxhProtocolInventory -Plan $Plan -State $State
+    $moduleForRole = @{
+        RealityEntry = 'xray-reality'
+        AnyTlsEntry = 'sing-box-anytls'
+        ShadowsocksLanding = 'sing-box-shadowsocks'
     }
-    $requiredModules += $protocolModule
+    foreach ($role in (Get-MxhManagedProtocolRoles)) {
+        if ([bool]$inventory[$role].Installed) { $requiredModules += $moduleForRole[$role] }
+    }
     $missing = @($requiredModules | Where-Object { -not (Test-MxhModuleSucceeded -State $State -Id $_) })
     if ($missing.Count -gt 0) {
         throw "源计划尚未完整验收，缺少成功状态：$($missing -join ', ')。请先使用继续未完成部署。"
     }
     $managementPort = [int]$State.CurrentManagementPort
     if ($managementPort -notin @([int]$Plan.Ports.SshPrimary, [int]$Plan.Ports.SshRescue)) {
-        throw '当前管理端口不是计划中的 SSH 主/救援端口，拒绝自动迁移。'
+        throw '当前管理端口不是计划中的 SSH 主/救援端口，拒绝自动协议管理。'
     }
     $keyPath = Join-Path ([string]$Plan.Paths.KeyDirectory) 'id_ed25519'
     if (-not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
-        throw '实例专用 SSH 私钥不存在，无法安全迁移。'
+        throw '实例专用 SSH 私钥不存在，无法安全管理协议。'
     }
     foreach ($privateFile in @('deployment-state.json', 'deployment-secrets.private.json')) {
         if (-not (Test-Path -LiteralPath (Join-Path $archive $privateFile) -PathType Leaf)) {
@@ -114,7 +301,7 @@ function Test-MxhProtocolMigrationSource {
     if ($Plan.Contains('Migration') -and [bool]$Plan.Migration.Enabled) {
         $status = [string]$Plan.Migration.Status
         if ($status -notin @('Completed', 'Committed')) {
-            throw "已有未完成迁移（状态 $status），请使用继续未完成部署，不要创建第二个迁移。"
+            throw "已有未完成协议变更（状态 $status），请使用继续未完成部署，不要创建第二个操作。"
         }
     }
     return $true
@@ -161,9 +348,30 @@ function Test-MxhMigrationValidationEntryPlan {
     return $true
 }
 
+function Get-MxhRemoteProtocolInventory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ProjectRoot,
+        [Parameter(Mandatory)] [string]$PlanPath
+    )
+
+    $context = New-MxhReadonlyContextFromPlan -ProjectRoot $ProjectRoot -PlanPath $PlanPath
+    $result = Invoke-VpsRemoteScript -Context $context -Asset 'protocol-lifecycle-status.sh' -TimeoutSeconds 180
+    if ($result.StdOut -notmatch 'VPSDEPLOY_PROTOCOL_STATUS_OK') {
+        throw '远端协议状态检查未返回成功标记。'
+    }
+    $json = Get-VpsMarkerValue $result.StdOut PROTOCOL_INVENTORY -Required
+    $inventory = $json | ConvertFrom-Json -AsHashtable
+    return Get-MxhProtocolInventory -Plan $context.Plan -State $context.State -RemoteInventory $inventory
+}
+
 function Read-MxhProtocolMigrationSource {
     [CmdletBinding()]
-    param([string]$PlanPath)
+    param(
+        [Parameter(Mandatory)] [string]$ProjectRoot,
+        [string]$PlanPath,
+        [switch]$DryRun
+    )
 
     $candidatePath = $PlanPath
     while ($true) {
@@ -181,16 +389,22 @@ function Read-MxhProtocolMigrationSource {
             $archive = [string]$plan.Paths.Archive
             $state = Read-VpsJsonHashtable -Path (Join-Path $archive 'deployment-state.json')
             Test-MxhProtocolMigrationSource -PlanPath $candidatePath -Plan $plan -State $state | Out-Null
+            $inventory = if ($DryRun) {
+                Get-MxhProtocolInventory -Plan $plan -State $state
+            }
+            else {
+                Get-MxhRemoteProtocolInventory -ProjectRoot $ProjectRoot -PlanPath $candidatePath
+            }
             Show-VpsPlanSummary -Plan $plan
-            Write-VpsUi "当前协议：$(Get-MxhProtocolRoleLabel -Role ([string]$plan.Role))" Info
+            Show-MxhProtocolInventory -Inventory $inventory
         }
         catch {
-            Write-VpsUi "不能作为迁移源：$($_.Exception.Message)" Warning
+            Write-VpsUi "不能进入协议管理：$($_.Exception.Message)" Warning
             $candidatePath = $null
             continue
         }
         try {
-            $choice = Read-VpsMenu '请选择迁移源操作' @(
+            $choice = Read-VpsMenu '请选择实例操作' @(
                 '使用此实例',
                 '重新选择计划文件',
                 '取消并返回主菜单'
@@ -201,7 +415,7 @@ function Read-MxhProtocolMigrationSource {
             $choice = 2
         }
         if ($choice -eq 1) {
-            return [pscustomobject]@{ PlanPath = $candidatePath; Plan = $plan; State = $state }
+            return [pscustomobject]@{ PlanPath = $candidatePath; Plan = $plan; State = $state; Inventory = $inventory }
         }
         if ($choice -eq 3) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         $candidatePath = $null
@@ -213,8 +427,12 @@ function New-MxhProtocolMigrationPlan {
     param(
         [Parameter(Mandatory)] [Collections.IDictionary]$SourcePlan,
         [Parameter(Mandatory)] [string]$SourcePlanPath,
+        [Collections.IDictionary]$SourceState,
+        [Collections.IDictionary]$SourceInventory,
         [Parameter(Mandatory)] [ValidateSet('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding')]
         [string]$TargetRole,
+        [ValidateSet('InstallActivate', 'InstallStandby')]
+        [string]$Operation = 'InstallActivate',
         [int]$TargetServicePort,
         [string]$RealityTargetMode = 'ExternalAudited',
         [string]$RealityTarget,
@@ -238,8 +456,15 @@ function New-MxhProtocolMigrationPlan {
         [Collections.IDictionary]$NetworkTuning = ([ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null })
     )
 
-    $sourceRole = [string]$SourcePlan.Role
-    if ($sourceRole -eq $TargetRole) { throw '源协议和目标协议不能相同。' }
+    $initialInventory = if ($SourceInventory) {
+        Get-MxhProtocolInventory -Plan $SourcePlan -State $SourceState -RemoteInventory $SourceInventory
+    } else {
+        Get-MxhProtocolInventory -Plan $SourcePlan -State $SourceState
+    }
+    if ([bool]$initialInventory[$TargetRole].Installed) {
+        throw '目标协议已经安装；请使用“切换/启停已安装协议”，如需重装请先停用并卸载。'
+    }
+    $sourceRole = Get-MxhInventoryPrimaryRole -Inventory $initialInventory
     $plan = ($SourcePlan | ConvertTo-Json -Depth 40) | ConvertFrom-Json -AsHashtable
     $plan.Role = $TargetRole
     $plan['UpdatedAt'] = (Get-Date).ToString('o')
@@ -258,7 +483,7 @@ function New-MxhProtocolMigrationPlan {
         $plan.Reality.ForceIpv4Egress = $ForceIpv4Egress
     }
     if (-not $plan.Contains('AnyTls')) { $plan.AnyTls = [ordered]@{} }
-    $plan.AnyTls.Enabled = ($TargetRole -eq 'AnyTlsEntry')
+    $plan.AnyTls.Enabled = ($TargetRole -eq 'AnyTlsEntry') -or [bool]$initialInventory.AnyTlsEntry.Installed
     if ($TargetRole -eq 'AnyTlsEntry') {
         $plan.AnyTls.ServerName = $AnyTlsServerName
         $plan.AnyTls.EchPublicName = $EchPublicName
@@ -267,7 +492,10 @@ function New-MxhProtocolMigrationPlan {
         $plan.AnyTls.PaddingScheme = @($AnyTlsPaddingScheme)
     }
     if (-not $plan.Contains('TrustedTls')) { $plan.TrustedTls = [ordered]@{} }
-    $plan.TrustedTls.Enabled = $TrustedTlsEnabled
+    $sourceUsesTrustedTls = [bool]$initialInventory.AnyTlsEntry.Installed -or
+        ([bool]$initialInventory.RealityEntry.Installed -and $SourcePlan.Contains('Reality') -and
+        $SourcePlan.Reality.Contains('TargetMode') -and $SourcePlan.Reality.TargetMode -eq 'LocalOwnedTls')
+    $plan.TrustedTls.Enabled = $TrustedTlsEnabled -or $sourceUsesTrustedTls
     $plan.TrustedTls.ZoneName = $CloudflareZoneName
     $plan.TrustedTls.CertbotEmail = $CertbotEmail
     $plan.TrustedTls.CloudflareTokenFile = $CloudflareTokenFile
@@ -286,19 +514,53 @@ function New-MxhProtocolMigrationPlan {
     }
     $plan.NetworkTuning = $NetworkTuning
 
+    $finalInventory = Copy-MxhHashtable -Value $initialInventory
+    $finalInventory[$TargetRole].Installed = $true
+    $finalInventory[$TargetRole].Partial = $false
+    if ($Operation -eq 'InstallActivate') {
+        $finalInventory[$TargetRole].Enabled = $true
+        $finalInventory[$TargetRole].Active = $true
+        if ($TargetRole -eq 'RealityEntry') {
+            $finalInventory.AnyTlsEntry.Enabled = $false
+            $finalInventory.AnyTlsEntry.Active = $false
+        }
+        elseif ($TargetRole -eq 'AnyTlsEntry') {
+            $finalInventory.RealityEntry.Enabled = $false
+            $finalInventory.RealityEntry.Active = $false
+        }
+    }
+    else {
+        $finalInventory[$TargetRole].Enabled = $false
+        $finalInventory[$TargetRole].Active = $false
+    }
+    $validationInventory = Copy-MxhHashtable -Value $finalInventory
+    $validationInventory[$TargetRole].Enabled = $true
+    $validationInventory[$TargetRole].Active = $true
+    if ($TargetRole -eq 'RealityEntry') {
+        $validationInventory.AnyTlsEntry.Enabled = $false
+        $validationInventory.AnyTlsEntry.Active = $false
+    }
+    elseif ($TargetRole -eq 'AnyTlsEntry') {
+        $validationInventory.RealityEntry.Enabled = $false
+        $validationInventory.RealityEntry.Active = $false
+    }
+    $plan['ProtocolInventory'] = $finalInventory
+    $finalRole = Get-MxhInventoryPrimaryRole -Inventory $finalInventory
+
     $sourcePort = switch ($sourceRole) {
         'ShadowsocksLanding' { [int]$SourcePlan.Ports.LandingShadowsocks }
         default { 443 }
     }
     $targetPort = if ($TargetRole -eq 'ShadowsocksLanding') { $TargetServicePort } else { 443 }
-    $moduleIds = @(Get-MxhMigrationModuleIds -TargetRole $TargetRole -RealityTargetMode $RealityTargetMode)
+    $moduleIds = @(Get-MxhMigrationModuleIds -TargetRole $TargetRole -RealityTargetMode $RealityTargetMode -Operation $Operation)
     $plan['Migration'] = [ordered]@{
         Enabled = $true
-        SchemaVersion = 1
-        Mode = 'ProtocolRoleConversion'
+        SchemaVersion = 2
+        Mode = 'ProtocolLifecycle'
+        Operation = $Operation
         SourceRole = $sourceRole
         TargetRole = $TargetRole
-        SourceService = Get-MxhProtocolServiceName -Role $sourceRole
+        SourceService = if ($sourceRole -eq 'MonitorOnly') { $null } else { Get-MxhProtocolServiceName -Role $sourceRole }
         TargetService = Get-MxhProtocolServiceName -Role $TargetRole
         SourcePrimaryPort = $sourcePort
         TargetPrimaryPort = $targetPort
@@ -307,6 +569,12 @@ function New-MxhProtocolMigrationPlan {
         SourcePlanSha256 = (Get-FileHash -LiteralPath $SourcePlanPath -Algorithm SHA256).Hash
         RollbackTimeoutMinutes = 20
         ModuleIds = $moduleIds
+        InitialInventory = $initialInventory
+        ValidationInventory = $validationInventory
+        FinalInventory = $finalInventory
+        FinalRole = $finalRole
+        KeepExistingProtocols = $true
+        RemoveRole = $null
         Status = 'Planned'
         CreatedAt = (Get-Date).ToString('o')
         LocalBackupDirectory = $null
@@ -314,26 +582,221 @@ function New-MxhProtocolMigrationPlan {
     return $plan
 }
 
+function New-MxhProtocolLifecyclePlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [Collections.IDictionary]$SourcePlan,
+        [Parameter(Mandatory)] [string]$SourcePlanPath,
+        [Collections.IDictionary]$SourceState,
+        [Collections.IDictionary]$SourceInventory,
+        [Parameter(Mandatory)] [ValidateSet('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding')]
+        [string]$TargetRole,
+        [Parameter(Mandatory)] [ValidateSet('Enable', 'Disable', 'Uninstall')]
+        [string]$Operation
+    )
+
+    $initialInventory = if ($SourceInventory) {
+        Get-MxhProtocolInventory -Plan $SourcePlan -State $SourceState -RemoteInventory $SourceInventory
+    } else {
+        Get-MxhProtocolInventory -Plan $SourcePlan -State $SourceState
+    }
+    $item = $initialInventory[$TargetRole]
+    if (-not [bool]$item.Installed) { throw '该协议尚未安装；请使用“安装/补充协议”。' }
+    if ($Operation -eq 'Enable' -and [bool]$item.Enabled) { throw '该协议已经启用。' }
+    if ($Operation -eq 'Disable' -and -not [bool]$item.Enabled) { throw '该协议已经停用。' }
+    if ($Operation -eq 'Uninstall' -and ([bool]$item.Enabled -or [bool]$item.Active)) {
+        throw '安全限制：只能卸载已经停用且未运行的协议。请先单独停用或切换。'
+    }
+
+    $finalInventory = Copy-MxhHashtable -Value $initialInventory
+    if ($Operation -eq 'Enable') {
+        $finalInventory[$TargetRole].Enabled = $true
+        $finalInventory[$TargetRole].Active = $true
+        if ($TargetRole -eq 'RealityEntry') {
+            $finalInventory.AnyTlsEntry.Enabled = $false
+            $finalInventory.AnyTlsEntry.Active = $false
+        }
+        elseif ($TargetRole -eq 'AnyTlsEntry') {
+            $finalInventory.RealityEntry.Enabled = $false
+            $finalInventory.RealityEntry.Active = $false
+        }
+    }
+    elseif ($Operation -eq 'Disable') {
+        $finalInventory[$TargetRole].Enabled = $false
+        $finalInventory[$TargetRole].Active = $false
+    }
+    else {
+        $finalInventory[$TargetRole].Installed = $false
+        $finalInventory[$TargetRole].Enabled = $false
+        $finalInventory[$TargetRole].Active = $false
+    }
+
+    $sourceRole = Get-MxhInventoryPrimaryRole -Inventory $initialInventory
+    $finalRole = Get-MxhInventoryPrimaryRole -Inventory $finalInventory
+    $plan = Copy-MxhHashtable -Value $SourcePlan
+    # Role is the execution role until commit; commit writes FinalRole.
+    $plan.Role = $TargetRole
+    $plan.UpdatedAt = (Get-Date).ToString('o')
+    $plan['ProtocolInventory'] = $finalInventory
+    if ($plan.Contains('AnyTls')) { $plan.AnyTls.Enabled = [bool]$finalInventory.AnyTlsEntry.Installed }
+
+    $sourcePort = if ($sourceRole -eq 'ShadowsocksLanding') { [int]$SourcePlan.Ports.LandingShadowsocks } else { 443 }
+    $targetPort = if ($TargetRole -eq 'ShadowsocksLanding') { [int]$SourcePlan.Ports.LandingShadowsocks } else { 443 }
+    $moduleIds = @(Get-MxhMigrationModuleIds -TargetRole $TargetRole -Operation $Operation)
+    $plan['Migration'] = [ordered]@{
+        Enabled = $true
+        SchemaVersion = 2
+        Mode = 'ProtocolLifecycle'
+        Operation = $Operation
+        SourceRole = $sourceRole
+        TargetRole = $TargetRole
+        SourceService = if ($sourceRole -eq 'MonitorOnly') { $null } else { Get-MxhProtocolServiceName -Role $sourceRole }
+        TargetService = Get-MxhProtocolServiceName -Role $TargetRole
+        SourcePrimaryPort = $sourcePort
+        TargetPrimaryPort = $targetPort
+        ValidationEntryPlanPath = $null
+        SourcePlanPath = (Resolve-Path -LiteralPath $SourcePlanPath).Path
+        SourcePlanSha256 = (Get-FileHash -LiteralPath $SourcePlanPath -Algorithm SHA256).Hash
+        RollbackTimeoutMinutes = 20
+        ModuleIds = $moduleIds
+        InitialInventory = $initialInventory
+        ValidationInventory = $finalInventory
+        FinalInventory = $finalInventory
+        FinalRole = $finalRole
+        KeepExistingProtocols = $true
+        RemoveRole = if ($Operation -eq 'Uninstall') { $TargetRole } else { $null }
+        Status = 'Planned'
+        CreatedAt = (Get-Date).ToString('o')
+        LocalBackupDirectory = $null
+    }
+    return $plan
+}
+
+function New-MxhNetworkTuningPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [Collections.IDictionary]$SourcePlan,
+        [Parameter(Mandatory)] [string]$SourcePlanPath,
+        [Collections.IDictionary]$SourceState,
+        [Collections.IDictionary]$SourceInventory,
+        [Parameter(Mandatory)] [ValidateSet('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')]
+        [string]$TuningRole,
+        [Parameter(Mandatory)] [Collections.IDictionary]$NetworkTuning
+    )
+
+    $inventory = if ($SourceInventory) {
+        Get-MxhProtocolInventory -Plan $SourcePlan -State $SourceState -RemoteInventory $SourceInventory
+    } else {
+        Get-MxhProtocolInventory -Plan $SourcePlan -State $SourceState
+    }
+    if ($TuningRole -ne 'MonitorOnly' -and -not [bool]$inventory[$TuningRole].Installed) {
+        throw '网络调优角色必须是该 VPS 已安装的协议角色。'
+    }
+    $plan = Copy-MxhHashtable -Value $SourcePlan
+    $plan.Role = $TuningRole
+    $plan.UpdatedAt = (Get-Date).ToString('o')
+    $plan.NetworkTuning = Copy-MxhHashtable -Value $NetworkTuning
+    $plan['ProtocolInventory'] = Copy-MxhHashtable -Value $inventory
+    $primaryRole = Get-MxhInventoryPrimaryRole -Inventory $inventory
+    $primaryPort = if ($primaryRole -eq 'ShadowsocksLanding') { [int]$plan.Ports.LandingShadowsocks } elseif ($primaryRole -eq 'MonitorOnly') { 0 } else { 443 }
+    $plan['Migration'] = [ordered]@{
+        Enabled = $true
+        SchemaVersion = 2
+        Mode = 'ProtocolLifecycle'
+        Operation = 'NetworkTune'
+        SourceRole = $primaryRole
+        TargetRole = $TuningRole
+        SourceService = if ($primaryRole -eq 'MonitorOnly') { $null } else { Get-MxhProtocolServiceName -Role $primaryRole }
+        TargetService = if ($TuningRole -eq 'MonitorOnly') { $null } else { Get-MxhProtocolServiceName -Role $TuningRole }
+        SourcePrimaryPort = $primaryPort
+        TargetPrimaryPort = $primaryPort
+        ValidationEntryPlanPath = $null
+        SourcePlanPath = (Resolve-Path -LiteralPath $SourcePlanPath).Path
+        SourcePlanSha256 = (Get-FileHash -LiteralPath $SourcePlanPath -Algorithm SHA256).Hash
+        RollbackTimeoutMinutes = 20
+        ModuleIds = @(Get-MxhMigrationModuleIds -TargetRole $TuningRole -Operation NetworkTune)
+        InitialInventory = $inventory
+        ValidationInventory = $inventory
+        FinalInventory = $inventory
+        FinalRole = $primaryRole
+        KeepExistingProtocols = $true
+        RemoveRole = $null
+        Status = 'Planned'
+        CreatedAt = (Get-Date).ToString('o')
+        LocalBackupDirectory = $null
+    }
+    return $plan
+}
+
+function New-VpsNetworkTuningPlanInteractive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ProjectRoot,
+        [string]$PlanPath,
+        [switch]$DryRun
+    )
+
+    $source = Read-MxhProtocolMigrationSource -ProjectRoot $ProjectRoot -PlanPath $PlanPath -DryRun:$DryRun
+    $inventory = Get-MxhProtocolInventory -Plan $source.Plan -State $source.State -RemoteInventory $source.Inventory
+    $roles = @(Get-MxhManagedProtocolRoles | Where-Object { $inventory[$_].Installed })
+    if ($roles.Count -eq 0) { $roles = @('MonitorOnly') }
+    $defaultRole = Get-MxhInventoryPrimaryRole -Inventory $inventory
+    if ($defaultRole -notin $roles) { $defaultRole = $roles[0] }
+    if ($roles.Count -gt 1) {
+        $labels = @($roles | ForEach-Object { Get-MxhProtocolRoleLabel -Role $_ })
+        $default = [Array]::IndexOf($roles, $defaultRole) + 1
+        $roleChoice = Read-VpsMenu '按哪个主要角色计算保守队列下限' $labels $default -AllowBack
+        $tuningRole = $roles[$roleChoice - 1]
+    }
+    else { $tuningRole = $roles[0] }
+
+    $settings = Read-VpsNetworkTuningSettings -Role $tuningRole -AllowBack
+    $plan = New-MxhNetworkTuningPlan -SourcePlan $source.Plan -SourcePlanPath $source.PlanPath `
+        -SourceState $source.State -SourceInventory $source.Inventory -TuningRole $tuningRole -NetworkTuning $settings
+    Write-Host ''
+    Write-Host '独立网络调优摘要' -ForegroundColor White
+    Write-Host "  计算角色：$(Get-MxhProtocolRoleLabel -Role $tuningRole)"
+    if ($settings.Mode -eq 'AdaptiveConservative') {
+        Write-Host "  模式：已知带宽/RTT 自适应（$($settings.BandwidthMbps) Mbps / $($settings.ReferenceRttMs) ms）"
+    }
+    else {
+        Write-Host '  模式：基础保守（无需 RTT，不调整 TCP 缓冲区上限）'
+    }
+    Write-Host '  协议、端口和防火墙：不改变'
+    Write-Host '  回滚：应用前备份 sysctl，并启用 20 分钟服务端恢复保护'
+    $confirm = Read-VpsMenu '请核对网络调优方案' @('确认并执行', '取消并返回') 1 -AllowBack
+    if ($confirm -ne 1) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
+    return [pscustomobject]@{ Plan = $plan; Source = $source }
+}
+
 function New-MxhProtocolMigrationDetails {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] $Source,
-        [Parameter(Mandatory)] [string]$ProjectRoot
+        [Parameter(Mandatory)] [string]$ProjectRoot,
+        [ValidateSet('InstallActivate', 'InstallStandby')]
+        [string]$Operation = 'InstallActivate'
     )
 
     $versions = Get-VpsVersions -ProjectRoot $ProjectRoot
     $sourcePlan = $Source.Plan
-    $sourceRole = [string]$sourcePlan.Role
-    $allRoles = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding')
-    $targetRoles = @($allRoles | Where-Object { $_ -ne $sourceRole })
+    $initialInventory = Get-MxhProtocolInventory -Plan $sourcePlan -State $Source.State -RemoteInventory $Source.Inventory
+    $sourceRole = Get-MxhInventoryPrimaryRole -Inventory $initialInventory
+    $allRoles = @(Get-MxhManagedProtocolRoles)
+    $targetRoles = @($allRoles | Where-Object { -not [bool]$initialInventory[$_].Installed })
+    if ($targetRoles.Count -eq 0) {
+        Write-VpsUi '三种协议都已安装；请使用“切换/启停已安装协议”，或先卸载后重装。' Warning
+        throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
+    }
     $preferredTarget = if ($sourceRole -eq 'RealityEntry') { 'AnyTlsEntry' } else { 'RealityEntry' }
     if ($preferredTarget -notin $targetRoles) { $preferredTarget = $targetRoles[0] }
 
-    $sourceActivePorts = @([int]$sourcePlan.Ports.SshPrimary, [int]$sourcePlan.Ports.SshRescue, 443)
-    if ($sourceRole -eq 'RealityEntry' -and $sourcePlan.Ports.Contains('XrayBackup') -and $sourcePlan.Ports.XrayBackup) {
+    $sourceActivePorts = @([int]$sourcePlan.Ports.SshPrimary, [int]$sourcePlan.Ports.SshRescue)
+    if ([bool]$initialInventory.RealityEntry.Installed -or [bool]$initialInventory.AnyTlsEntry.Installed) { $sourceActivePorts += 443 }
+    if ([bool]$initialInventory.RealityEntry.Installed -and $sourcePlan.Ports.Contains('XrayBackup') -and $sourcePlan.Ports.XrayBackup) {
         $sourceActivePorts += [int]$sourcePlan.Ports.XrayBackup
     }
-    if ($sourceRole -eq 'ShadowsocksLanding' -and $sourcePlan.Ports.Contains('LandingShadowsocks') -and $sourcePlan.Ports.LandingShadowsocks) {
+    if ([bool]$initialInventory.ShadowsocksLanding.Installed -and $sourcePlan.Ports.Contains('LandingShadowsocks') -and $sourcePlan.Ports.LandingShadowsocks) {
         $sourceActivePorts += [int]$sourcePlan.Ports.LandingShadowsocks
     }
     $sourceActivePorts = @($sourceActivePorts | Sort-Object -Unique)
@@ -393,7 +856,7 @@ function New-MxhProtocolMigrationDetails {
                 $labels = @($targetRoles | ForEach-Object { Get-MxhProtocolRoleLabel -Role $_ })
                 $default = [Array]::IndexOf($targetRoles, [string]$wizard.TargetRole) + 1
                 if ($default -lt 1) { $default = 1 }
-                $choice = Read-VpsMenu '迁移到哪一种协议角色' $labels $default -AllowBack
+                $choice = Read-VpsMenu '安装哪一种新协议' $labels $default -AllowBack
                 $newRole = $targetRoles[$choice - 1]
                 if ($wizard.TargetRole -ne $newRole) {
                     $wizard.TargetRole = $newRole
@@ -574,7 +1037,7 @@ function New-MxhProtocolMigrationDetails {
             }
         },
         [pscustomobject]@{
-            Id = 'network-adaptive'; ShouldRun = { $true }; Run = {
+            Id = 'network-adaptive'; ShouldRun = { $false }; Run = {
                 $wizard.NetworkAdaptive = Read-VpsYesNo '是否为目标角色重新应用保守自适应网络调优？' ([bool]$wizard.NetworkAdaptive) -AllowBack
                 if (-not $wizard.NetworkAdaptive) {
                     $wizard.BandwidthMbps = $null
@@ -583,14 +1046,14 @@ function New-MxhProtocolMigrationDetails {
             }
         },
         [pscustomobject]@{
-            Id = 'network-bandwidth'; ShouldRun = { [bool]$wizard.NetworkAdaptive }; Run = {
+            Id = 'network-bandwidth'; ShouldRun = { $false }; Run = {
                 $wizard.BandwidthMbps = [int](Read-VpsText '套餐标称带宽（Mbps）' -Default ([string]$wizard.BandwidthMbps) -AllowBack -Validate {
                     param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 100000
                 } -ValidationMessage '请输入 1–100000 之间的整数 Mbps。')
             }
         },
         [pscustomobject]@{
-            Id = 'network-rtt'; ShouldRun = { [bool]$wizard.NetworkAdaptive }; Run = {
+            Id = 'network-rtt'; ShouldRun = { $false }; Run = {
                 $prompt = if ($wizard.TargetRole -in @('RealityEntry', 'AnyTlsEntry')) { '主要使用地到该入口 VPS 的典型 RTT（ms）' } else { '常用入口 VPS 到该落地机的典型 RTT（ms）' }
                 $wizard.ReferenceRttMs = [int](Read-VpsText $prompt -Default ([string]$wizard.ReferenceRttMs) -AllowBack -Validate {
                     param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 2000
@@ -602,16 +1065,15 @@ function New-MxhProtocolMigrationDetails {
     $buildPlan = {
         $trustedTls = $wizard.TargetRole -eq 'AnyTlsEntry' -or `
             ($wizard.TargetRole -eq 'RealityEntry' -and $wizard.RealityTargetMode -eq 'LocalOwnedTls')
-        $network = if ($wizard.NetworkAdaptive) {
-            [ordered]@{ Mode = 'AdaptiveConservative'; BandwidthMbps = [int]$wizard.BandwidthMbps; ReferenceRttMs = [int]$wizard.ReferenceRttMs }
-        } else { [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null } }
+        $network = Copy-MxhHashtable -Value $sourcePlan.NetworkTuning
         $targetPort = if ($wizard.TargetRole -eq 'RealityEntry') { [int]$wizard.XrayBackup } elseif ($wizard.TargetRole -eq 'ShadowsocksLanding') { [int]$wizard.LandingPort } else { 443 }
         $realityServerName = if ($wizard.TargetRole -eq 'RealityEntry') { [string]$wizard.RealityTarget } else { $null }
         $realityAddress = if ($wizard.TargetRole -eq 'RealityEntry' -and $wizard.RealityTargetMode -eq 'LocalOwnedTls') {
             '127.0.0.1:8443'
         } elseif ($wizard.TargetRole -eq 'RealityEntry') { "$($wizard.RealityTarget):443" } else { $null }
         New-MxhProtocolMigrationPlan -SourcePlan $sourcePlan -SourcePlanPath $Source.PlanPath `
-            -TargetRole $wizard.TargetRole -TargetServicePort $targetPort `
+            -SourceState $Source.State -SourceInventory $Source.Inventory `
+            -TargetRole $wizard.TargetRole -Operation $Operation -TargetServicePort $targetPort `
             -RealityTargetMode $wizard.RealityTargetMode -RealityTarget $wizard.RealityTarget `
             -RealityServerName $realityServerName -RealityTargetAddress $realityAddress `
             -AnyTlsServerName $wizard.AnyTlsServerName -EchPublicName $wizard.EchPublicName `
@@ -639,22 +1101,24 @@ function New-MxhProtocolMigrationDetails {
                 }
                 if ($previous -lt 0) { throw }
                 $index = $previous
-                Write-VpsUi "返回迁移上一项：$($steps[$previous].Id)" Muted
+                Write-VpsUi "返回协议安装上一项：$($steps[$previous].Id)" Muted
             }
         }
 
         $plan = & $buildPlan
         Write-Host ''
-        Write-Host '协议迁移摘要' -ForegroundColor White
+        Write-Host '协议安装摘要' -ForegroundColor White
         Write-Host "  实例：$($plan.Provider) / $($plan.Instance)"
-        Write-Host "  源协议：$(Get-MxhProtocolRoleLabel -Role $sourceRole)"
-        Write-Host "  目标协议：$(Get-MxhProtocolRoleLabel -Role ([string]$plan.Role))"
+        Write-Host "  当前主角色：$(Get-MxhProtocolRoleLabel -Role $sourceRole)"
+        Write-Host "  新安装协议：$(Get-MxhProtocolRoleLabel -Role ([string]$plan.Role))"
+        Write-Host "  安装后状态：$(if ($Operation -eq 'InstallActivate') { '启用新协议；冲突的 TCP 443 协议保留但停用' } else { '新协议保留为已安装但停用；恢复当前运行状态' })"
+        Write-Host '  网络调优：保持现状；如需调整请从主菜单进入“独立网络调优”'
         Write-Host "  SSH：保留 $($plan.Ports.SshPrimary) + $($plan.Ports.SshRescue)"
         Write-Host "  自动回滚：切换后 20 分钟内未完成验收则恢复源服务和旧 nftables"
         Show-VpsPlanSummary -Plan $plan
         try {
-            $choice = Read-VpsMenu '请核对迁移方案' @(
-                '确认并进入迁移模块计划',
+            $choice = Read-VpsMenu '请核对协议安装方案' @(
+                '确认并进入协议安装模块计划',
                 '返回修改上一项',
                 '取消并返回主菜单'
             ) 1 -AllowBack
@@ -671,21 +1135,192 @@ function New-MxhProtocolMigrationDetails {
     }
 }
 
+function New-MxhProtocolStateDetails {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Source)
+
+    $inventory = Get-MxhProtocolInventory -Plan $Source.Plan -State $Source.State -RemoteInventory $Source.Inventory
+    $actionChoice = Read-VpsMenu '切换/启停操作' @(
+        '启用一个已安装协议（Reality/AnyTLS 会自动切换 TCP 443 所有者）',
+        '停用一个当前已启用协议'
+    ) 1 -AllowBack
+    $operation = if ($actionChoice -eq 1) { 'Enable' } else { 'Disable' }
+    $candidates = if ($operation -eq 'Enable') {
+        @(Get-MxhManagedProtocolRoles | Where-Object { $inventory[$_].Installed -and -not $inventory[$_].Enabled })
+    } else {
+        @(Get-MxhManagedProtocolRoles | Where-Object { $inventory[$_].Installed -and $inventory[$_].Enabled })
+    }
+    if ($candidates.Count -eq 0) {
+        Write-VpsUi "没有可执行“$operation”的协议。" Warning
+        throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
+    }
+    $labels = @($candidates | ForEach-Object { Get-MxhProtocolRoleLabel -Role $_ })
+    $choice = Read-VpsMenu '选择协议' $labels 1 -AllowBack
+    $role = $candidates[$choice - 1]
+    $plan = New-MxhProtocolLifecyclePlan -SourcePlan $Source.Plan -SourcePlanPath $Source.PlanPath `
+        -SourceState $Source.State -SourceInventory $Source.Inventory -TargetRole $role -Operation $operation
+
+    Write-Host ''
+    Write-Host '协议状态变更摘要' -ForegroundColor White
+    Write-Host "  操作：$(if ($operation -eq 'Enable') { '启用/切换到' } else { '停用' }) $(Get-MxhProtocolRoleLabel -Role $role)"
+    if ($operation -eq 'Enable' -and $role -in @('RealityEntry', 'AnyTlsEntry')) {
+        Write-Host '  TCP 443：另一个入口协议将保留安装文件，但会停止并取消开机启用'
+    }
+    if ($operation -eq 'Disable' -and $role -in @('RealityEntry', 'AnyTlsEntry') -and
+        (Get-MxhInventoryPrimaryRole -Inventory $plan.Migration.FinalInventory) -eq 'MonitorOnly') {
+        Write-VpsUi '执行后不会有入口协议监听 TCP 443；SSH 与其他服务不受影响。' Warning
+    }
+    Show-MxhProtocolInventory -Inventory $plan.Migration.FinalInventory
+    $confirm = Read-VpsMenu '请核对状态变更' @('确认并执行', '返回上一级') 1 -AllowBack
+    if ($confirm -ne 1) { throw [InvalidOperationException]::new($script:VpsWizardBackMarker) }
+    return [pscustomobject]@{ Plan = $plan; Source = $Source }
+}
+
+function New-MxhProtocolUninstallDetails {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Source)
+
+    $inventory = Get-MxhProtocolInventory -Plan $Source.Plan -State $Source.State -RemoteInventory $Source.Inventory
+    $candidates = @(Get-MxhManagedProtocolRoles | Where-Object {
+            $inventory[$_].Installed -and -not $inventory[$_].Enabled -and -not $inventory[$_].Active
+        })
+    if ($candidates.Count -eq 0) {
+        Write-VpsUi '没有可安全卸载的协议。运行中或已启用的协议必须先通过“切换/启停”停用。' Warning
+        throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
+    }
+    $labels = @($candidates | ForEach-Object { Get-MxhProtocolRoleLabel -Role $_ })
+    $choice = Read-VpsMenu '选择要卸载的已停用协议' $labels 1 -AllowBack
+    $role = $candidates[$choice - 1]
+    $plan = New-MxhProtocolLifecyclePlan -SourcePlan $Source.Plan -SourcePlanPath $Source.PlanPath `
+        -SourceState $Source.State -SourceInventory $Source.Inventory -TargetRole $role -Operation Uninstall
+
+    Write-Host ''
+    Write-Host '协议卸载摘要' -ForegroundColor White
+    Write-Host "  卸载：$(Get-MxhProtocolRoleLabel -Role $role)"
+    Write-Host '  删除：该协议的运行时、systemd 单元和服务端配置'
+    Write-Host '  保留：共享 Certbot/ACME 环境、历史归档以及本次变更的本地和远端回滚备份'
+    Write-Host '  保护：20 分钟自动回滚；活动协议不能直接卸载'
+    Show-MxhProtocolInventory -Inventory $plan.Migration.FinalInventory
+    $phrase = Read-VpsText '输入 UNINSTALL 确认卸载' -AllowBack
+    if ($phrase -cne 'UNINSTALL') {
+        Write-VpsUi '确认短语不匹配，未创建卸载计划。' Warning
+        throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
+    }
+    return [pscustomobject]@{ Plan = $plan; Source = $Source }
+}
+
+function Invoke-MxhProtocolBackupCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Source,
+        [Parameter(Mandatory)] [string]$ProjectRoot,
+        [switch]$DryRun
+    )
+
+    if ($Source.Plan.Contains('Migration') -and [bool]$Source.Plan.Migration.Enabled -and
+        [string]$Source.Plan.Migration.Status -notin @('Completed', 'Committed')) {
+        throw '存在未完成协议变更，拒绝清理任何备份。'
+    }
+    $scope = Read-VpsMenu '清理哪些协议变更备份' @(
+        '仅本地私有归档中的 migration-backups',
+        '仅 VPS 上的 protocol-lifecycle/protocol-migration 备份',
+        '本地与 VPS 两者'
+    ) 1 -AllowBack
+    $keep = [int](Read-VpsText '保留最近几份（0 表示全部删除）' -Default '3' -AllowBack -Validate {
+            param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 0 -and $n -le 100
+        } -ValidationMessage '请输入 0–100 之间的整数。')
+
+    $archive = [IO.Path]::GetFullPath([string]$Source.Plan.Paths.Archive).TrimEnd('\', '/')
+    $localRoot = [IO.Path]::GetFullPath((Join-Path $archive 'migration-backups')).TrimEnd('\', '/')
+    $archivePrefix = $archive + [IO.Path]::DirectorySeparatorChar
+    if (-not $localRoot.StartsWith($archivePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Leaf $localRoot) -ne 'migration-backups') {
+        throw '本地备份根目录校验失败，拒绝清理。'
+    }
+    $localCandidates = if (Test-Path -LiteralPath $localRoot -PathType Container) {
+        @(Get-ChildItem -LiteralPath $localRoot -Directory -Force | Where-Object {
+                -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+                $_.Name -match '^\d{8}-\d{6}-(?:(?:RealityEntry|AnyTlsEntry|ShadowsocksLanding)-to-(?:RealityEntry|AnyTlsEntry|ShadowsocksLanding)|(?:InstallActivate|InstallStandby|Enable|Disable|Uninstall|Convert)-(?:RealityEntry|AnyTlsEntry|ShadowsocksLanding))$'
+            } | Sort-Object LastWriteTimeUtc -Descending)
+    } else { @() }
+    $localRemove = @($localCandidates | Select-Object -Skip $keep)
+
+    Write-Host ''
+    Write-Host '备份清理摘要' -ForegroundColor White
+    Write-Host "  保留最近：$keep 份"
+    if ($scope -in @(1, 3)) { Write-Host "  本地将删除：$($localRemove.Count) 份（限定于 $localRoot）" }
+    if ($scope -in @(2, 3)) { Write-Host '  远端：仅匹配 /root/vps-deploy-backups/<时间戳>/protocol-lifecycle 或旧 protocol-migration' }
+    Write-VpsUi '备份清理不可由自动回滚恢复；远端存在活动回滚计时器时会强制拒绝。' Warning
+    $phrase = Read-VpsText '输入 DELETE-BACKUPS 确认' -AllowBack
+    if ($phrase -cne 'DELETE-BACKUPS') {
+        Write-VpsUi '确认短语不匹配，未删除任何备份。' Warning
+        return
+    }
+    if ($DryRun) {
+        Write-VpsUi 'DryRun：已完成范围与数量计算，不删除本地或远端备份。' Success
+        return
+    }
+
+    if ($scope -in @(1, 2, 3)) {
+        $context = New-MxhReadonlyContextFromPlan -ProjectRoot $ProjectRoot -PlanPath $Source.PlanPath
+        $result = Invoke-VpsRemoteScript -Context $context -Asset 'protocol-backup-prune.sh' -Parameters @{
+            KEEP_LATEST = [string]$keep
+            CHECK_ONLY = ($scope -eq 1).ToString().ToLowerInvariant()
+        } -TimeoutSeconds 300
+        if ($result.StdOut -notmatch 'VPSDEPLOY_PROTOCOL_BACKUP_PRUNE_OK') { throw '远端备份清理未返回成功标记。' }
+        $removed = Get-VpsMarkerValue $result.StdOut REMOTE_BACKUPS_REMOVED -Required
+        if ($scope -in @(2, 3)) { Write-VpsUi "远端已删除 $removed 份协议变更备份。" Success }
+    }
+    if ($scope -in @(1, 3)) {
+        foreach ($directory in $localRemove) {
+            $resolved = [IO.Path]::GetFullPath($directory.FullName).TrimEnd('\', '/')
+            $rootPrefix = $localRoot + [IO.Path]::DirectorySeparatorChar
+            if (-not $resolved.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw '候选备份越出 migration-backups，已停止清理。'
+            }
+            [IO.Directory]::Delete($resolved, $true)
+        }
+        Write-VpsUi "本地已删除 $($localRemove.Count) 份协议变更备份。" Success
+    }
+}
+
 function New-VpsProtocolMigrationPlanInteractive {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$ProjectRoot,
-        [string]$PlanPath
+        [string]$PlanPath,
+        [switch]$DryRun
     )
 
     $candidatePath = $PlanPath
     while ($true) {
-        $source = Read-MxhProtocolMigrationSource -PlanPath $candidatePath
-        try { return New-MxhProtocolMigrationDetails -Source $source -ProjectRoot $ProjectRoot }
+        $source = Read-MxhProtocolMigrationSource -ProjectRoot $ProjectRoot -PlanPath $candidatePath -DryRun:$DryRun
+        try {
+            $choice = Read-VpsMenu '现有 VPS 协议管理' @(
+                '安装新协议并切换使用（保留原协议但停用冲突项）',
+                '安装新协议作为备用（验证后恢复当前状态）',
+                '切换/启停已安装协议',
+                '卸载已停用协议',
+                '清理协议变更备份',
+                '重新选择实例'
+            ) 1 -AllowBack
+            switch ($choice) {
+                1 { return New-MxhProtocolMigrationDetails -Source $source -ProjectRoot $ProjectRoot -Operation InstallActivate }
+                2 { return New-MxhProtocolMigrationDetails -Source $source -ProjectRoot $ProjectRoot -Operation InstallStandby }
+                3 { return New-MxhProtocolStateDetails -Source $source }
+                4 { return New-MxhProtocolUninstallDetails -Source $source }
+                5 {
+                    Invoke-MxhProtocolBackupCleanup -Source $source -ProjectRoot $ProjectRoot -DryRun:$DryRun
+                    $candidatePath = $source.PlanPath
+                    continue
+                }
+                6 { $candidatePath = $null; continue }
+            }
+        }
         catch {
             if (-not (Test-VpsWizardBackError $_)) { throw }
-            $candidatePath = $null
-            Write-VpsUi '已返回迁移源计划选择。' Info
+            $candidatePath = $source.PlanPath
+            Write-VpsUi '已返回协议管理操作选择。' Info
         }
     }
 }
@@ -720,16 +1355,17 @@ function Initialize-MxhProtocolMigrationContext {
     Test-MxhProtocolMigrationSource -PlanPath $source.PlanPath -Plan $freshSourcePlan -State $state | Out-Null
     $freshHash = (Get-FileHash -LiteralPath $source.PlanPath -Algorithm SHA256).Hash
     if ($freshHash -ne [string]$plan.Migration.SourcePlanSha256) {
-        throw '源部署计划在迁移向导确认后发生变化，拒绝覆盖；请重新进入迁移向导。'
+        throw '部署计划在协议管理向导确认后发生变化，拒绝覆盖；请重新进入向导。'
     }
     $secrets = Read-VpsJsonHashtable -Path $secretsPath
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
     $backupRoot = Join-Path $archive 'migration-backups'
-    $backupDirectory = Join-Path $backupRoot ("$stamp-$($plan.Migration.SourceRole)-to-$($plan.Migration.TargetRole)")
+    $operationName = if ($plan.Migration.Contains('Operation')) { [string]$plan.Migration.Operation } else { 'Convert' }
+    $backupDirectory = Join-Path $backupRoot ("$stamp-$operationName-$($plan.Migration.TargetRole)")
     $resolvedBackup = [IO.Path]::GetFullPath($backupDirectory)
     $archivePrefix = $archive.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
     if (-not $resolvedBackup.StartsWith($archivePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw '迁移备份目录越出实例私有归档，拒绝继续。'
+        throw '协议变更备份目录越出实例私有归档，拒绝继续。'
     }
     [IO.Directory]::CreateDirectory($resolvedBackup) | Out-Null
     foreach ($name in @('deployment-plan.json', 'deployment-state.json', 'deployment-secrets.private.json')) {
@@ -757,6 +1393,7 @@ function Initialize-MxhProtocolMigrationContext {
         Status = 'Planned'
         SourceRole = [string]$plan.Migration.SourceRole
         TargetRole = [string]$plan.Migration.TargetRole
+        Operation = $operationName
         LocalBackupDirectory = $resolvedBackup
         RollbackArmed = $false
         Committed = $false
@@ -809,7 +1446,7 @@ function Invoke-MxhProtocolMigrationRollback {
     if (-not $Context.State.Contains('Migration')) { return }
     if (-not [bool]$Context.State.Migration.RollbackArmed -or [bool]$Context.State.Migration.Committed) { return }
 
-    Write-VpsUi '迁移失败，正在立即触发源协议与旧 nftables 回滚；若 SSH 暂时不可达，服务器端计时器仍会自动执行。' Warning
+    Write-VpsUi '协议变更失败，正在立即恢复变更前的协议文件、启用状态与 nftables；若 SSH 暂时不可达，服务器端计时器仍会自动执行。' Warning
     try {
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'protocol-migration-trigger-rollback.sh' -Parameters @{
             SOURCE_ROLE = [string]$Context.Plan.Migration.SourceRole
@@ -820,7 +1457,7 @@ function Invoke-MxhProtocolMigrationRollback {
         $Context.State.Migration.RolledBackAt = (Get-Date).ToString('o')
         $Context.State.Migration.LastError = $Reason
         $Context.Plan.Migration.Status = 'RolledBack'
-        Write-VpsUi '源协议服务和旧防火墙已恢复。可修复原因后使用 Resume 重试迁移。' Success
+        Write-VpsUi '变更前的协议状态和旧防火墙已恢复。可修复原因后使用 Resume 重试。' Success
     }
     catch {
         $Context.State.Migration.Status = 'RollbackPending'

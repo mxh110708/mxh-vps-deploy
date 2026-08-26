@@ -4,10 +4,18 @@
 
 - 新部署向导将 VPS 私有归档根目录提升为第一项，显示 `-InstanceRoot` 当前默认值并允许输入其他绝对路径；摘要确认前不创建目录。
 - 归档根目录拒绝相对路径和裸磁盘根目录；最终路径固定为 `<根目录>\<服务商>\<实例>`，Resume/迁移继续使用计划内的 `Paths.Archive`。
-- 新增“现有 VPS 协议迁移/维护”，支持 Reality、AnyTLS、Shadowsocks 三种角色的全部六个双向转换，并只运行目标协议所需模块。
-- 迁移要求源计划已完整验收；覆盖前备份本地计划、状态、凭据索引、服务端快照和客户端片段，并验证源计划在确认后没有变化。
-- VPS 端迁移前备份 nftables 与网络调优配置，启用 20 分钟独立 systemd 回滚计时器；失败时立即尝试恢复源服务，SSH 不可用时仍由计时器恢复。
-- 目标 Reality/AnyTLS 必须通过真实 Mihomo 出口测试才提交；目标 Shadowsocks 必须从另一台白名单入口完成 TCP、UDP 和出口链式探测。
+- 将“现有 VPS 协议迁移/维护”升级为协议生命周期管理：Reality、AnyTLS、Shadowsocks 支持安装并启用、安装为停用备用、启用/停用、切换和安全卸载。
+- 新增 `ProtocolInventory`，分别记录 installed/enabled/active；Reality 与 AnyTLS 可同时安装但只能一个启用，Shadowsocks 可与入口协议并行运行。
+- 变更前在本地备份计划、状态、凭据、服务端快照和客户端片段，并验证计划 SHA-256；VPS 端打包全部受管协议文件，记录三个 systemd 服务状态及 nftables/sysctl。
+- 20 分钟独立回滚现在恢复变更前的全部协议文件、服务 enabled/active 状态、防火墙和网络调优，不再只恢复单一源角色。
+- 安装为备用仍会临时切换并完成真实测试，然后恢复原状态；Reality/AnyTLS 必须通过 Mihomo 出口测试，新增 Shadowsocks 必须从白名单入口完成 TCP、UDP 和出口链式探测。
+- 卸载只允许 disabled/inactive 协议，移除运行时、systemd 单元、服务端配置、当前凭据索引和客户端片段；共享 Certbot/ACME 环境与回滚备份保留。
+- 新增受限备份清理：本地、远端或同时清理，支持保留最近 N 份；只匹配本工具协议备份，活动回滚或未完成变更期间拒绝删除。
+- 新增 `Import` 模式：没有 `deployment-plan.json` 的既有标准 Reality/AnyTLS/Shadowsocks VPS 可建立实例专用密钥、收口为 key-only、解析现有私有配置并生成受管计划；代理端口和现有防火墙保持不变。
+- 导入实例使用 `PreserveExisting` 防火墙模式；Reality/AnyTLS 可在既有 443 上管理，新增 Shadowsocks 高位端口时拒绝自动覆盖未知规则。
+- 新增独立 `TuneNetwork` 模式；协议生命周期操作不再隐式重跑网络调优。默认 `BaselineOnly` 不要求 RTT，只有显式选择 BDP 自适应时才询问带宽和 RTT。
+- Reality target 自动审计失败时展示完整结果，允许交互式输入 `ACCEPT-TARGET-RISK` 并记录原因后人工覆写；非交互模式禁止，真实握手/出口验收仍不可跳过。
+- 修复主菜单同时显示编号“退出”和 `0. 退出` 的重复项；现在只保留统一的 `0. 退出`。
 - 所有普通文本、是非和编号菜单新增精确匹配的 `clear`/`cls` 清屏命令；`Clearwater` 等前缀相同的正常值不受影响。
 - 修复最终归档先计算校验和、后写入最新计划/状态导致校验和立即过期的问题。
 - 补齐跨层级导航：新部署第一项可返回主菜单，Resume 路径可返回主菜单，Resume 摘要可重选计划，主菜单 `0` 可退出，离线自检完成后回到主菜单。

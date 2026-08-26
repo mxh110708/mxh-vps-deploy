@@ -269,16 +269,19 @@ function Get-MxhAnyTlsPaddingScheme {
 
 function Read-VpsNetworkTuningSettings {
     [CmdletBinding()]
-    param([Parameter(Mandatory)] [ValidateSet('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')] [string]$Role)
+    param(
+        [Parameter(Mandatory)] [ValidateSet('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')] [string]$Role,
+        [switch]$AllowBack
+    )
 
     if ($Role -eq 'MonitorOnly') {
         return [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
     }
-    Write-VpsUi '脚本不会通过测速或虚拟网卡速率猜测套餐；自适应调优需要你提供标称带宽和代表性 RTT。' Info
-    if (-not (Read-VpsYesNo '是否启用内存/角色/带宽/RTT 联合的保守自适应调优？' $true)) {
+    Write-VpsUi '参考 RTT 可以不提供：默认基础保守方案不依赖测速；只有明确掌握带宽和代表性 RTT 时才选择 BDP 自适应缓冲区。' Info
+    if (-not (Read-VpsYesNo '是否使用已知带宽和 RTT 计算额外的保守缓冲区？' $false -AllowBack:$AllowBack)) {
         return [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
     }
-    $bandwidth = [int](Read-VpsText '套餐标称带宽（Mbps，例如 100 或 1000）' -Validate {
+    $bandwidth = [int](Read-VpsText '套餐标称带宽（Mbps，例如 100 或 1000）' -AllowBack:$AllowBack -Validate {
             param($v)
             $n = 0
             [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 100000
@@ -289,7 +292,7 @@ function Read-VpsNetworkTuningSettings {
     else {
         '常用入口 VPS 到该落地机的典型 RTT（ms）'
     }
-    $referenceRtt = [int](Read-VpsText $rttPrompt -Validate {
+    $referenceRtt = [int](Read-VpsText $rttPrompt -AllowBack:$AllowBack -Validate {
             param($v)
             $n = 0
             [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 2000
@@ -877,9 +880,9 @@ function New-VpsInteractivePlan {
         },
         [pscustomobject]@{
             Id = 'network-adaptive'; ShouldRun = { $wizard.Role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding') }; Run = {
-                Write-VpsUi '脚本不会通过测速或虚拟网卡速率猜测套餐；自适应调优需要你提供标称带宽和代表性 RTT。' Info
-                $default = if ($null -eq $wizard.NetworkAdaptive) { $true } else { [bool]$wizard.NetworkAdaptive }
-                $wizard.NetworkAdaptive = Read-VpsYesNo '是否启用内存/角色/带宽/RTT 联合的保守自适应调优？' $default -AllowBack
+                Write-VpsUi '参考 RTT 不是必填项。默认基础保守方案只使用角色和实际内存，不猜测线路；仅在你明确知道带宽与典型 RTT 时启用 BDP 自适应缓冲区。' Info
+                $default = if ($null -eq $wizard.NetworkAdaptive) { $false } else { [bool]$wizard.NetworkAdaptive }
+                $wizard.NetworkAdaptive = Read-VpsYesNo '是否使用已知带宽和 RTT 计算额外的保守缓冲区？' $default -AllowBack
                 if (-not $wizard.NetworkAdaptive) {
                     $wizard.BandwidthMbps = $null
                     $wizard.ReferenceRttMs = $null
@@ -938,6 +941,21 @@ function New-VpsInteractivePlan {
         Instance = $wizard.Instance
         NodeName = $wizard.NodeName
         Role = $wizard.Role
+        ProtocolInventory = [ordered]@{
+            SchemaVersion = 1
+            RealityEntry = [ordered]@{
+                Installed = ($wizard.Role -eq 'RealityEntry'); Enabled = ($wizard.Role -eq 'RealityEntry')
+                Active = ($wizard.Role -eq 'RealityEntry'); Partial = $false; Service = 'xray.service'
+            }
+            AnyTlsEntry = [ordered]@{
+                Installed = ($wizard.Role -eq 'AnyTlsEntry'); Enabled = ($wizard.Role -eq 'AnyTlsEntry')
+                Active = ($wizard.Role -eq 'AnyTlsEntry'); Partial = $false; Service = 'sing-box-anytls.service'
+            }
+            ShadowsocksLanding = [ordered]@{
+                Installed = ($wizard.Role -eq 'ShadowsocksLanding'); Enabled = ($wizard.Role -eq 'ShadowsocksLanding')
+                Active = ($wizard.Role -eq 'ShadowsocksLanding'); Partial = $false; Service = 'sing-box.service'
+            }
+        }
         Server = [ordered]@{
             IPv4 = $wizard.IPv4
             IPv6 = $wizard.IPv6
@@ -994,6 +1012,7 @@ function New-VpsInteractivePlan {
             SecondaryBindInterface = $wizard.SecondaryBindInterface
         }
         NetworkTuning = $networkTuning
+        Firewall = [ordered]@{ Mode = 'ManagedNftables' }
         Komari = [ordered]@{
             Enabled = if ($wizard.Role -eq 'AuditOnly') { $false } else { [bool]$wizard.EnableKomari }
             Endpoint = $wizard.KomariEndpoint
@@ -2134,7 +2153,7 @@ function Invoke-VpsModulePipeline {
             Write-VpsUi "$($module.Name) 失败：$safeMessage" Error
             if ($Context.Plan.Contains('Migration') -and [bool]$Context.Plan.Migration.Enabled) {
                 Invoke-MxhProtocolMigrationRollback -Context $Context -Reason $safeMessage
-                Write-VpsUi '迁移后续模块已停止；请确认源协议恢复状态，再使用继续模式。' Warning
+                Write-VpsUi '协议变更后续模块已停止；请确认变更前状态已经恢复，再使用继续模式。' Warning
             }
             else {
                 Write-VpsUi '后续模块已停止；旧 SSH 入口不会由核心自动关闭。修复后使用继续模式。' Warning
@@ -2159,23 +2178,27 @@ function Show-VpsPlanSummary {
     Write-Host '部署摘要' -ForegroundColor White
     Write-Host "  实例：$($Plan.Provider) / $($Plan.Instance)"
     Write-Host "  节点：$($Plan.NodeName)"
-    Write-Host "  角色：$($Plan.Role)"
+    Write-Host "  主角色/执行角色：$($Plan.Role)"
     Write-Host "  地址：$($Plan.Server.IPv4)"
     $bootstrapAuthLabel = if ($Plan.Server.Contains('BootstrapAuth') -and $Plan.Server.BootstrapAuth -eq 'ExistingKey') { '现有服务商私钥' } else { '密码' }
     Write-Host "  初始认证：$bootstrapAuthLabel"
     Write-Host "  SSH：$($Plan.Server.BootstrapSshPort) -> $($Plan.Ports.SshPrimary) + $($Plan.Ports.SshRescue)"
-    if ($Plan.Role -eq 'RealityEntry') {
+    $realityInstalled = Test-MxhProtocolInstalled -Plan $Plan -Role 'RealityEntry'
+    $anyTlsInstalled = Test-MxhProtocolInstalled -Plan $Plan -Role 'AnyTlsEntry'
+    $shadowsocksInstalled = Test-MxhProtocolInstalled -Plan $Plan -Role 'ShadowsocksLanding'
+    if ($realityInstalled) {
         $target = Get-MxhRealityTargetSettings -Plan $Plan
-        Write-Host "  Xray：443 + $($Plan.Ports.XrayBackup)，target=$($target.TargetAddress)，SNI=$($target.ServerName)"
+        $portsText = if ($Plan.Ports.XrayBackup) { "443 + $($Plan.Ports.XrayBackup)" } else { '443（无救援入口）' }
+        Write-Host "  Xray：$portsText，target=$($target.TargetAddress)，SNI=$($target.ServerName)"
     }
-    elseif ($Plan.Role -eq 'AnyTlsEntry') {
+    if ($anyTlsInstalled) {
         Write-Host "  AnyTLS：443，SNI=$($Plan.AnyTls.ServerName)，ECH public name=$($Plan.AnyTls.EchPublicName)"
         $paddingMode = if ($Plan.AnyTls.Contains('PaddingSchemeMode') -and $Plan.AnyTls.PaddingSchemeMode) {
             [string]$Plan.AnyTls.PaddingSchemeMode
         } else { 'OfficialDefault' }
         Write-Host "  Padding：$paddingMode"
     }
-    elseif ($Plan.Role -eq 'ShadowsocksLanding') {
+    if ($shadowsocksInstalled) {
         $allowCount = @($Plan.Shadowsocks.TrustedEntryIPv4s).Count + @($Plan.Shadowsocks.TrustedEntryIPv6s).Count
         Write-Host "  Shadowsocks：TCP+UDP $($Plan.Ports.LandingShadowsocks)，可信入口 $allowCount 个"
         Write-Host "  独立 IPv6 出口：$($Plan.Shadowsocks.SecondaryIpv6Enabled)"
@@ -2189,19 +2212,24 @@ function Show-VpsPlanSummary {
     Write-Host "  Komari：$($Plan.Komari.Enabled)"
     Write-Host "  私有归档：$($Plan.Paths.Archive)"
     if ($Plan.Contains('Migration') -and [bool]$Plan.Migration.Enabled) {
-        Write-Host "  协议迁移：$($Plan.Migration.SourceRole) -> $($Plan.Migration.TargetRole)（$($Plan.Migration.Status)）"
+        $operation = if ($Plan.Migration.Contains('Operation')) { $Plan.Migration.Operation } else { 'LegacyConversion' }
+        Write-Host "  协议生命周期操作：$operation / $($Plan.Migration.TargetRole)（$($Plan.Migration.Status)）"
         Write-Host "  自动回滚：$($Plan.Migration.RollbackTimeoutMinutes) 分钟"
     }
-    if ($Plan.Role -eq 'RealityEntry') {
+    $showedPortWarning = $false
+    if ($realityInstalled) {
         Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口、443 和 Xray 救援端口。' Warning
+        $showedPortWarning = $true
     }
-    elseif ($Plan.Role -eq 'AnyTlsEntry') {
+    if ($anyTlsInstalled) {
         Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口和 TCP 443；AnyTLS 与 Xray 必须互斥。' Warning
+        $showedPortWarning = $true
     }
-    elseif ($Plan.Role -eq 'ShadowsocksLanding') {
+    if ($shadowsocksInstalled) {
         Write-VpsUi '请放行两个 SSH 高位端口；Shadowsocks TCP+UDP 端口必须只允许上面填写的可信入口 IP。' Warning
+        $showedPortWarning = $true
     }
-    else {
+    if (-not $showedPortWarning) {
         Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口。' Warning
     }
 }
@@ -2278,7 +2306,7 @@ function Invoke-VpsDeploymentSession {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$ProjectRoot,
-        [Parameter(Mandatory)] [ValidateSet('New', 'Resume', 'Migrate')] [string]$Mode,
+        [Parameter(Mandatory)] [ValidateSet('New', 'Resume', 'Import', 'Migrate', 'TuneNetwork')] [string]$Mode,
         [string]$PlanPath,
         [string[]]$OnlyModule,
         [Parameter(Mandatory)] [string]$InstanceRoot,
@@ -2286,13 +2314,23 @@ function Invoke-VpsDeploymentSession {
         [switch]$NonInteractive
     )
 
+    if ($Mode -eq 'Import') {
+        $plan = New-MxhExistingImportPlanInteractive -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot
+        Invoke-MxhExistingVpsImport -ProjectRoot $ProjectRoot -Plan $plan -DryRun:$DryRun -NonInteractive:$NonInteractive
+        return
+    }
     if ($Mode -eq 'New') {
         $plan = New-VpsInteractivePlan -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot
         $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan -DryRun:$DryRun -NonInteractive:$NonInteractive
     }
     elseif ($Mode -eq 'Migrate') {
-        $migrationResult = New-VpsProtocolMigrationPlanInteractive -ProjectRoot $ProjectRoot -PlanPath $PlanPath
+        $migrationResult = New-VpsProtocolMigrationPlanInteractive -ProjectRoot $ProjectRoot -PlanPath $PlanPath -DryRun:$DryRun
         $context = Initialize-MxhProtocolMigrationContext -ProjectRoot $ProjectRoot -MigrationResult $migrationResult `
+            -DryRun:$DryRun -NonInteractive:$NonInteractive
+    }
+    elseif ($Mode -eq 'TuneNetwork') {
+        $tuningResult = New-VpsNetworkTuningPlanInteractive -ProjectRoot $ProjectRoot -PlanPath $PlanPath -DryRun:$DryRun
+        $context = Initialize-MxhProtocolMigrationContext -ProjectRoot $ProjectRoot -MigrationResult $tuningResult `
             -DryRun:$DryRun -NonInteractive:$NonInteractive
     }
     else {
@@ -2316,7 +2354,7 @@ function Start-VpsDeploy {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$ProjectRoot,
-        [ValidateSet('Interactive', 'New', 'Resume', 'Migrate', 'ValidateProject')] [string]$Mode = 'Interactive',
+        [ValidateSet('Interactive', 'New', 'Resume', 'Import', 'Migrate', 'TuneNetwork', 'ValidateProject')] [string]$Mode = 'Interactive',
         [string]$PlanPath,
         [string[]]$OnlyModule,
         [string]$InstanceRoot = 'F:\VPS\VPS-Instances',
@@ -2335,9 +2373,10 @@ function Start-VpsDeploy {
                 $choice = Read-VpsMenu '请选择操作' @(
                     '新部署',
                     '继续未完成部署',
-                    '现有 VPS 协议迁移/维护',
-                    '项目离线自检',
-                    '退出'
+                    '导入/纳管没有 deployment-plan 的现有 VPS',
+                    '现有 VPS 协议管理（安装/切换/停用/卸载/备份）',
+                    '现有 VPS 独立网络调优（RTT 可选）',
+                    '项目离线自检'
                 ) 1 `
                     -AllowBack -BackLabel '退出'
             }
@@ -2345,8 +2384,7 @@ function Start-VpsDeploy {
                 if (Test-VpsWizardBackError $_) { return }
                 throw
             }
-            $selectedMode = @('New', 'Resume', 'Migrate', 'ValidateProject', 'Exit')[$choice - 1]
-            if ($selectedMode -eq 'Exit') { return }
+            $selectedMode = @('New', 'Resume', 'Import', 'Migrate', 'TuneNetwork', 'ValidateProject')[$choice - 1]
             if ($selectedMode -eq 'ValidateProject') {
                 Test-VpsProject -ProjectRoot $ProjectRoot
                 Write-VpsUi '项目离线自检完成，已返回主菜单。' Success
@@ -2378,6 +2416,7 @@ function Start-VpsDeploy {
 }
 
 . (Join-Path $PSScriptRoot 'VpsDeploy.Migration.ps1')
+. (Join-Path $PSScriptRoot 'VpsDeploy.Import.ps1')
 
 Export-ModuleMember -Function @(
     'Start-VpsDeploy', 'Write-VpsUi', 'Write-VpsLog', 'Read-VpsYesNo', 'Read-VpsText',
@@ -2393,5 +2432,6 @@ Export-ModuleMember -Function @(
     'ConvertFrom-MxhEchKeyPairText', 'New-MxhAnyTlsServerConfig', 'New-MxhAnyTlsClientOutbound', 'New-MxhAnyTlsMihomoProfileText',
     'New-MxhRandomBase64Key', 'New-MxhShadowsocksServerConfig', 'New-MxhLandingMihomoProfileText',
     'New-VpsRemoteScriptPayload', 'Get-MxhMigrationModuleIds', 'Test-MxhProtocolMigrationSource',
-    'New-MxhProtocolMigrationPlan'
+    'Get-MxhProtocolInventory', 'Get-MxhInventoryPrimaryRole', 'Get-MxhProtocolFirewallParameters',
+    'New-MxhProtocolMigrationPlan', 'New-MxhProtocolLifecyclePlan', 'New-MxhNetworkTuningPlan'
 )

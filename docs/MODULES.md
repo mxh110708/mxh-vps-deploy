@@ -24,9 +24,13 @@
 - `MonitorOnly`：只配置管理入口、防火墙和可选 Komari；
 - `AuditOnly`：只建立临时管理访问并审计。
 
+新部署仍用单一 `Role` 选择初始模块。实例进入协议生命周期管理后，`Role` 只表示当前主角色（规划阶段可暂时表示本次执行目标），实际共存状态以 `ProtocolInventory` 为准；提交模块会把 `Role` 收口为启用的入口角色，若没有入口则使用已启用 Shadowsocks，全部停用时为 `MonitorOnly`。
+
 供应商专有 IPv6 获取、策略路由或网络命名空间应作为单独模块加入，不应修改通用 `sing-box-shadowsocks` 模块。
 
 `network-tuning` 使用计划中的 `NetworkTuning.Mode/BandwidthMbps/ReferenceRttMs` 和初始审计的实际内存计算参数。标称带宽与代表性 RTT 属于用户输入，禁止通过公网测速或虚拟网卡显示速率自动猜测。
+
+`BaselineOnly` 是默认且不要求 RTT；只在用户显式选择 `AdaptiveConservative` 时要求带宽和 RTT。`TuneNetwork` 将网络调优包装成独立生命周期操作：复用前置审计、远端文件/服务快照、最终验收和提交，但模块白名单不包含 `nftables-transition` 或协议安装模块。
 
 `shadowsocks-self-test.sh` 是落地模块的规范功能测试：TCP 通过 HTTPS 检查真实出口，UDP 通过临时 direct inbound 转发 DNS 查询并校验响应。`shadowsocks-external-probe.sh` 供维护验收使用，会下载并校验固定版本临时核心、复用同一套 TCP/UDP 测试，结束后不保留客户端文件。
 
@@ -43,17 +47,26 @@
 
 `anytls-self-test.sh` 会以真实 AnyTLS+ECH 客户端完成 HTTPS 204、出口 IP 和 UDP DNS 往返。语法通过、443 可达或证书可读都不能替代这组功能测试。现场验收还应从另一台主机执行同样的外部探测。
 
-协议迁移不是重新运行新机模块。计划中的 `Migration.ModuleIds` 对模块集合做白名单筛选，只保留目标协议需要的步骤：
+协议生命周期管理不是重新运行新机向导。为兼容旧计划仍使用 `Migration` 字段，但 schema 2 另外记录 `Operation`、`InitialInventory`、`ValidationInventory`、`FinalInventory` 和 `FinalRole`。其中 inventory 将 installed 与 enabled/active 分开；Reality/AnyTLS 只允许一个 enabled，Shadowsocks 可独立并行。
 
-- `migration-preflight`：复验源服务、双 SSH、源配置和当前 nftables；
+`Migration.ModuleIds` 对模块集合做白名单筛选，按操作选择步骤：
+
+- `migration-preflight`：复验双 SSH、全部已安装协议配置以及远端 installed/enabled/active 状态没有在确认后变化；
 - 目标协议的 target/证书前置模块；
-- `migration-arm-rollback`：备份 nftables/sysctl 并部署 VPS 端独立回滚计时器；
-- 目标协议服务、角色网络调优、目标 nftables 和客户端导出；
+- `migration-arm-rollback`：打包全部受管协议文件，记录三个 systemd 服务状态，备份 nftables/sysctl 并部署独立回滚 timer；
+- 安装操作运行目标协议服务、网络调优和客户端导出；纯启停使用 `protocol-lifecycle-state`，卸载使用 `protocol-lifecycle-uninstall`；
+- `nftables-transition` 使用 `ValidationInventory` 为临时真实测试开放必要端口；
 - Shadowsocks 目标额外运行 `migration-shadowsocks-probe`，从另一台白名单入口执行真实 TCP/UDP 探测；
-- `final-validation` 与 `migration-commit`：目标真实出口通过后停用源服务并撤销计时器；
-- `private-archive`：记录迁移状态并重新生成最终校验和。
+- `final-validation`：按验证阶段实际启用的全部协议检查服务、监听、防火墙和目标真实出口；
+- `protocol-lifecycle-final-firewall`：在提交前收口为最终服务组合所需端口；
+- `migration-commit`：应用最终 enabled/active 状态、更新 inventory 并撤销 timer；
+- `private-archive`：下载全部仍安装协议的配置，记录生命周期状态并重新生成校验和。
 
-迁移失败时核心调用 `Invoke-MxhProtocolMigrationRollback` 立即触发回滚服务；若 SSH 已被错误防火墙暂时阻断，systemd timer 仍独立执行。回滚后只重置切换阶段及其后模块，证书/target 等安全前置结果可以按模块状态决定是否复用。
+变更失败时核心调用 `Invoke-MxhProtocolMigrationRollback` 立即触发回滚；若 SSH 暂时被错误防火墙阻断，systemd timer 仍独立执行。回滚会恢复变更前协议文件和所有服务状态，而不是只启动一个“源角色”。
+
+备份清理不进入可恢复模块流水线，因为它本身删除恢复材料。交互层只允许清理实例 `migration-backups` 与远端时间戳目录中的 `protocol-lifecycle`/旧 `protocol-migration` 子目录，支持保留最近 N 份；活动 rollback timer 或未完成操作存在时拒绝执行。
+
+现有实例导入逻辑位于 `src/VpsDeploy.Import.ps1`，远端解析器为 `existing-vps-import-audit.sh`。导入不套用新机模块图：它先建立实例专用 root 公钥并验证 key-only，再只读识别标准路径中的协议配置，创建 `ProtocolInventory`、私有 secrets 和导入状态。导入计划设置 `Firewall.Mode=PreserveExisting`；相关防火墙模块只做语法检查，不执行 `flush ruleset`。
 
 ## 约定
 

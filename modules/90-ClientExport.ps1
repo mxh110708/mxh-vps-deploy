@@ -12,13 +12,16 @@
         $primaryMixed = 17891
         $backupMixed = 17892
         $primaryPath = Join-Path $exportDir 'mihomo-test-primary.yaml'
-        $backupPath = Join-Path $exportDir 'mihomo-test-backup.yaml'
+        $hasBackup = $Context.Plan.Ports.XrayBackup -and [int]$Context.Plan.Ports.XrayBackup -gt 0
+        $backupPath = if ($hasBackup) { Join-Path $exportDir 'mihomo-test-backup.yaml' } else { $null }
         [IO.File]::WriteAllText($primaryPath, (New-MxhMihomoProfileText -Context $Context `
                     -ServerPort ([int]$Context.Plan.Ports.XrayPrimary) -MixedPort $primaryMixed -IncludeIpv6), [Text.UTF8Encoding]::new($false))
-        [IO.File]::WriteAllText($backupPath, (New-MxhMihomoProfileText -Context $Context `
-                    -ServerPort ([int]$Context.Plan.Ports.XrayBackup) -MixedPort $backupMixed -IncludeIpv6), [Text.UTF8Encoding]::new($false))
         Protect-VpsPrivateFile $primaryPath
-        Protect-VpsPrivateFile $backupPath
+        if ($hasBackup) {
+            [IO.File]::WriteAllText($backupPath, (New-MxhMihomoProfileText -Context $Context `
+                        -ServerPort ([int]$Context.Plan.Ports.XrayBackup) -MixedPort $backupMixed -IncludeIpv6), [Text.UTF8Encoding]::new($false))
+            Protect-VpsPrivateFile $backupPath
+        }
 
         $s = $Context.Secrets.Xray
         $realityTarget = Get-MxhRealityTargetSettings -Plan $Context.Plan
@@ -56,7 +59,7 @@
 这些文件含 UUID、Reality 客户端密钥和 short-id，只能保存在本地私有归档。
 
 - mihomo-test-primary.yaml：主端口真实握手/出口测试
-- mihomo-test-backup.yaml：救援端口真实握手/出口测试
+- mihomo-test-backup.yaml：$(if ($hasBackup) { '救援端口真实握手/出口测试' } else { '此导入实例没有第二个 Reality 入口，因此未生成' })
 - sing-box-outbounds.private.json：仅为 outbounds 片段，不是完整 profile
 
 不要直接修改 Clash Verge AppData。需要加入主配置时，只审计并修改 F:\VPS\Clash YAML 下的权威文件；sing-box 同理维护 F:\VPS\Sing-box Config。
@@ -71,7 +74,7 @@
         $testData = Join-Path $exportDir 'syntax-test-data'
         [IO.Directory]::CreateDirectory($testData) | Out-Null
         foreach ($core in $cores) {
-            foreach ($profile in @($primaryPath, $backupPath)) {
+            foreach ($profile in @($primaryPath, $backupPath) | Where-Object { $_ }) {
                 $test = Invoke-VpsProcess -FilePath $core -ArgumentList @('-t', '-d', $testData, '-f', $profile) -TimeoutSeconds 120
                 if ($test.ExitCode -ne 0) { throw "Mihomo 语法测试失败：$(Split-Path -Leaf $core) / $(Split-Path -Leaf $profile)" }
             }
@@ -81,7 +84,7 @@
             PrimaryProfile = $primaryPath
             BackupProfile = $backupPath
             PrimaryMixedPort = $primaryMixed
-            BackupMixedPort = $backupMixed
+            BackupMixedPort = if ($hasBackup) { $backupMixed } else { $null }
             MihomoCoresTested = @($cores)
         }
         Save-VpsContext -Context $Context

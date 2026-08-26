@@ -30,6 +30,8 @@ F:\VPS\VPS-Instances\<Provider>\<Instance>
 
 对于 DMIT 等初始即禁用密码的模板，现有服务商私钥只用于步骤 1–2。工具会收紧该文件的 Windows ACL，但不会复制其内容；新公钥验证成功后，后续模块统一使用新生成的实例专用密钥。私钥带口令时由 OpenSSH 直接询问，工具不保存口令。
 
+导入既有 VPS 时同样先写入并验证新的实例专用 root 公钥。如果有效配置仍允许密码，导入器只写一个最小 key-only drop-in，`sshd -t` 和新密钥复验失败时恢复旧文件；不会借导入之名修改 SSH 监听端口。只有一个 SSH 端口的导入实例会被明确标记，不能宣称具备双入口救援能力。
+
 ## 3. 远程秘密传输
 
 秘密不会作为 SSH 命令行参数。核心将参数编码后写入远端 `bash -s` 的标准输入；模块禁止 `set -x`，参数随隔离的子 shell 退出而销毁。Komari Token 不保存到部署计划，恢复运行时需要重新输入。Cloudflare Token 的本地文件路径可以写入计划，但 Token 值本身不会写入计划或普通日志。
@@ -48,6 +50,8 @@ Xray 生成的秘密通过捕获的机器可读标记返回核心；普通控制
 
 自动审计只能筛除明显不合格项，不能证明长期安全。正式使用仍以客户端 Reality Authentication、HTTP 204 和真实出口为最终标准。
 
+自动审计失败时允许交互式人工覆写，但必须展示完整非敏感结果、输入 `ACCEPT-TARGET-RISK` 并记录至少五个字符的原因；非交互模式禁止。覆写只改变自动门槛结论，不改变后续真实握手/出口验收，也不能把失败候选标记成自动通过。
+
 ### 本机可信 HTTPS target
 
 `LocalOwnedTls` 模式使用自有域名的公共 CA 证书，nginx 只允许监听 `127.0.0.1/[::1]` 的高位端口。安装软件包时先 mask nginx，避免发行版默认 80 站点瞬时启动；写入并检查回环配置后才解除 mask。nftables 不开放 target 端口，nginx 也不得监听公网 80/443。Xray 的 `target/dest` 指向回环地址，客户端 `serverName` 使用证书域名；绝不能配置按任意 Host 反代的 `proxy_pass`。
@@ -56,21 +60,25 @@ Xray 生成的秘密通过捕获的机器可读标记返回核心；普通控制
 
 ## 6. AnyTLS、ECH 与可信证书
 
-`AnyTlsEntry` 与 `RealityEntry` 是互斥角色。AnyTLS 只监听 TCP 443，隧道内可承载 TCP/UDP；nftables 不需要额外开放公网 UDP 443。systemd 服务以 `sing-box-anytls` 低权限账户运行，仅授予 `CAP_NET_BIND_SERVICE`，不授予 `CAP_NET_ADMIN` 或 `CAP_NET_RAW`。
+`AnyTlsEntry` 与 `RealityEntry` 可以同时保留二进制、配置和私有客户端资料，但因共用 TCP 443，systemd enabled/active 状态必须互斥。AnyTLS 隧道内可承载 TCP/UDP；nftables 不需要额外开放公网 UDP 443。systemd 服务以 `sing-box-anytls` 低权限账户运行，仅授予 `CAP_NET_BIND_SERVICE`，不授予 `CAP_NET_ADMIN` 或 `CAP_NET_RAW`。
 
 内部 SNI 与 ECH public name 必须是两个不同的自有域名，证书同时覆盖二者，客户端保持证书校验开启。AnyTLS 密码和 ECH 服务端 key 只进入实例私有归档；ECH client config 本身是公开配置，但仍和节点文件一起管理，避免版本错配。
 
 Padding scheme 不是认证秘密。新计划为每台实例生成一组稳定的保守方案，避免所有部署长期共享同一组示例参数；方案保存在实例计划中，不能在每次重启或 Resume 时轮换。客户端第一次建立会话仍使用协议默认方案，之后由服务端在加密协议内下发实例方案，因此它不能消除所有初始连接或时序特征，也不能视为绝对抗识别保证。
 
-切换前保存 Xray active/enabled 状态。AnyTLS 配置、启动或监听验收失败时，脚本自动停用 AnyTLS 并恢复原 Xray；成功后 Xray 保持停止和禁用。真实验收必须包含受信证书、ECH、HTTP 204、出口 IP 和 UDP DNS 往返。
+切换前保存三个协议服务的 installed/enabled/active 状态。AnyTLS 配置、启动或监听验收失败时，脚本自动恢复变更前状态；成功后根据用户选择启用 AnyTLS，或把它保留为 disabled/inactive 备用。真实验收必须包含受信证书、ECH、HTTP 204、出口 IP 和 UDP DNS 往返。
 
-## 7. 已部署协议迁移边界
+## 7. 已部署协议生命周期管理边界
 
-协议迁移只接受本工具已经完成 SSH 收口、当前协议部署、防火墙、最终验收和私有归档的实例。源计划路径、归档根目录、模块状态、当前管理端口和实例专用私钥必须彼此一致；任一缺失都拒绝迁移。任意第三方面板、容器或手工复杂防火墙仍不属于自动迁移授权范围。
+协议管理只接受本工具已经完成 SSH 收口、防火墙、最终验收和私有归档的实例。计划路径、归档根目录、模块状态、当前管理端口和实例专用私钥必须彼此一致；任一缺失都拒绝。任意第三方面板、容器或手工复杂防火墙仍不属于自动管理授权范围。
 
-本地覆盖计划前先在实例目录 `migration-backups` 保存源计划、状态、私有凭据文件、服务端快照和客户端片段，并校验源计划 SHA-256 在向导确认后没有发生变化。远端切换前保存 nftables 和脚本管理的 sysctl 配置，随后启用 20 分钟 systemd 回滚 timer。回滚服务不依赖 Windows 端进程；它会停用目标服务、恢复旧防火墙/网络调优并重新启用源协议。
+没有计划的既有实例必须先通过 Import 建立受管基线。导入只支持标准路径和可解析布局，敏感配置经隐藏远端输出写入本地私有文件。导入计划使用 `PreserveExisting`：Reality/AnyTLS 共用现有 443 时不重写防火墙；任何需要新增 Shadowsocks 高位端口的操作都会拒绝自动 flush，要求单独人工审计。
 
-目标 Reality/AnyTLS 必须完成本机 Mihomo 的真实协议、证书/ECH、HTTP 204 和出口测试。目标 Shadowsocks 除服务器回环自测外，必须从另一台白名单 Reality/AnyTLS 入口执行 TCP、UDP 和出口探测。只有这些检查通过后，`migration-commit` 才停用源服务和取消 timer。旧配置与二进制保留但服务禁用，供以后反向迁移和人工恢复。
+本地覆盖计划前先在实例目录 `migration-backups` 保存原计划、状态、私有凭据文件、服务端快照和客户端片段，并校验计划 SHA-256 在向导确认后没有变化。远端变更前打包三个协议的受管文件，记录各服务 enabled/active 状态，保存 nftables 和脚本管理的 sysctl，随后启用 20 分钟 systemd 回滚 timer。回滚服务不依赖 Windows 端进程；它会恢复变更前文件、服务状态、防火墙和网络调优。
+
+新安装或启用 Reality/AnyTLS 必须完成本机 Mihomo 的真实协议、证书/ECH、HTTP 204 和出口测试。新安装 Shadowsocks 除服务器回环自测外，必须从另一台白名单入口执行 TCP、UDP 和出口探测。安装为备用也必须先临时启用并完成同等真实测试，然后才恢复原状态。只有验收通过后，`migration-commit` 才应用最终服务组合并取消 timer。
+
+卸载只接受 disabled/inactive 协议；当前凭据和客户端片段会从活动归档移除，但变更前副本保留在受保护备份中。Certbot/ACME 与证书可能被多个协议共享，不随单协议卸载。备份清理严格限定在本地 `migration-backups` 和远端协议生命周期备份；活动回滚 timer 或未完成变更存在时拒绝删除，并要求显式确认及保留数量。
 
 ## 8. Cloudflare DNS-01 与 Certbot
 
@@ -84,15 +92,17 @@ Certbot 通过 DNS-01 签发和续期证书，不要求开放 80。工具停用�
 
 落地端口不会加入公网通用放行集合；nftables 仅对填写的可信入口 IPv4/IPv6 放行同一个 TCP+UDP 端口。服务商安全组必须手动保持同样白名单。入口 IP 变化时应先添加新地址并验证链路，再删除旧地址。
 
-可选 IPv6 用户通过 `auth_user` 路由到绑定指定 IPv6 地址的 direct 出站。新机部署模块会在服务器回环地址上实际完成 SS2022 认证和出口测试；协议迁移到 Shadowsocks 时还强制从另一台白名单入口执行公网链式探测。权威客户端配置合并后仍需人工复验长期使用路径。
+可选 IPv6 用户通过 `auth_user` 路由到绑定指定 IPv6 地址的 direct 出站。新机部署模块会在服务器回环地址上实际完成 SS2022 认证和出口测试；现有 VPS 新安装 Shadowsocks 时还强制从另一台白名单入口执行公网链式探测。权威客户端配置合并后仍需人工复验长期使用路径。
 
 默认 sing-box 服务不保留 Linux capabilities。只有明确填写 `SecondaryBindInterface` 时，才通过 systemd drop-in 授予 `CAP_NET_RAW`，用于 Linux 的接口绑定；仅填写 IPv6 源地址时不会增加该能力。
 
 ## 10. 网络调优边界
 
-基础项只包含 fq、内核可用时的 BBR、TCP Fast Open 与 MTU 探测。自适应部分按角色、实际内存、用户填写的标称带宽和代表性 RTT 计算 2×BDP，并设置 4/8/16/32 MiB 的分级上限。
+基础项只包含 fq、内核可用时的 BBR、TCP Fast Open、MTU 探测和保守队列下限，不要求 RTT，也不修改 TCP 缓冲区上限。自适应部分是显式可选项，只有用户同时提供标称带宽和代表性 RTT 时才计算 2×BDP，并设置 4/8/16/32 MiB 的分级上限。
 
 脚本不运行来源不明的测速或 BBR 一键脚本，不根据虚拟网卡速率猜套餐，不降低当前内核或服务商已有的缓冲区与队列值。现有值超过计算上限时保留原值并记录状态，而不是强制覆盖。
+
+现有 VPS 的协议安装、切换、停用和卸载不再隐式重跑网络调优。独立 `TuneNetwork` 操作使用相同 20 分钟回滚快照，但不调用防火墙应用模块。
 
 ## 11. Git 防泄漏
 
