@@ -68,6 +68,16 @@
 
 现有实例导入逻辑位于 `src/VpsDeploy.Import.ps1`，远端解析器为 `existing-vps-import-audit.sh`。导入不套用新机模块图：它先建立实例专用 root 公钥并验证 key-only，再只读识别标准路径中的协议配置，创建 `ProtocolInventory`、私有 secrets 和导入状态。导入计划设置 `Firewall.Mode=PreserveExisting`；相关防火墙模块只做语法检查，不执行 `flush ruleset`。
 
+统一运维中心位于 `src/VpsDeploy.Operations.ps1`。它不是 `modules/*.ps1` 的新机流水线，而是复用计划、SSH、协议清单和统一事务的有界操作集合：
+
+- `Start/Get/Complete/Undo-MxhMaintenanceTransaction`：本地 `maintenance-backups` 与远端 `protocol-lifecycle` 成对快照，20 分钟独立回滚；
+- `Get-MxhHealthAudit`：读取脱敏服务/监听/版本/证书/文件哈希并和 `HealthBaseline` 比较；
+- 手动恢复、凭据轮换、防火墙、固定资产升级、Komari 和退役：所有远端修改都必须先事务化，只有功能测试后提交；
+- SSH 维护单独使用 `mxh-ssh-maintenance-rollback.timer`，因为错误端口或公钥不能依赖普通协议回滚连接；
+- 客户端候选由 `scripts/merge_client_authority.py` 使用 ruamel.yaml round-trip 处理 Clash、标准 JSON 处理 sing-box，只写实例 `client-candidates`/`decommission-client-candidate`。
+
+运维远端脚本统一使用 `maintenance-*.sh`。健康审计不得输出配置正文；备份/恢复路径必须解析后严格位于 `/root/vps-deploy-backups`；退役脚本永远不删除 SSH 或操作系统。
+
 ## 约定
 
 - 远端 Bash 放在 `assets/remote`，必须通过 `bash -n`；

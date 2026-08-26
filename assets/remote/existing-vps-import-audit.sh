@@ -6,6 +6,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import subprocess
 
@@ -17,8 +18,8 @@ def run(*args, check=False):
 
 def service_state(service, binary, config):
     unit = run("systemctl", "cat", service).returncode == 0
-    binary_ok = Path(binary).is_file() and os.access(binary, os.X_OK)
-    config_ok = Path(config).is_file() and Path(config).stat().st_size > 0
+    binary_ok = True if binary is None else (Path(binary).is_file() and os.access(binary, os.X_OK))
+    config_ok = True if config is None else (Path(config).is_file() and Path(config).stat().st_size > 0)
     installed = unit and binary_ok and config_ok
     partial = (unit or binary_ok or config_ok) and not installed
     return {
@@ -34,6 +35,11 @@ inventory = {
     "RealityEntry": service_state("xray.service", "/usr/local/bin/xray", "/usr/local/etc/xray/config.json"),
     "AnyTlsEntry": service_state("sing-box-anytls.service", "/usr/local/bin/sing-box-anytls", "/etc/sing-box-anytls/config.json"),
     "ShadowsocksLanding": service_state("sing-box.service", "/usr/local/bin/sing-box", "/etc/sing-box/config.json"),
+}
+komari_services = {
+    "Agent": service_state("komari-agent.service", "/usr/local/bin/komari-agent", "/etc/komari-agent/config.json"),
+    "Controller": service_state("komari.service", None, None),
+    "Cloudflared": service_state("cloudflared.service", None, None),
 }
 for role in ("RealityEntry", "AnyTlsEntry", "ShadowsocksLanding"):
     item = inventory[role]
@@ -100,7 +106,7 @@ if inventory["RealityEntry"]["Installed"]:
     if first["flow"] != "xtls-rprx-vision":
         raise RuntimeError("unsupported Reality flow")
     key_output = run("/usr/local/bin/xray", "x25519", "-i", first["private"], check=True).stdout
-    match = re.search(r"(?im)^(?:Password|Public\s*key)\s*:\s*(\S+)", key_output)
+    match = re.search(r"(?im)^(?:Password(?:\s*\(PublicKey\))?|Public\s*key)\s*:\s*(\S+)", key_output)
     if not match:
         raise RuntimeError("cannot derive Reality client key")
     ports = sorted({item["port"] for item in normalized})
@@ -215,10 +221,21 @@ for line in Path("/proc/meminfo").read_text().splitlines():
 nft_present = Path("/etc/nftables.conf").is_file()
 nft_valid = not nft_present or run("nft", "-c", "-f", "/etc/nftables.conf").returncode == 0
 
+komari_private = None
+komari_config = Path("/etc/komari-agent/config.json")
+if komari_services["Agent"]["Installed"] and komari_config.is_file():
+    parsed = json.loads(komari_config.read_text(encoding="utf-8"))
+    komari_private = {"Endpoint": str(parsed.get("endpoint") or ""), "Token": str(parsed.get("token") or "")}
+try:
+    admin_entry = pwd.getpwnam("admin")
+    managed_admin = admin_entry.pw_shell not in ("/usr/sbin/nologin", "/sbin/nologin", "/bin/false") and Path(admin_entry.pw_dir).is_dir()
+except KeyError:
+    managed_admin = False
 audit = {
     "OsId": os_release.get("ID", ""),
     "OsVersion": os_release.get("VERSION_ID", ""),
     "Architecture": run("uname", "-m", check=True).stdout.strip(),
+    "AdminUser": "admin" if managed_admin else "root",
     "MemoryKiB": memory_kib,
     "SshPorts": ssh_ports,
     "PasswordAuthentication": ssh_values.get("passwordauthentication", ""),
@@ -229,8 +246,9 @@ audit = {
     "NftablesValid": nft_valid,
     "ManagedCertbot": Path("/etc/systemd/system/mxh-certbot-renew.timer").is_file() and Path("/usr/local/libexec/mxh-certbot-deploy").is_file(),
     "ProtocolInventory": inventory,
+    "Komari": komari_services,
 }
-private = {"Audit": audit, "Protocols": protocols}
+private = {"Audit": audit, "Protocols": protocols, "KomariAgent": komari_private}
 for name, value in (("IMPORT_AUDIT", audit), ("IMPORT_PRIVATE", private)):
     payload = json.dumps(value, separators=(",", ":")).encode()
     print(f"VPSDEPLOY_{name}_B64=" + base64.b64encode(payload).decode())

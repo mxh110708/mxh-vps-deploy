@@ -41,13 +41,30 @@ systemctl is-enabled --quiet nginx.service 2>/dev/null && nginx_enabled='true'
 systemctl is-active --quiet nginx.service 2>/dev/null && nginx_active='true'
 printf '%s\n' "$nginx_enabled" > "$backup_dir/NginxRealityTarget.enabled"
 printf '%s\n' "$nginx_active" > "$backup_dir/NginxRealityTarget.active"
+aux_snapshot() {
+  local name="$1" service="$2" unit='false' enabled='false' active='false'
+  systemctl cat "$service" >/dev/null 2>&1 && unit='true'
+  systemctl is-enabled --quiet "$service" 2>/dev/null && enabled='true'
+  systemctl is-active --quiet "$service" 2>/dev/null && active='true'
+  printf '%s\n' "$unit" > "$backup_dir/${name}.unit"
+  printf '%s\n' "$enabled" > "$backup_dir/${name}.enabled"
+  printf '%s\n' "$active" > "$backup_dir/${name}.active"
+}
+aux_snapshot KomariAgent komari-agent.service
+aux_snapshot KomariController komari.service
+aux_snapshot Cloudflared cloudflared.service
 
 candidate_paths=(
   usr/local/bin/xray usr/local/etc/xray usr/local/share/xray
   etc/systemd/system/xray.service etc/systemd/system/xray@.service etc/systemd/system/xray.service.d
   etc/nginx/sites-available/mxh-reality-target etc/nginx/sites-enabled/mxh-reality-target var/www/mxh-reality-target
+  etc/mxh-tls etc/letsencrypt etc/systemd/system/mxh-certbot-renew.timer etc/systemd/system/mxh-certbot-renew.service
+  usr/local/libexec/mxh-certbot-deploy
   usr/local/bin/sing-box-anytls etc/systemd/system/sing-box-anytls.service etc/sing-box-anytls var/lib/sing-box-anytls
   usr/local/bin/sing-box etc/systemd/system/sing-box.service etc/systemd/system/sing-box.service.d etc/sing-box var/lib/sing-box
+  usr/local/bin/komari-agent etc/komari-agent etc/systemd/system/komari-agent.service var/lib/komari-agent
+  usr/local/bin/komari opt/komari var/lib/komari etc/systemd/system/komari.service
+  usr/local/bin/cloudflared usr/bin/cloudflared etc/systemd/system/cloudflared.service
 )
 existing_paths=()
 for relative in "${candidate_paths[@]}"; do
@@ -128,6 +145,25 @@ if command -v nginx >/dev/null 2>&1; then
     systemctl stop nginx.service >/dev/null 2>&1 || true
   fi
 fi
+restore_aux() {
+  local name="$1" service="$2" unit enabled active
+  unit="$(cat "$backup_dir/${name}.unit")"; enabled="$(cat "$backup_dir/${name}.enabled")"; active="$(cat "$backup_dir/${name}.active")"
+  if [[ "$unit" == 'false' ]]; then
+    systemctl disable --now "$service" >/dev/null 2>&1 || true
+    case "$name" in
+      KomariAgent) rm -f /usr/local/bin/komari-agent /etc/systemd/system/komari-agent.service; rm -rf /etc/komari-agent /var/lib/komari-agent ;;
+      KomariController) rm -f /usr/local/bin/komari /etc/systemd/system/komari.service; rm -rf /opt/komari /var/lib/komari ;;
+      Cloudflared) rm -f /usr/local/bin/cloudflared /etc/systemd/system/cloudflared.service ;;
+    esac
+    systemctl daemon-reload
+    return
+  fi
+  if [[ "$enabled" == 'true' ]]; then systemctl enable "$service" >/dev/null; else systemctl disable "$service" >/dev/null 2>&1 || true; fi
+  if [[ "$active" == 'true' ]]; then systemctl start "$service"; else systemctl stop "$service" >/dev/null 2>&1 || true; fi
+}
+restore_aux KomariAgent komari-agent.service
+restore_aux KomariController komari.service
+restore_aux Cloudflared cloudflared.service
 date -u +%FT%TZ > "$backup_dir/rollback-executed"
 ROLLBACK
 chmod 0750 /usr/local/libexec/mxh-protocol-migration-rollback

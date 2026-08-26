@@ -33,6 +33,10 @@ Assert-True ([string]$manifest.xray.version -match '^\d+\.\d+\.\d+$') 'Xray pinn
 Assert-True ([string]$manifest.xray.installer_commit -match '^[0-9a-f]{40}$') 'Xray installer commit'
 Assert-True ([string]$manifest.xray.installer_sha256 -match '^[0-9a-f]{64}$') 'Xray installer SHA-256'
 Assert-True ([string]$manifest.komari_agent.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'Komari amd64 SHA-256'
+Assert-True ([string]$manifest.komari_controller.version -eq '1.3.1') 'Komari controller pinned stable baseline'
+Assert-True ([string]$manifest.komari_controller.assets.amd64.name -eq 'komari-linux-amd64') 'Komari controller amd64 asset name'
+Assert-True ([string]$manifest.komari_controller.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'Komari controller amd64 SHA-256'
+Assert-True ([string]$manifest.komari_controller.assets.arm64.sha256 -match '^[0-9a-f]{64}$') 'Komari controller arm64 SHA-256'
 Assert-True ([string]$manifest.sing_box.version -match '^\d+\.\d+\.\d+$') 'sing-box pinned version'
 Assert-True ([string]$manifest.sing_box.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box amd64 SHA-256'
 Assert-True ([string]$manifest.sing_box.assets.windows_amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box Windows SHA-256'
@@ -765,6 +769,93 @@ function New-TestMigrationSourceFixture {
     Save-VpsJson -Value $migrationSourceSecrets -Path (Join-Path $Root 'deployment-secrets.private.json') -Private
     return $planPath
 }
+
+Write-Host '== Maintenance center dry-run and client candidate engine ==' -ForegroundColor Cyan
+$maintenanceFunctions = @(
+    'Invoke-MxhMaintenanceCenter','Invoke-MxhManualRestoreCenter','Get-MxhHealthAudit','Invoke-MxhCredentialRotation',
+    'Invoke-MxhSshMaintenance','Invoke-MxhFirewallMaintenance','Invoke-MxhControlledUpgrade',
+    'Invoke-MxhClientCandidateMerge','Invoke-MxhKomariLifecycle','Invoke-MxhDecommission'
+)
+foreach ($name in $maintenanceFunctions) {
+    $exists = & $coreModule { param($n) [bool](Get-Command $n -ErrorAction SilentlyContinue) } $name
+    Assert-True $exists "maintenance function exists: $name"
+}
+$healthAuditFixture = [ordered]@{
+    SchemaVersion=1;CollectedAt='2026-01-01T00:00:00Z';Ssh=[ordered]@{Valid=$true;Ports=@([int]$realitySource.Ports.SshPrimary,[int]$realitySource.Ports.SshRescue);PasswordAuthentication='no';KbdInteractiveAuthentication='no';PubkeyAuthentication='yes';PermitRootLogin='prohibit-password'}
+    Services=[ordered]@{
+        RealityEntry=[ordered]@{Installed=$true;Enabled=$true;Active=$true}
+        AnyTlsEntry=[ordered]@{Installed=$false;Enabled=$false;Active=$false}
+        ShadowsocksLanding=[ordered]@{Installed=$false;Enabled=$false;Active=$false}
+        KomariAgent=[ordered]@{Installed=$false;Enabled=$false;Active=$false}
+        KomariController=[ordered]@{Installed=$false;Enabled=$false;Active=$false}
+        Cloudflared=[ordered]@{Installed=$false;Enabled=$false;Active=$false}
+    }
+    Versions=[ordered]@{Xray='Xray 26.3.27';SingBoxAnyTls=$null;SingBox=$null;KomariAgent=$null}
+    Hashes=[ordered]@{Xray=$null;Nftables='same'}
+    Nftables=[ordered]@{Present=$true;Valid=$true};Certificate=[ordered]@{Present=$false;DaysRemaining=$null}
+    Timers=[ordered]@{RollbackActive=$false;CertbotRenewEnabled=$false}
+}
+$healthPayload=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($healthAuditFixture|ConvertTo-Json -Compress -Depth 20)))
+$healthContext=[pscustomobject]@{Plan=$realitySource;State=[ordered]@{Modules=@{};KomariInstalled=$false;HealthBaseline=[ordered]@{Hashes=[ordered]@{Xray='old-hash';Nftables='same'}}};DryRun=$false}
+$healthReport=& $coreModule {param($c,$payload) function Invoke-VpsRemoteScript{return [pscustomobject]@{StdOut="VPSDEPLOY_HEALTH_AUDIT_B64=$payload`nVPSDEPLOY_HEALTH_AUDIT_OK`n"}};try{Get-MxhHealthAudit $c}finally{Remove-Item Function:\Invoke-VpsRemoteScript -ErrorAction SilentlyContinue}} $healthContext $healthPayload
+Assert-True ('CONFIG_HASH_DRIFT' -in @($healthReport.Findings.Code)) 'health drift detects deletion of a previously baselined managed file'
+Assert-True ((Get-Content -Raw (Join-Path $ProjectRoot 'assets\remote\existing-vps-import-audit.sh')) -match 'Password.*PublicKey') 'existing import parser recognizes Xray 26.3.27 Password (PublicKey) label'
+$maintenanceRoot = Join-Path $ProjectRoot '.test-output\maintenance-center-dryrun'
+$maintenancePlan = New-TestMigrationSourceFixture -Template $realitySource -Root $maintenanceRoot -ProtocolModule 'xray-reality'
+$maintenanceInput = (@('1','2','n') -join [Environment]::NewLine) + [Environment]::NewLine
+$maintenanceResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile','-File',(Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),'-Mode','Maintain','-DryRun','-PlanPath',$maintenancePlan
+) -InputText $maintenanceInput -TimeoutSeconds 60
+Assert-True ($maintenanceResult.ExitCode -eq 0) 'maintenance center health audit DryRun exits cleanly'
+Assert-True ($maintenanceResult.StdOut -match 'DryRun') 'maintenance center routes to read-only health audit'
+
+$candidateRoot = Join-Path $maintenanceRoot 'candidate-fixture'
+$fragmentRoot = Join-Path $candidateRoot 'fragments'
+$outputRoot = Join-Path $candidateRoot 'output'
+[IO.Directory]::CreateDirectory($fragmentRoot) | Out-Null
+$authorityYaml = Join-Path $candidateRoot 'authority.yaml'
+$authorityJson = Join-Path $candidateRoot 'authority.json'
+[IO.File]::WriteAllText($authorityYaml, @"
+proxies:
+  - name: Existing-IPv4
+    type: direct
+proxy-groups:
+  - name: US-West Entry
+    type: select
+    proxies:
+      - Existing-IPv4
+rules:
+  - MATCH,US-West Entry
+"@)
+[IO.File]::WriteAllText((Join-Path $fragmentRoot 'mihomo-test-primary.yaml'), @"
+proxies:
+  - name: Candidate-IPv4
+    type: vless
+    server: 192.0.2.1
+proxy-groups: []
+rules: []
+"@)
+Save-VpsJson -Value ([ordered]@{ outbounds=@([ordered]@{type='vless';tag='Candidate-IPv4';server='192.0.2.1'}) }) -Path (Join-Path $fragmentRoot 'sing-box-outbounds.private.json')
+Save-VpsJson -Value ([ordered]@{ outbounds=@([ordered]@{type='direct';tag='Existing-IPv4'},[ordered]@{type='selector';tag='US-West Entry';outbounds=@('Existing-IPv4')}); route=[ordered]@{rules=@()} }) -Path $authorityJson
+$python = (Get-Command python.exe -ErrorAction Stop).Source
+$merge = Invoke-VpsProcess -FilePath $python -ArgumentList @(
+    (Join-Path $ProjectRoot 'scripts\merge_client_authority.py'),'--clash',$authorityYaml,'--sing-box',$authorityJson,
+    '--fragments',$fragmentRoot,'--output',$outputRoot,'--roles','RealityEntry','--entry-group','US-West Entry'
+) -TimeoutSeconds 60
+Assert-True ($merge.ExitCode -eq 0) 'client authority candidate merge fixture succeeds'
+$mergedJson = Get-Content -Raw (Join-Path $outputRoot 'sing-box-general.candidate.json') | ConvertFrom-Json -AsHashtable
+Assert-True ('Candidate-IPv4' -in @($mergedJson.outbounds.tag)) 'candidate merge adds sing-box outbound'
+Assert-True ('Candidate-IPv4' -in @((@($mergedJson.outbounds | Where-Object tag -eq 'US-West Entry')[0]).outbounds)) 'candidate merge updates selected sing-box entry selector'
+$removeRoot = Join-Path $candidateRoot 'remove-output'
+$remove = Invoke-VpsProcess -FilePath $python -ArgumentList @(
+    (Join-Path $ProjectRoot 'scripts\merge_client_authority.py'),'--clash',(Join-Path $outputRoot 'Clash_General.candidate.yaml'),
+    '--sing-box',(Join-Path $outputRoot 'sing-box-general.candidate.json'),'--fragments',$fragmentRoot,'--output',$removeRoot,
+    '--roles','','--remove-prefix','Candidate'
+) -TimeoutSeconds 60
+Assert-True ($remove.ExitCode -eq 0) 'decommission candidate removal fixture succeeds'
+$removedJson = Get-Content -Raw (Join-Path $removeRoot 'sing-box-general.candidate.json') | ConvertFrom-Json -AsHashtable
+Assert-True ('Candidate-IPv4' -notin @($removedJson.outbounds.tag)) 'decommission candidate removes matching sing-box outbound'
+[IO.Directory]::Delete($maintenanceRoot, $true)
 
 $backupCleanupRoot = Join-Path $ProjectRoot '.test-output\protocol-backup-cleanup-dryrun'
 $backupCleanupPlan = New-TestMigrationSourceFixture -Template $realitySource -Root $backupCleanupRoot -ProtocolModule 'xray-reality'

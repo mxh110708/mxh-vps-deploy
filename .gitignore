@@ -16,6 +16,8 @@ id_rsa
 .tmp/
 TestResults/
 *.log
+__pycache__/
+*.pyc
 
 # Editors and operating systems.
 .vscode/

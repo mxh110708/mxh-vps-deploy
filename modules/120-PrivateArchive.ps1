@@ -207,8 +207,11 @@ SECURITY: This file contains active credentials. Keep it only in local private a
         $files = Get-ChildItem -LiteralPath $Context.ArchivePath -File -Recurse | Where-Object FullName -ne $checksumPath
         $lines = foreach ($file in $files) {
             $relative = [IO.Path]::GetRelativePath($Context.ArchivePath, $file.FullName).Replace('\', '/')
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
-            "$hash  $relative"
+            try {
+                $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant()
+                "$hash  $relative"
+            }
+            catch { "# UNREADABLE-SKIPPED  $relative" }
         }
         [IO.File]::WriteAllText($checksumPath, (($lines | Sort-Object) -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
         Protect-VpsPrivateFile $checksumPath

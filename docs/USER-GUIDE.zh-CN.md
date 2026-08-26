@@ -42,15 +42,16 @@
 - 按内存、角色、标称带宽和参考 RTT 做保守网络调优；
 - 可选安装低权限 Komari Agent；
 - 生成 Mihomo 测试 YAML、sing-box 出站片段、服务器配置快照和私有归档；
-- 在关闭服务商初始 SSH 入口前，验证 root/admin、主/救援端口、sudo、服务状态和真实代理出口。
+- 在关闭服务商初始 SSH 入口前，验证 root/admin、主/救援端口、sudo、服务状态和真实代理出口；
+- 对已纳管实例执行恢复、健康/漂移审计、凭据轮换、SSH/防火墙维护、固定版本升级、客户端候选合并、Komari 生命周期和分级退役。
 
 工具不会自动完成以下操作：
 
 - 不操作服务商网页安全组、VNC 或救援控制台；
 - 不修改 Cloudflare 网页中的 DNS 记录或 API Token；
-- 不迁移 Komari 主控数据库或 Cloudflare Tunnel；
+- 不在 Cloudflare 控制台自动创建/撤销 Tunnel；脚本可以备份/恢复本机 Komari Controller 数据和轮换已有 Connector Token，但最终跨主机切换仍需用户确认外部状态；
 - 不修改 Clash Verge AppData profile；
-- 不自动合并权威 `Clash_General.yaml` 或 `sing-box-general.json`；
+- 不覆盖权威 `Clash_General.yaml`、`sing-box-general.json` 或 AppData；只生成完整候选供人工替换；
 - 不适合直接覆盖已有 Docker、3x-ui/s-ui、复杂 nftables 或生产服务的主机；
 - 不在同一台机器上同时运行 Xray Reality 和 AnyTLS 占用 TCP 443。
 
@@ -402,8 +403,9 @@ F:\VPS\MXH-VPS-Deploy\Start-VPSDeploy.cmd
 2. 继续未完成部署
 3. 导入/纳管没有 deployment-plan 的现有 VPS
 4. 现有 VPS 协议管理（安装/切换/停用/卸载/备份）
-5. 现有 VPS 独立网络调优（RTT 可选）
-6. 项目离线自检
+5. 现有 VPS 运维中心（恢复/审计/轮换/SSH/防火墙/升级/客户端/Komari/退役）
+6. 现有 VPS 独立网络调优（RTT 可选）
+7. 项目离线自检
 0. 退出
 ```
 
@@ -420,6 +422,13 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode New
 
 ```powershell
 pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Import
+```
+
+已纳管实例进入统一运维中心：
+
+```powershell
+pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Maintain `
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
 ```
 
 输入规则：
@@ -764,6 +773,71 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode TuneNetwork `
 - 已知带宽/RTT 自适应：只有明确掌握两个值时使用 2×BDP，并受内存分级上限约束。
 
 独立调优只运行前置审计、回滚快照、`network-tuning`、服务验收和私有归档，不运行协议安装，也不调用 nftables 应用模块。协议安装/切换本身保持已有网络参数；需要调优时由此入口单独执行。
+
+### 10.3 现有 VPS 统一运维中心
+
+先选择实例的 `deployment-plan.json`。没有计划时必须先用 Import 纳管；纳管不会重装协议或覆盖现有防火墙。运维中心包含九类操作。
+
+#### 10.3.1 手动恢复中心
+
+恢复中心只展示可以成对验证的恢复点：本地必须有当时的计划、状态和私有凭据，远端必须有对应的 `protocol-lifecycle` 快照。选择恢复点后可选：
+
+- 仅配置：恢复 Xray/sing-box/ECH/本机 target 配置，保持当前服务和防火墙状态；
+- 完整恢复：同时恢复协议文件、systemd enabled/active、nftables 和脚本管理的 sysctl。
+
+恢复本身也是事务：先备份“现在”，再恢复“过去”；验证失败或选择不保留时恢复到操作前。不要手工填写任意远端路径。
+
+#### 10.3.2 只读健康审计与配置漂移
+
+审计检查有效 SSH、计划内双端口、代理服务 installed/enabled/active、监听、nftables 语法、证书剩余时间、续期/回滚 timer、固定组件版本和受管文件 SHA-256。报告不含配置正文或凭据。
+
+第一次结果为 Healthy 时可建立基线。以后 `CONFIG_HASH_DRIFT` 表示内容发生变化；只有没有严重状态异常、且所有告警都是哈希变化时，才会询问是否把已确认维护结果设为新基线。
+
+#### 10.3.3 凭据轮换
+
+- Reality：生成 UUID、Reality 密钥和 short-id 候选，原子应用后生成客户端并做 Mihomo 真实握手、HTTP 204 和出口测试；
+- AnyTLS：默认轮换用户密码，保留证书和 ECH；
+- Shadowsocks：默认轮换用户密钥，保留服务器主密钥。
+
+当前只允许轮换正在运行的协议，避免为了改备用凭据意外切换 TCP 443 所有者。旧值只保留在受保护恢复点中，不写普通日志。
+
+#### 10.3.4 SSH 独立维护
+
+可只读审计、轮换实例 Ed25519 密钥，或在受管最小防火墙实例上同时重设双 SSH 端口。候选密钥先加入 root/admin，旧密钥和旧端口暂时保留；所有账号/端口登录成功后才提交。失败立即触发 SSH 专用回滚，VPS 端另有 10 分钟 timer。
+
+#### 10.3.5 防火墙独立维护
+
+`ManagedNftables` 可按当前协议清单重建最小规则，或维护 Shadowsocks TCP/UDP 来源白名单。`PreserveExisting` 默认只审计；如果确定现有规则可以被完整替换，必须输入 `ADOPT-MANAGED-NFT` 才会接管。Docker、面板和第三方复杂规则不要接管。
+
+#### 10.3.6 可控版本升级
+
+升级只使用 `config/versions.json` 里固定的版本、资产名/安装器 URL 和 SHA-256。流程先备份，再下载校验、替换、配置检查、恢复升级前 enabled/active 组合并做健康审计。版本相同也可用于验证可重复安装；它不会自动追随 latest。
+
+#### 10.3.7 客户端权威配置候选
+
+填写两份权威文件路径，选择要包含的已安装协议和地区入口组。工具用客户端私有片段生成：
+
+第一次使用前安装保留注释/顺序的 YAML 依赖：`python -m pip install -r .\requirements-client-merge.txt`。工具不会在维护过程中静默安装 Python 包。
+
+```text
+client-candidates\<时间>\Clash_General.candidate.yaml
+client-candidates\<时间>\sing-box-general.candidate.json
+client-candidates\<时间>\candidate-manifest.json
+```
+
+Clash 候选运行 Mihomo 稳定/Alpha 双核心，sing-box 候选严格解析 JSON。源文件和 AppData 不修改。Shadowsocks 落地的 `dialer-proxy`/`detour` 必须在替换前确认入口组存在。
+
+#### 10.3.8 Komari 完整生命周期
+
+可审计服务，安装/修复 Agent、隐藏输入新 Token、保留原 Token 做固定版本升级、卸载 Agent；Controller 支持私有备份下载、从备份恢复并验证回环监听、按 `versions.json` 固定资产保数据/保启停状态升级、轮换已有 cloudflared Token，以及卸载本机 Controller/Connector。
+
+恢复 Controller 时默认验证后停用，只有明确选择才保持启用；不会自动启动 Tunnel。跨主机迁移仍遵循“新主控恢复并验证 → 用户确认 Cloudflare 外部状态 → 轮换 Connector → 停旧主控”。
+
+#### 10.3.9 完整退役
+
+退役先生成两份“删除本节点”的客户端候选并语法测试，再下载最终受管文件备份。级别依次为：只预检、可恢复停用、删除受管代理/Agent 文件、清除远端恢复点、再包含本机 Controller/Connector。脚本始终保留 SSH 和基础系统，也不会删除服务商实例或云端 Token。
+
+`PreserveExisting` 防火墙不会因退役自动改写；服务停止后应另行检查不再需要的开放端口。永久删除和清理恢复点不可由自动回滚恢复，必须保留本地最终备份。
 
 ## 11. 部署过程中会发生什么
 
@@ -1169,7 +1243,7 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
 
 ## 18. 卸载、迁移和停用 VPS
 
-本工具当前没有“一键卸载所有内容”模式。停用前应：
+统一运维中心已经提供分级退役，但它不会替代云端和服务商操作。退役前仍应：
 
 1. 从权威 Clash/sing-box 配置移除节点；
 2. 如果是落地机，从入口组和防火墙白名单移除关系；
@@ -1193,6 +1267,7 @@ Token 未泄漏且仍用于其他证书时无需轮换；不再使用时应在 C
 - 每实例 padding 与 Mihomo 稳定版/Alpha 运行兼容；
 - Reality、AnyTLS、Shadowsocks 的六个安装方向，以及安装为备用、启停切换、活动协议拒绝卸载、并行入口+落地防火墙和备份清理边界的离线测试；
 - `clear`/`cls`、跨层返回、摘要取消和协议管理向导的真实交互 DryRun；
+- 旧 DMIT 实机完成健康基线、凭据轮换后的哈希漂移识别、成对完整恢复、Reality 真实握手、Xray/Komari 固定版本重装、root/admin 双端口 SSH 密钥轮换、权威候选双核心验证、Controller 备份/恢复和可恢复退役；
 - 项目离线断言、秘密扫描、固定核心解析和 ShellCheck。
 
 尚未覆盖所有系统和故障排列组合，包括：
@@ -1203,6 +1278,7 @@ Token 未泄漏且仍用于其他证书时无需轮换；不再使用时应在 C
 - 等待证书自然到期后的真实定时续期；
 - 所有故意破坏后的自动回滚分支。
 - 新增的安装为备用、所有启停组合、三个卸载方向和备份清理尚未全部在真实生产 VPS 上逐一执行；当前远端脚本已通过 Bash 语法、状态规划、防火墙生成和回滚结构测试，首次实机使用仍必须保留控制台并观察回滚计时器。
+- AnyTLS/SS 凭据轮换、SSH 端口变更、`PreserveExisting` 到受管 nftables 的实际加载、Cloudflare Tunnel Token 轮换，以及清除远端恢复点的永久退役分支尚未在旧 DMIT 实机执行；防火墙候选已在 VPS 端 `nft -c` check-only 通过，破坏性分支只做离线测试。
 
 因此脚本仍应按分阶段、保留旧入口、保持服务商控制台可用的方式使用，不能把“自动化”理解为“无需验收”。详细变更和现场证据见项目根目录 `CHANGELOG.md`。
 

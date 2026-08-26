@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- 新增统一 `Maintain` 运维中心：手动恢复、健康/漂移审计、协议凭据轮换、SSH/防火墙独立维护、固定资产升级、客户端权威候选合并、Komari 生命周期和分级退役。
+- 健康报告只保存脱敏状态和配置 SHA-256；支持建立基线、发现计划外哈希变化，并只在纯哈希变化且人工确认时更新基线。
+- 手动恢复中心把本地计划/状态/凭据与远端 `protocol-lifecycle` 快照成对展示；恢复前再次快照，支持仅配置或完整服务/防火墙/sysctl 恢复。
+- Reality、AnyTLS 和 Shadowsocks 凭据轮换现在先生成候选、应用回滚保护、导出客户端并完成真实测试；提交后同步私有服务端快照。
+- SSH 独立维护支持实例 Ed25519 密钥轮换及受管双端口重设；旧入口/旧公钥在 root/admin 全部验证前保留，并有独立 10 分钟回滚。
+- 防火墙独立维护默认保留未知规则；显式接管受管最小 nftables 需要确认短语，支持 Shadowsocks 白名单维护和 check-only 预检。
+- 可控版本升级仅使用 `versions.json` 固定版本、资产名/安装器 URL 和 SHA-256，并恢复升级前 enabled/active 状态。
+- 新增基于 ruamel.yaml 的 Clash/sing-box 权威配置候选引擎，保留源文件、只生成候选，并支持退役节点删除候选。
+- Komari 支持 Agent 安装/修复/Token 轮换/保状态升级/卸载，以及 Controller 状态、备份、恢复、Tunnel Token 轮换和卸载。
+- 分级退役会先生成客户端删除候选和下载最终备份；可选择仅停用、删除受管文件、清理远端恢复点或连同本机 Controller/Connector 退役，始终保留 SSH 与系统。
+- 旧 DMIT 实机验收修复 Xray 26.3.27 `x25519` 的 `Password (PublicKey)` 字段兼容、无扩展名临时 Xray 配置无法识别格式、历史 ACL 文件阻断校验和，以及 `authorized_keys` 无末尾换行导致新密钥粘连。
+
 - 新部署向导将 VPS 私有归档根目录提升为第一项，显示 `-InstanceRoot` 当前默认值并允许输入其他绝对路径；摘要确认前不创建目录。
 - 归档根目录拒绝相对路径和裸磁盘根目录；最终路径固定为 `<根目录>\<服务商>\<实例>`，Resume/迁移继续使用计划内的 `Paths.Archive`。
 - 将“现有 VPS 协议迁移/维护”升级为协议生命周期管理：Reality、AnyTLS、Shadowsocks 支持安装并启用、安装为停用备用、启用/停用、切换和安全卸载。

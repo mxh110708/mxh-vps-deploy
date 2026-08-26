@@ -29,6 +29,7 @@
 - 参考 RTT 默认不要求：基础保守调优不依赖测速；网络调优另有独立维护入口，不随现有 VPS 的协议安装/切换强制重跑；
 - 可选安装低权限、无公网监听、关闭 Web SSH/自动更新的 Komari Agent；
 - 生成 Mihomo 与 sing-box 私有客户端片段、服务器配置快照和最终归档；
+- 提供统一的现有 VPS 运维中心：手动恢复、只读健康/漂移审计、凭据轮换、SSH/防火墙独立维护、固定资产升级、客户端权威候选、Komari 生命周期和分级退役；
 - 只有新 SSH 入口、Xray、防火墙全部验收后，才关闭服务商初始 SSH 端口。
 
 ## 最简单的用法
@@ -36,6 +37,12 @@
 第一次使用建议先阅读：[中文完整使用手册](docs/USER-GUIDE.zh-CN.md)。手册包含 Windows 环境准备、角色选择、向导逐项填写、Cloudflare/Komari 前置条件、失败恢复、客户端导入和部署后验收。
 
 要求：Windows 10/11、PowerShell 7、Windows OpenSSH Client；目标机是带 systemd/apt 的 Debian 12/13 或 Ubuntu 22.04/24.04，初始可用 root SSH 登录。
+
+只有使用“客户端权威配置候选”时还需要 Python 3 和 round-trip YAML 依赖：
+
+```powershell
+python -m pip install -r .\requirements-client-merge.txt
+```
 
 双击 `Start-VPSDeploy.cmd`，或运行：
 
@@ -61,7 +68,7 @@ pwsh -File .\Start-VPSDeploy.ps1
 - 源码目录和 Git 仓库内不保存任何实例信息或秘密。
 - 每台实例的计划、状态、日志、SSH 私钥、UUID、Reality 密钥、short-id、AnyTLS 密码、TLS 私钥、ECH 服务端密钥、Komari 配置和客户端片段只写入向导选择的：
   `<VPS 私有归档根目录>\<服务商>\<实例名>`（默认根目录为 `F:\VPS\VPS-Instances`）。
-- 工具不修改 Clash Verge AppData，也不自动合并 `Clash_General.yaml` 或 `sing-box-general.json`；它只在实例私有归档中生成待审计片段。
+- 工具不修改 Clash Verge AppData，也不覆盖 `Clash_General.yaml` 或 `sing-box-general.json`；运维中心只读取权威文件并在实例私有归档中生成完整候选。
 - Komari Token 通过隐藏输入取得，只经 SSH 标准输入传送，不写入命令行和普通日志。
 - Cloudflare API Token 从实例私有文件读取，只经 SSH 标准输入传送，并在服务器保存为 root-only 的 Certbot 凭据；Token 值不进入部署计划、普通日志或 Git。
 - 远程配置每次修改前建立带时间戳备份；失败即停止，不连续跨层“盲修”。
@@ -103,6 +110,10 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode Import
 
 # 管理本工具已完整验收实例的协议（安装、备用、切换、停用、卸载、备份）
 pwsh -File .\Start-VPSDeploy.ps1 -Mode Migrate `
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
+
+# 现有 VPS 统一运维中心
+pwsh -File .\Start-VPSDeploy.ps1 -Mode Maintain `
   -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
 
 # 对已纳管 VPS 单独执行网络调优；默认基础模式不需要 RTT
@@ -154,6 +165,15 @@ AnyTLS 的 padding 只配置在服务端。新部署计划会生成一组每实�
 
 Certbot 安装在实际持有证书的每台 VPS 上。脚本会申请 ECDSA P-256 证书、执行 staging 模拟续期、关闭发行版的重复 `certbot.timer`，并启用 `mxh-certbot-renew.timer` 每日两次运行。续期成功后，部署 hook 会以原子方式复制证书并重启 AnyTLS 或 reload 本机 nginx target。
 
+## 运维中心的关键边界
+
+- 远端修改先保存本地计划/状态/凭据/客户端片段和服务器快照，再启动 VPS 端 20 分钟独立回滚 timer；SSH 密钥/端口变更使用单独的 10 分钟 timer。
+- 健康审计只读取服务、监听、有效 SSH、证书、版本和配置 SHA-256，不回传配置正文。严重状态异常不能靠“更新基线”掩盖。
+- 凭据轮换先生成候选并做真实协议测试。Reality 为事务化原子切换；AnyTLS 默认轮换用户密码并保留 ECH/证书；Shadowsocks 默认轮换用户密钥并保留服务器主密钥。
+- `PreserveExisting` 防火墙默认只能审计；接管为最小 nftables 必须输入确认短语。未知 Docker、面板和第三方规则不会被静默覆盖。
+- 客户端合并与退役删除只生成候选，候选通过 Mihomo 双核心和严格 JSON 检查后仍由用户替换权威文件。
+- 退役分为预检、可恢复停用、删除受管文件、清除远端恢复点及包含 Controller/Connector 的整机受管组件退役；最后两类需要二次确认，并始终保留 SSH 与基础系统。
+
 ## 当前明确不自动处理的内容
 
 - 服务商网页安全组、VNC/救援控制台；
@@ -161,8 +181,8 @@ Certbot 安装在实际持有证书的每台 VPS 上。脚本会申请 ECDSA P-2
 - 服务商专有的附加 IPv6 获取脚本、策略路由或网络命名空间；
 - Hysteria 等其他备用协议；
 - 同一台 VPS 上同时运行 Xray Reality 与 AnyTLS，或让两者同时占用 TCP 443；
-- 对权威 Clash/sing-box 多节点配置的自动合并；
-- Cloudflare Tunnel Token、Komari 主控和数据库迁移。
+- 直接覆盖权威 Clash/sing-box 配置或 Clash Verge AppData；
+- Cloudflare 控制台内创建/撤销 Tunnel Token、服务商实例删除或跨两台 VPS 自动裁决最终连接器。脚本可管理本机 Komari Agent、Controller 数据备份/恢复和已有 cloudflared Token 轮换。
 
 这些功能可以按同一模块接口增加，但不会为了“功能多”牺牲可回滚性。
 

@@ -257,6 +257,17 @@ function Invoke-MxhExistingVpsImport {
     $inventory = Get-MxhProtocolInventory -Plan $Plan -RemoteInventory $imported.Audit.ProtocolInventory
     $Plan.ProtocolInventory = $inventory
     $Plan.Role = Get-MxhInventoryPrimaryRole -Inventory $inventory
+    if ($imported.Audit.Contains('AdminUser') -and $imported.Audit.AdminUser) { $Plan.AdminUser = [string]$imported.Audit.AdminUser }
+    if ($Plan.AdminUser -ne 'root') {
+        $publicKey = (Get-Content -Raw ((Get-VpsSshKeyPath $context) + '.pub')).Trim()
+        $adminKey = Invoke-VpsRemoteScript -Context $context -Asset 'existing-vps-import-admin-key.sh' -Parameters @{
+            ADMIN_USER = [string]$Plan.AdminUser; PUBLIC_KEY = $publicKey
+        } -TimeoutSeconds 180
+        if ($adminKey.StdOut -notmatch 'VPSDEPLOY_IMPORT_ADMIN_KEY_OK') { throw '现有 VPS 的 admin 实例密钥写入未确认。' }
+        if (-not (Test-VpsSshConnection -Context $context -User ([string]$Plan.AdminUser) -Port ([int]$Plan.Server.BootstrapSshPort))) {
+            throw '现有 VPS 的 admin 实例密钥登录复验失败。'
+        }
+    }
     $sshPorts = @($imported.Audit.SshPorts | ForEach-Object { [int]$_ } | Sort-Object -Unique)
     $Plan.Ports.SshPrimary = [int]$Plan.Server.BootstrapSshPort
     $otherPort = @($sshPorts | Where-Object { $_ -ne [int]$Plan.Ports.SshPrimary } | Select-Object -First 1)
@@ -298,6 +309,16 @@ function Invoke-MxhExistingVpsImport {
         $context.Secrets.Shadowsocks = Copy-MxhHashtable -Value $ss.Secrets
     }
     $Plan.TrustedTls.Enabled = [bool]$imported.Audit.ManagedCertbot
+    if ($imported.Audit.Contains('Komari') -and [bool]$imported.Audit.Komari.Agent.Installed) {
+        $Plan.Komari.Enabled = [bool]$imported.Audit.Komari.Agent.Active
+        if ($imported.Private.KomariAgent) {
+            $Plan.Komari.Endpoint = [string]$imported.Private.KomariAgent.Endpoint
+            $context.Secrets.KomariAgent = [ordered]@{ Token = [string]$imported.Private.KomariAgent.Token }
+        }
+        $context.State.KomariInstalled = $true
+    }
+    $context.State.KomariController = if ($imported.Audit.Contains('Komari')) { Copy-MxhHashtable $imported.Audit.Komari.Controller } else { @{} }
+    $context.State.Cloudflared = if ($imported.Audit.Contains('Komari')) { Copy-MxhHashtable $imported.Audit.Komari.Cloudflared } else { @{} }
 
     $Plan.Import.Status = 'Completed'
     $Plan.Import.CompletedAt = (Get-Date).ToString('o')
@@ -368,7 +389,8 @@ The import did not reinstall protocols, change proxy ports, or overwrite the exi
     $checksumPath = Join-Path $archive 'SHA256SUMS-private.txt'
     $lines = foreach ($file in (Get-ChildItem -LiteralPath $archive -File -Recurse | Where-Object FullName -ne $checksumPath)) {
         $relative = [IO.Path]::GetRelativePath($archive, $file.FullName).Replace('\', '/')
-        "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant(), $relative
+        try { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant(), $relative }
+        catch { "# UNREADABLE-SKIPPED  $relative" }
     }
     [IO.File]::WriteAllText($checksumPath, (($lines | Sort-Object) -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
     Protect-VpsPrivateFile $checksumPath

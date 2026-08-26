@@ -1603,6 +1603,27 @@ function Invoke-VpsScpDownload {
     Protect-VpsPrivateFile -Path $LocalPath
 }
 
+function Invoke-VpsScpUpload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] [string]$LocalPath,
+        [Parameter(Mandatory)] [string]$RemotePath,
+        [int]$Port
+    )
+
+    if (-not (Test-Path -LiteralPath $LocalPath -PathType Leaf)) { throw "待上传文件不存在：$LocalPath" }
+    if (-not $Port) { $Port = [int]$Context.State.CurrentManagementPort }
+    $scp = Get-VpsCommandPath 'scp.exe'
+    $args = @(
+        '-q', '-o', 'BatchMode=yes', '-o', 'ControlMaster=no', '-o', 'StrictHostKeyChecking=accept-new',
+        '-i', (Get-VpsSshKeyPath $Context), '-P', $Port.ToString(),
+        $LocalPath, "root@$($Context.Plan.Server.IPv4):$RemotePath"
+    )
+    $result = Invoke-VpsProcess -FilePath $scp -ArgumentList $args -TimeoutSeconds 180
+    if ($result.ExitCode -ne 0) { throw "上传远端文件失败：$RemotePath" }
+}
+
 function Get-MxhRealityTargetSettings {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Plan)
@@ -2306,7 +2327,7 @@ function Invoke-VpsDeploymentSession {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$ProjectRoot,
-        [Parameter(Mandatory)] [ValidateSet('New', 'Resume', 'Import', 'Migrate', 'TuneNetwork')] [string]$Mode,
+        [Parameter(Mandatory)] [ValidateSet('New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork')] [string]$Mode,
         [string]$PlanPath,
         [string[]]$OnlyModule,
         [Parameter(Mandatory)] [string]$InstanceRoot,
@@ -2327,6 +2348,10 @@ function Invoke-VpsDeploymentSession {
         $migrationResult = New-VpsProtocolMigrationPlanInteractive -ProjectRoot $ProjectRoot -PlanPath $PlanPath -DryRun:$DryRun
         $context = Initialize-MxhProtocolMigrationContext -ProjectRoot $ProjectRoot -MigrationResult $migrationResult `
             -DryRun:$DryRun -NonInteractive:$NonInteractive
+    }
+    elseif ($Mode -eq 'Maintain') {
+        Invoke-MxhMaintenanceCenter -ProjectRoot $ProjectRoot -PlanPath $PlanPath -DryRun:$DryRun
+        return
     }
     elseif ($Mode -eq 'TuneNetwork') {
         $tuningResult = New-VpsNetworkTuningPlanInteractive -ProjectRoot $ProjectRoot -PlanPath $PlanPath -DryRun:$DryRun
@@ -2354,7 +2379,7 @@ function Start-VpsDeploy {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$ProjectRoot,
-        [ValidateSet('Interactive', 'New', 'Resume', 'Import', 'Migrate', 'TuneNetwork', 'ValidateProject')] [string]$Mode = 'Interactive',
+        [ValidateSet('Interactive', 'New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ValidateProject')] [string]$Mode = 'Interactive',
         [string]$PlanPath,
         [string[]]$OnlyModule,
         [string]$InstanceRoot = 'F:\VPS\VPS-Instances',
@@ -2375,6 +2400,7 @@ function Start-VpsDeploy {
                     '继续未完成部署',
                     '导入/纳管没有 deployment-plan 的现有 VPS',
                     '现有 VPS 协议管理（安装/切换/停用/卸载/备份）',
+                    '现有 VPS 运维中心（恢复/审计/轮换/SSH/防火墙/升级/客户端/Komari/退役）',
                     '现有 VPS 独立网络调优（RTT 可选）',
                     '项目离线自检'
                 ) 1 `
@@ -2384,7 +2410,7 @@ function Start-VpsDeploy {
                 if (Test-VpsWizardBackError $_) { return }
                 throw
             }
-            $selectedMode = @('New', 'Resume', 'Import', 'Migrate', 'TuneNetwork', 'ValidateProject')[$choice - 1]
+            $selectedMode = @('New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ValidateProject')[$choice - 1]
             if ($selectedMode -eq 'ValidateProject') {
                 Test-VpsProject -ProjectRoot $ProjectRoot
                 Write-VpsUi '项目离线自检完成，已返回主菜单。' Success
@@ -2417,11 +2443,12 @@ function Start-VpsDeploy {
 
 . (Join-Path $PSScriptRoot 'VpsDeploy.Migration.ps1')
 . (Join-Path $PSScriptRoot 'VpsDeploy.Import.ps1')
+. (Join-Path $PSScriptRoot 'VpsDeploy.Operations.ps1')
 
 Export-ModuleMember -Function @(
     'Start-VpsDeploy', 'Write-VpsUi', 'Write-VpsLog', 'Read-VpsYesNo', 'Read-VpsText',
     'ConvertFrom-VpsSecureString', 'Invoke-VpsRemoteScript', 'Invoke-VpsSshCommand',
-    'Invoke-VpsScpDownload', 'Initialize-VpsBootstrapAccess', 'Test-VpsSshConnection',
+    'Invoke-VpsScpDownload', 'Invoke-VpsScpUpload', 'Initialize-VpsBootstrapAccess', 'Test-VpsSshConnection',
     'Save-VpsContext', 'Save-VpsJson', 'Protect-VpsPrivateFile', 'Get-VpsSshKeyPath',
     'Invoke-VpsProcess', 'Get-VpsCommandPath', 'Get-VpsModules', 'Get-VpsRandomPort',
     'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',

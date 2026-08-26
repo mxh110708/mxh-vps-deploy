@@ -20,6 +20,19 @@
       }
     }
   },
+  "komari_controller": {
+    "version": "1.3.1",
+    "assets": {
+      "amd64": {
+        "name": "komari-linux-amd64",
+        "sha256": "23eedb343ca0e24a1e9cb2fae632fed24b67f15ee562c8f78c8918487d047be4"
+      },
+      "arm64": {
+        "name": "komari-linux-arm64",
+        "sha256": "a711cccbd0e4d11212b607a712496978d5576bd22659a6655999e74662cdf5b9"
+      }
+    }
+  },
   "sing_box": {
     "version": "1.13.19",
     "assets": {
