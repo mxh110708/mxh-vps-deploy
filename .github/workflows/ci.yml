@@ -16,6 +16,7 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
+          cache-dependency-path: requirements-client-merge.txt
       - name: Install pinned client-config dependency
         shell: pwsh
         run: python -m pip install --disable-pip-version-check -r ./requirements-client-merge.txt
