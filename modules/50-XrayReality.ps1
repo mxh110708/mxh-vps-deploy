@@ -1,6 +1,6 @@
 @{
     Id        = 'xray-reality'
-    Name      = '安装固定版 Xray 并部署双入口 REALITY'
+    Name      = '安装所选稳定版 Xray 并部署双入口 REALITY'
     Order     = 50
     Roles     = @('RealityEntry')
     Requires  = @('ssh-transition')

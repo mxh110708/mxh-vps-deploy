@@ -52,6 +52,7 @@
             MemoryMiB = $calculated.MemoryMiB
             MemoryTier = $calculated.MemoryTier
             BandwidthMbps = $calculated.BandwidthMbps
+            BandwidthTier = $calculated.BandwidthTier
             ReferenceRttMs = $calculated.ReferenceRttMs
             BdpBytes = $calculated.BdpBytes
             BufferTargetBytes = $calculated.BufferTargetBytes
@@ -70,7 +71,8 @@
                     ($calculated.BufferTargetBytes / 1MB), $bufferMode) Info
         }
         else {
-            Write-VpsUi "调优档案 $($calculated.Profile)：只应用基础保守项，不修改 TCP 缓冲区上限。" Info
+            $bandwidthText = if ($calculated.BandwidthMbps) { "，按套餐 $($calculated.BandwidthMbps) Mbps 选择保守队列下限" } else { '，旧计划未记录套餐带宽' }
+            Write-VpsUi "调优档案 $($calculated.Profile)：只应用基础保守项$bandwidthText，不修改 TCP 缓冲区上限。" Info
         }
     }
 }

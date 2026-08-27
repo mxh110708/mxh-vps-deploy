@@ -18,9 +18,10 @@ else
   copy_path() {
     local relative="$1"
     if [[ -e "$stage/$relative" || -L "$stage/$relative" ]]; then
-      rm -rf "/$relative"
-      install -d -m 0755 "$(dirname "/$relative")"
-      cp -a "$stage/$relative" "/$relative"
+      local target="/${relative:?}"
+      rm -rf -- "$target"
+      install -d -m 0755 "$(dirname "$target")"
+      cp -a "$stage/$relative" "$target"
     fi
   }
   for relative in usr/local/etc/xray etc/sing-box-anytls etc/sing-box etc/mxh-tls \

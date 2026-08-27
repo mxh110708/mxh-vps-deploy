@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "region_groups": [
+    "US-West Entry",
+    "Hong Kong Entry",
+    "Europe Entry"
+  ],
+  "default_exit_group": "Default Exit",
+  "direct_group": "Direct Route",
+  "business_groups": [
+    { "name": "AI Services", "default": "Default Exit" },
+    { "name": "Developer Tools", "default": "Default Exit" },
+    { "name": "Academic Research", "default": "Default Exit" },
+    { "name": "Microsoft Services", "default": "Direct Route" },
+    { "name": "Microsoft Global", "default": "Default Exit" },
+    { "name": "Apple Services", "default": "Direct Route" },
+    { "name": "Game Platforms", "default": "Default Exit" },
+    { "name": "Game Downloads", "default": "Direct Route" },
+    { "name": "Social & Messaging", "default": "Default Exit" },
+    { "name": "Streaming Media", "default": "Default Exit" },
+    { "name": "UDP Guard", "default": "Default Exit", "include_block": true },
+    { "name": "Catch-All", "default": "Default Exit" }
+  ],
+  "guard_groups": [
+    { "name": "WebRTC Guard", "members": ["BLOCK", "Default Exit", "DIRECT"] },
+    { "name": "QUIC Guard", "members": ["BLOCK", "Default Exit", "DIRECT"] },
+    { "name": "Ad Block", "members": ["BLOCK", "DIRECT", "Default Exit"] },
+    { "name": "Legacy Ports", "members": ["BLOCK", "DIRECT", "Default Exit"] }
+  ],
+  "authority_defaults": {
+    "clash": "F:\\VPS\\Clash YAML\\Clash_General.yaml",
+    "sing_box": "F:\\VPS\\Sing-box Config\\sing-box-general.json",
+    "output_root": "F:\\VPS\\Client-Authority-Candidates"
+  }
+}

@@ -48,6 +48,7 @@ Assert-True ([string]$manifest.sing_box.assets.windows_amd64.sha256 -match '^[0-
 if (-not (Get-Command Get-VpsModules -ErrorAction SilentlyContinue)) {
     Import-Module (Join-Path $ProjectRoot 'src\VpsDeploy.Core.psm1') -Force
 }
+$coreModule = Get-Module VpsDeploy.Core
 $modules = @(Get-VpsModules -ProjectRoot $ProjectRoot)
 Assert-True ($modules.Count -ge 10) 'module count'
 Assert-True (($modules.Id | Sort-Object -Unique).Count -eq $modules.Count) 'module IDs unique'
@@ -118,7 +119,8 @@ if ($pythonCommand) {
     [IO.File]::Delete($importPythonPath)
 }
 $importSsh = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\existing-vps-import-ssh-keyonly.sh')
-Assert-True ($importSsh -match 'PasswordAuthentication no' -and $importSsh -match 'PubkeyAuthentication yes') 'existing VPS import enforces key-only SSH before management'
+Assert-True ($importSsh -match 'PasswordAuthentication no' -and $importSsh -match 'PubkeyAuthentication yes') 'optional existing-VPS key-only hardening remains available'
+Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Import.ps1')) -match 'EnforceKeyOnlySsh') 'existing VPS import explicitly records whether SSH authentication is preserved or hardened'
 
 Write-Host '== Bootstrap authentication arguments ==' -ForegroundColor Cyan
 $sshArgumentContext = [pscustomobject]@{
@@ -136,6 +138,38 @@ Assert-True ('BatchMode=yes' -notin $providerKeyArgs) 'interactive provider key 
 $passwordArgs = @(Get-VpsSshArguments -Context $sshArgumentContext -Port 22 -User root -Interactive)
 Assert-True ('-i' -notin $passwordArgs) 'password bootstrap does not force an identity file'
 Assert-True ('PubkeyAuthentication=no' -in $passwordArgs) 'password bootstrap does not accidentally reuse an agent key'
+
+$keyReuseRoot = Join-Path $ProjectRoot '.test-output\ssh-key-reuse'
+if (Test-Path -LiteralPath $keyReuseRoot) { [IO.Directory]::Delete($keyReuseRoot, $true) }
+[IO.Directory]::CreateDirectory($keyReuseRoot) | Out-Null
+$sourceKey = Join-Path $keyReuseRoot 'provider-original-key'
+$keygenResult = Invoke-VpsProcess -FilePath (Get-Command ssh-keygen.exe -ErrorAction Stop).Source `
+    -ArgumentList @('-t','ed25519','-N','','-C','provider-fixture','-f',$sourceKey) -TimeoutSeconds 60
+Assert-True ($keygenResult.ExitCode -eq 0) 'fixture Ed25519 provider key generated'
+$sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceKey).Hash
+$managedDirectory = Join-Path $keyReuseRoot 'MXH-VPS-Deploy\ssh'
+$reuseContext = [pscustomobject]@{ Plan = [ordered]@{
+        NodeName='Example-Reused-Key';Server=[ordered]@{BootstrapKeyPath=$sourceKey}
+        SshKey=[ordered]@{Mode='ReuseExisting';SourcePrivateKeyPath=$sourceKey;ManagedFileName='id_ed25519';PreserveSource=$true}
+        Paths=[ordered]@{KeyDirectory=$managedDirectory}
+    } }
+& $coreModule { param($Context) Initialize-VpsSshKey -Context $Context } $reuseContext 6>$null
+$managedKey = Join-Path $managedDirectory 'id_ed25519'
+Assert-True (Test-Path -LiteralPath $managedKey -PathType Leaf) 'existing provider key is copied under a normalized managed filename'
+Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $managedKey).Hash -eq $sourceHash) 'managed key copy preserves the provider private key instead of rotating it'
+Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $sourceKey).Hash -eq $sourceHash) 'provider key source is never renamed or modified'
+Assert-True ((Get-Content -Raw -LiteralPath ($managedKey + '.pub')).Trim() -match '^ssh-ed25519\s+') 'public key is derived from the reused private key'
+[IO.Directory]::Delete($keyReuseRoot, $true)
+
+$oldLatest = [Environment]::GetEnvironmentVariable('MXH_VPS_TEST_XRAY_LATEST')
+try {
+    [Environment]::SetEnvironmentVariable('MXH_VPS_TEST_XRAY_LATEST','99.1.2')
+    $resolvedLatest = & $coreModule { param($Root) Resolve-VpsXrayVersion -ProjectRoot $Root -Channel LatestStable } $ProjectRoot
+    Assert-True ($resolvedLatest -eq '99.1.2') 'latest-stable Xray channel resolves and stores an exact version'
+    $resolvedFixed = & $coreModule { param($Root) Resolve-VpsXrayVersion -ProjectRoot $Root -Channel FixedVerified } $ProjectRoot
+    Assert-True ($resolvedFixed -eq '26.3.27') 'fixed verified Xray channel remains available'
+}
+finally { [Environment]::SetEnvironmentVariable('MXH_VPS_TEST_XRAY_LATEST',$oldLatest) }
 
 Write-Host '== Client export fixture ==' -ForegroundColor Cyan
 $fixtureRoot = Join-Path $ProjectRoot '.test-output\client-export'
@@ -488,7 +522,7 @@ $entrySmall = Get-VpsConservativeNetworkPlan -Role RealityEntry -MemoryKiB 10485
 Assert-True ($entrySmall.MemoryTier -eq 'small') '1 GiB entry uses small memory tier'
 Assert-True ($entrySmall.BufferCapBytes -eq 8MB) '1 GiB entry buffer cap is 8 MiB'
 Assert-True ($entrySmall.BufferTargetBytes -eq 8MB) 'high-BDP entry is capped by memory'
-Assert-True ($entrySmall.QueueFloor -eq 1024) 'entry queue floor is conservative'
+Assert-True ($entrySmall.QueueFloor -eq 2048) 'entry queue floor considers the nominal 1 Gbps plan conservatively'
 $entryTiny = Get-VpsConservativeNetworkPlan -Role RealityEntry -MemoryKiB 524288 `
     -Mode AdaptiveConservative -BandwidthMbps 100 -ReferenceRttMs 160
 Assert-True ($entryTiny.BufferTargetBytes -eq 4000000) '100 Mbps 160 ms entry uses two BDP below tiny cap'
@@ -499,11 +533,14 @@ Assert-True ($landingSmall.BufferTargetBytes -eq 1250000) 'nearby landing uses e
 Assert-True ($landingSmall.QueueFloor -eq 2048) 'landing queue floor reflects fan-in role'
 $anyTlsSmall = Get-VpsConservativeNetworkPlan -Role AnyTlsEntry -MemoryKiB 1048576 `
     -Mode AdaptiveConservative -BandwidthMbps 1000 -ReferenceRttMs 160
-Assert-True ($anyTlsSmall.Profile -eq 'entry-small-adaptive') 'AnyTLS uses conservative entry tuning profile'
+Assert-True ($anyTlsSmall.Profile -eq 'entry-small-high-adaptive') 'AnyTLS profile records role, memory, nominal bandwidth and mode'
 Assert-True ($anyTlsSmall.BufferCapBytes -eq 8MB) 'AnyTLS entry respects memory cap'
 $monitor = Get-VpsConservativeNetworkPlan -Role MonitorOnly -MemoryKiB 1048576 -Mode BaselineOnly
 Assert-True ($monitor.BufferTargetBytes -eq 0) 'monitor baseline does not tune buffers'
 Assert-True ($monitor.QueueFloor -eq 0) 'monitor baseline does not pin proxy queues'
+$baselineKnownBandwidth = Get-VpsConservativeNetworkPlan -Role RealityEntry -MemoryKiB 1048576 -Mode BaselineOnly -BandwidthMbps 500
+Assert-True ($baselineKnownBandwidth.BandwidthMbps -eq 500 -and $baselineKnownBandwidth.ReferenceRttMs -eq $null) 'baseline records required nominal bandwidth without requiring RTT'
+Assert-True ($baselineKnownBandwidth.BufferTargetBytes -eq 0 -and $baselineKnownBandwidth.QueueFloor -eq 1024) 'bandwidth-aware baseline remains conservative and does not tune buffers'
 $invalidTuningRejected = $false
 try {
     Get-VpsConservativeNetworkPlan -Role RealityEntry -MemoryKiB 1048576 `
@@ -624,13 +661,27 @@ Assert-True ($wizardResult.StdOut -match 'RevisedInstance') 'back navigation rep
 Assert-True ($wizardResult.StdOut -match 'bootstrap-port' -and $wizardResult.StdOut -match 'komari-enabled') 'text, numbered menu, and summary back paths are exercised'
 Assert-True (-not (Test-Path -LiteralPath $wizardArchive)) 'interactive wizard dry run writes no plan or archive'
 
+$reuseWizardRoot = Join-Path $ProjectRoot '.test-output\wizard-existing-key-root'
+$reuseWizardKey = Join-Path $ProjectRoot '.test-output\wizard-existing-provider-key'
+if(Test-Path $reuseWizardRoot){[IO.Directory]::Delete($reuseWizardRoot,$true)}
+foreach($item in @($reuseWizardKey,$reuseWizardKey+'.pub')){if(Test-Path $item){Remove-Item $item -Force}}
+$reuseKeygen=Invoke-VpsProcess (Get-Command ssh-keygen.exe).Source @('-t','ed25519','-N','','-C','provider-reuse-wizard','-f',$reuseWizardKey) -TimeoutSeconds 60
+Assert-True ($reuseKeygen.ExitCode -eq 0) 'existing-key wizard fixture key generated'
+$reuseWizardInput=(@('', 'ExampleProvider','ReuseExistingInstance','','192.0.2.63','','','2',$reuseWizardKey,'1','4','','n','n','1')-join[Environment]::NewLine)+[Environment]::NewLine
+$reuseWizardResult=Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile','-File',(Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),'-Mode','New','-DryRun','-InstanceRoot',$reuseWizardRoot
+) -InputText $reuseWizardInput -TimeoutSeconds 60
+Assert-True ($reuseWizardResult.ExitCode -eq 0) 'new-deployment wizard accepts provider existing-key reuse without forcing a new public key'
+Assert-True (-not(Test-Path $reuseWizardRoot)) 'existing-key New DryRun creates no instance archive'
+foreach($item in @($reuseWizardKey,$reuseWizardKey+'.pub')){if(Test-Path $item){Remove-Item $item -Force}}
+
 $branchResetRoot = Join-Path $ProjectRoot '.test-output\wizard-branch-reset'
 $branchDefaultRoot = Join-Path $ProjectRoot '.test-output\wizard-default-root'
 $branchResetArchive = Join-Path $branchResetRoot 'ExampleProvider\BranchReset'
 $branchInputs = @(
-    $branchResetRoot, 'ExampleProvider', 'BranchReset', '', '192.0.2.61', '', '', '1', '1', '', 'n',
-    '1', 'target.example.com', 'y', 'y', 'n', 'n', '2',
-    'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', # Komari -> role
+    $branchResetRoot, 'ExampleProvider', 'BranchReset', '', '192.0.2.61', '', '', '1', '1', '1', '', 'n',
+    '1', 'target.example.com', 'y', 'y', 'n', '1000', 'n', '2',
+    'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', # Komari -> role
     '4', '', 'n', 'n', '1'                   # switch to MonitorOnly and confirm
 )
 $branchQueue = [Collections.Generic.Queue[string]]::new()
@@ -653,7 +704,7 @@ $branchPlan = & $coreModule {
 Assert-True ($branchPlan.Role -eq 'MonitorOnly') 'back navigation can replace a previously completed role branch'
 Assert-True (-not $branchPlan.Reality.Target -and -not $branchPlan.TrustedTls.Enabled -and -not $branchPlan.AnyTls.Enabled) 'role change clears stale proxy and trusted TLS fields'
 Assert-True ($branchPlan.NetworkTuning.Mode -eq 'BaselineOnly') 'role change clears stale adaptive tuning fields'
-Assert-True ([string]$branchPlan.Paths.Archive -eq $branchResetArchive) 'interactive archive root overrides the command-line default'
+Assert-True ([string]$branchPlan.Paths.Archive -eq (Join-Path $branchResetArchive 'MXH-VPS-Deploy')) 'interactive archive root uses the instance managed-data subdirectory'
 Assert-True ($branchQueue.Count -eq 0) 'branch-reset wizard consumed the expected navigation path'
 Assert-True (-not (Test-Path -LiteralPath $branchResetArchive)) 'in-memory branch-reset test writes no plan or archive'
 
@@ -818,9 +869,14 @@ $authorityJson = Join-Path $candidateRoot 'authority.json'
 [IO.File]::WriteAllText($authorityYaml, @"
 proxies:
   - name: Existing-IPv4
-    type: direct
+    type: vless
+    server: 192.0.2.9
 proxy-groups:
   - name: US-West Entry
+    type: select
+    proxies:
+      - Existing-IPv4
+  - name: Europe Entry
     type: select
     proxies:
       - Existing-IPv4
@@ -836,14 +892,26 @@ proxy-groups: []
 rules: []
 "@)
 Save-VpsJson -Value ([ordered]@{ outbounds=@([ordered]@{type='vless';tag='Candidate-IPv4';server='192.0.2.1'}) }) -Path (Join-Path $fragmentRoot 'sing-box-outbounds.private.json')
-Save-VpsJson -Value ([ordered]@{ outbounds=@([ordered]@{type='direct';tag='Existing-IPv4'},[ordered]@{type='selector';tag='US-West Entry';outbounds=@('Existing-IPv4')}); route=[ordered]@{rules=@()} }) -Path $authorityJson
-$python = (Get-Command python.exe -ErrorAction Stop).Source
+Save-VpsJson -Value ([ordered]@{ outbounds=@(
+        [ordered]@{type='vless';tag='Existing-IPv4';server='192.0.2.9'},[ordered]@{type='direct';tag='DIRECT'},[ordered]@{type='block';tag='BLOCK'},
+        [ordered]@{type='selector';tag='US-West Entry';outbounds=@('Existing-IPv4')},
+        [ordered]@{type='selector';tag='Europe Entry';outbounds=@('Existing-IPv4')}
+    ); route=[ordered]@{rules=@()} }) -Path $authorityJson
+$pythonCommandForClient = Get-Command python.exe -ErrorAction SilentlyContinue
+$clientBuilderAvailable = $false
+if ($pythonCommandForClient) {
+    $dependencyProbe = Invoke-VpsProcess -FilePath $pythonCommandForClient.Source -ArgumentList @('-c','import ruamel.yaml') -TimeoutSeconds 30
+    $clientBuilderAvailable = $dependencyProbe.ExitCode -eq 0
+}
+if ($clientBuilderAvailable) {
+$python = $pythonCommandForClient.Source
 $merge = Invoke-VpsProcess -FilePath $python -ArgumentList @(
     (Join-Path $ProjectRoot 'scripts\merge_client_authority.py'),'--clash',$authorityYaml,'--sing-box',$authorityJson,
     '--fragments',$fragmentRoot,'--output',$outputRoot,'--roles','RealityEntry','--entry-group','US-West Entry'
 ) -TimeoutSeconds 60
 Assert-True ($merge.ExitCode -eq 0) 'client authority candidate merge fixture succeeds'
 $mergedJson = Get-Content -Raw (Join-Path $outputRoot 'sing-box-general.candidate.json') | ConvertFrom-Json -AsHashtable
+Assert-True ((Get-Item (Join-Path $outputRoot 'sing-box-general.candidate.json')).Length -lt 4MB) 'legacy candidate merger keeps runtime JSON below the desktop IPC ceiling'
 Assert-True ('Candidate-IPv4' -in @($mergedJson.outbounds.tag)) 'candidate merge adds sing-box outbound'
 Assert-True ('Candidate-IPv4' -in @((@($mergedJson.outbounds | Where-Object tag -eq 'US-West Entry')[0]).outbounds)) 'candidate merge updates selected sing-box entry selector'
 $removeRoot = Join-Path $candidateRoot 'remove-output'
@@ -855,6 +923,72 @@ $remove = Invoke-VpsProcess -FilePath $python -ArgumentList @(
 Assert-True ($remove.ExitCode -eq 0) 'decommission candidate removal fixture succeeds'
 $removedJson = Get-Content -Raw (Join-Path $removeRoot 'sing-box-general.candidate.json') | ConvertFrom-Json -AsHashtable
 Assert-True ('Candidate-IPv4' -notin @($removedJson.outbounds.tag)) 'decommission candidate removes matching sing-box outbound'
+
+$designerOutput = Join-Path $candidateRoot 'designer-output'
+$designerSpec = Join-Path $candidateRoot 'designer-spec.private.json'
+$manualLanding = [ordered]@{
+    name='Example Exit A IPv4';kind='landing';region_group=$null;transit_group='US-West Entry'
+    clash=[ordered]@{name='Example Exit A IPv4';type='ss';server='192.0.2.2';port=34567;cipher='2022-blake3-aes-128-gcm';password='fixture';udp=$true;'dialer-proxy'='US-West Entry'}
+    sing_box=[ordered]@{type='shadowsocks';tag='Example Exit A IPv4';server='192.0.2.2';server_port=34567;method='2022-blake3-aes-128-gcm';password='fixture';detour='US-West Entry'}
+}
+$designerSpecValue = [ordered]@{
+    schema_version=1
+    fragment_sources=@([ordered]@{fragment_dir=$fragmentRoot;role='RealityEntry';node_names=@('Candidate-IPv4');region_group='US-West Entry';transit_group=$null})
+    manual_nodes=@($manualLanding)
+    existing_node_refs=@([ordered]@{name='Existing-IPv4';kind='entry';region_group='US-West Entry';transit_group=$null})
+    groups=@(
+        [ordered]@{name='US-West Entry';members=@('Candidate-IPv4','Existing-IPv4')},
+        [ordered]@{name='Default Exit';members=@('Example Exit A IPv4','US-West Entry','DIRECT')},
+        [ordered]@{name='Direct Route';members=@('DIRECT','Default Exit')},
+        [ordered]@{name='AI Services';members=@('Default Exit','US-West Entry','Example Exit A IPv4','Direct Route')}
+    )
+    remove_groups=@('Europe Entry')
+    group_order=@('US-West Entry','Default Exit','Direct Route','AI Services')
+}
+Save-VpsJson -Value $designerSpecValue -Path $designerSpec -Private
+$designer = Invoke-VpsProcess -FilePath $python -ArgumentList @(
+    (Join-Path $ProjectRoot 'scripts\build_client_authority.py'),'--clash',$authorityYaml,'--sing-box',$authorityJson,
+    '--spec',$designerSpec,'--output',$designerOutput
+) -TimeoutSeconds 60
+Assert-True ($designer.ExitCode -eq 0) 'independent client authority designer builds a candidate from managed and manual nodes'
+$designerJson = Get-Content -Raw (Join-Path $designerOutput 'sing-box-general.candidate.json') | ConvertFrom-Json -AsHashtable
+Assert-True ((Get-Item (Join-Path $designerOutput 'sing-box-general.candidate.json')).Length -lt 4MB) 'independent designer emits compact sing-box runtime JSON'
+$designerEntry = @($designerJson.outbounds | Where-Object tag -eq 'US-West Entry')[0]
+$designerLanding = @($designerJson.outbounds | Where-Object tag -eq 'Example Exit A IPv4')[0]
+Assert-True (@($designerEntry.outbounds)[0] -eq 'Candidate-IPv4') 'regional entry order controls the selector first default'
+Assert-True ('Existing-IPv4' -in @($designerEntry.outbounds)) 'existing authority node can be reused without re-entering credentials'
+Assert-True ($designerLanding.detour -eq 'US-West Entry') 'landing detour follows the chosen regional entry group'
+Assert-True ((@($designerJson.outbounds | Where-Object tag -eq 'Default Exit')[0]).default -eq 'Example Exit A IPv4') 'default exit first member is written as sing-box selector default'
+Assert-True (-not @($designerJson.outbounds | Where-Object tag -eq 'Europe Entry').Count) 'disabled default region group is removed from the candidate'
+$designerYamlText = Get-Content -Raw (Join-Path $designerOutput 'Clash_General.candidate.yaml')
+Assert-True ($designerYamlText -match 'dialer-proxy:\s+US-West Entry') 'Clash landing node receives the matching dialer-proxy'
+$cycleSpec = Get-Content -Raw -LiteralPath $designerSpec | ConvertFrom-Json -AsHashtable
+$cycleSpec.groups = @([ordered]@{name='Cycle A';members=@('Cycle B')},[ordered]@{name='Cycle B';members=@('Cycle A')})
+$cyclePath = Join-Path $candidateRoot 'cycle-spec.private.json'; Save-VpsJson -Value $cycleSpec -Path $cyclePath -Private
+$cycle = Invoke-VpsProcess -FilePath $python -ArgumentList @(
+    (Join-Path $ProjectRoot 'scripts\build_client_authority.py'),'--clash',$authorityYaml,'--sing-box',$authorityJson,
+    '--spec',$cyclePath,'--output',(Join-Path $candidateRoot 'cycle-output')
+) -TimeoutSeconds 60
+Assert-True ($cycle.ExitCode -ne 0 -and $cycle.StdErr -match 'cycle') 'client authority designer rejects selector cycles before writing candidates'
+
+$designerInstanceRoot = Join-Path $candidateRoot 'empty-instances'; [IO.Directory]::CreateDirectory($designerInstanceRoot)|Out-Null
+$designerDryOutput = Join-Path $candidateRoot 'dry-output-root'
+$designerDryInput = (@(
+    'n','US-West Entry',$authorityYaml,$authorityJson,
+    'n','1','1','','','n',$designerDryOutput
+) -join [Environment]::NewLine) + [Environment]::NewLine
+$designerDry = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile','-File',(Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),'-Mode','ClientConfig','-DryRun','-InstanceRoot',$designerInstanceRoot
+) -InputText $designerDryInput -TimeoutSeconds 60
+Assert-True ($designerDry.ExitCode -eq 0) 'independent ClientConfig mode completes a no-write DryRun without any managed VPS'
+Assert-True ($designerDry.StdOut -match 'Existing-IPv4' -and $designerDry.StdOut -match 'DryRun') 'ClientConfig can reuse an existing authority node without re-entering credentials'
+Assert-True (-not(Test-Path -LiteralPath $designerDryOutput)) 'ClientConfig DryRun writes no candidate directory'
+}
+else {
+    Write-Host 'Client authority engine tests skipped: optional pinned ruamel.yaml dependency is not installed.' -ForegroundColor Yellow
+    Assert-True (Test-Path -LiteralPath (Join-Path $ProjectRoot 'requirements-client-merge.txt')) 'optional client designer dependency manifest exists'
+    Assert-True (Test-Path -LiteralPath (Join-Path $ProjectRoot 'scripts\build_client_authority.py')) 'client designer remains discoverable when optional runtime is absent'
+}
 [IO.Directory]::Delete($maintenanceRoot, $true)
 
 $backupCleanupRoot = Join-Path $ProjectRoot '.test-output\protocol-backup-cleanup-dryrun'
@@ -874,7 +1008,7 @@ Assert-True (Test-Path -LiteralPath $backupCleanupCandidate -PathType Container)
 
 $anyToRealityRoot = Join-Path $ProjectRoot '.test-output\migration-anytls-to-reality'
 $anyToRealityPlan = New-TestMigrationSourceFixture -Template $anyTlsSource -Root $anyToRealityRoot -ProtocolModule 'sing-box-anytls'
-$anyToRealityInput = (@('1', '1', '1', '', '1', 'target.example.invalid', 'y', 'y', 'n', '1') -join [Environment]::NewLine) + [Environment]::NewLine
+$anyToRealityInput = (@('1', '1', '1', '', '1', '1', 'target.example.invalid', 'y', 'y', 'n', '1') -join [Environment]::NewLine) + [Environment]::NewLine
 $anyToRealityResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
     '-Mode', 'Migrate', '-DryRun', '-PlanPath', $anyToRealityPlan
@@ -882,7 +1016,7 @@ $anyToRealityResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
 Assert-True ($anyToRealityResult.ExitCode -eq 0) 'existing AnyTLS plan can enter external Reality migration DryRun'
 Assert-True ($anyToRealityResult.StdOut -match 'target-audit' -and $anyToRealityResult.StdOut -match 'xray-reality') 'AnyTLS to Reality DryRun selects target audit and Xray modules'
 Assert-True ($anyToRealityResult.StdOut -notmatch '(?m)\ssing-box-anytls\s') 'AnyTLS to Reality DryRun excludes the source service module'
-$networkTuneInput = (@('1', '', '1') -join [Environment]::NewLine) + [Environment]::NewLine
+$networkTuneInput = (@('1', '1000', '', '1') -join [Environment]::NewLine) + [Environment]::NewLine
 $networkTuneResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
     '-Mode', 'TuneNetwork', '-DryRun', '-PlanPath', $anyToRealityPlan
@@ -913,7 +1047,8 @@ $importKey = Join-Path $ProjectRoot '.test-output\existing-import-provider-key'
 if (Test-Path -LiteralPath $importRoot) { [IO.Directory]::Delete($importRoot, $true) }
 [IO.File]::WriteAllText($importKey, 'fixture-existing-key')
 $importInput = (@(
-    '', 'ExampleProvider', 'ExistingImport', 'Example-US.Imported', '192.0.2.90', '', '', '1', $importKey, '1'
+    '', 'ExampleProvider', 'ExistingImport', 'Example-US.Imported', '192.0.2.90', '', '', '1', $importKey,
+    '1', '1', '1000', '1'
 ) -join [Environment]::NewLine) + [Environment]::NewLine
 $importResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
@@ -921,6 +1056,9 @@ $importResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
 ) -InputText $importInput -TimeoutSeconds 60
 Assert-True ($importResult.ExitCode -eq 0) 'existing VPS import wizard supports a no-write DryRun without deployment-plan.json'
 Assert-True ($importResult.StdErr -notmatch 'Exception|Error') 'existing VPS import DryRun reports no execution error'
+$importSourceText = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Import.ps1')
+Assert-True ($importSourceText -match "SshKeyMode = 'ReuseExisting'" -and $importSourceText -match 'EnforceKeyOnlySsh = \$false') 'existing VPS import defaults to key reuse and preserves SSH authentication policy'
+Assert-True ($importResult.StdOut -match '1000 Mbps' -and $importResult.StdOut -match 'MXH-VPS-Deploy') 'existing VPS import records nominal bandwidth and managed subdirectory layout'
 Assert-True (-not (Test-Path -LiteralPath $importArchive)) 'existing VPS import DryRun creates no private archive or plan'
 [IO.File]::Delete($importKey)
 

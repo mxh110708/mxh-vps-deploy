@@ -18,6 +18,7 @@ TestResults/
 *.log
 __pycache__/
 *.pyc
+config/client-layout.local.json
 
 # Editors and operating systems.
 .vscode/

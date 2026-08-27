@@ -321,12 +321,23 @@ function Invoke-MxhControlledUpgrade {
     if(-not $roles.Count){Write-VpsUi '没有可升级的受管组件。' Warning;return}
     $choice=Read-VpsMenu '选择受控升级组件（使用 versions.json 固定版本与 SHA-256）' @($roles|ForEach-Object{if($_ -eq 'KomariAgent'){'Komari Agent'}elseif($_ -eq 'KomariController'){'Komari Controller'}else{Get-MxhProtocolRoleLabel $_}}) 1 -AllowBack
     $role=$roles[$choice-1]
+    $targetVersion=$null;$targetChannel=$null
+    if($role -eq 'RealityEntry'){
+        $channelChoice=Read-VpsMenu 'Xray 升级目标' @(
+            "保持计划版本（$($Context.Plan.Reality.XrayVersion)）",
+            "切换到当前固定验证版（$($Context.Versions.xray.version)）",
+            '解析并切换到 XTLS/Xray-core 官方最新稳定版'
+        ) 1 -AllowBack
+        $targetVersion=if($channelChoice -eq 1){[string]$Context.Plan.Reality.XrayVersion}elseif($channelChoice -eq 2){[string]$Context.Versions.xray.version}else{Resolve-VpsXrayVersion -ProjectRoot $Context.ProjectRoot -Channel LatestStable}
+        $targetChannel=if($channelChoice -eq 3){'LatestStable'}elseif($channelChoice -eq 2){'FixedVerified'}elseif($Context.Plan.Reality.Contains('XrayVersionChannel')){[string]$Context.Plan.Reality.XrayVersionChannel}else{'ImportedOrLegacy'}
+    }
     if($Context.DryRun){Write-VpsUi "DryRun：将下载并校验固定资产、配置检查、同版本可重复安装、失败自动回滚：$role" Success;return}
     Start-MxhMaintenanceTransaction $Context 'ControlledUpgrade'|Out-Null
     try{
         $arch=if([string]$Context.State.Audit.Architecture -in @('x86_64','amd64')){'amd64'}else{'arm64'}
         if($role -eq 'RealityEntry'){
-            Invoke-VpsRemoteScript $Context 'xray-install.sh' @{VERSION=[string]$Context.Plan.Reality.XrayVersion;INSTALLER_URL=[string]$Context.Versions.xray.installer_url;INSTALLER_SHA256=[string]$Context.Versions.xray.installer_sha256} -TimeoutSeconds 1200|Out-Null
+            Invoke-VpsRemoteScript $Context 'xray-install.sh' @{VERSION=$targetVersion;INSTALLER_URL=[string]$Context.Versions.xray.installer_url;INSTALLER_SHA256=[string]$Context.Versions.xray.installer_sha256} -TimeoutSeconds 1200|Out-Null
+            $Context.Plan.Reality.XrayVersion=$targetVersion;$Context.Plan.Reality.XrayVersionChannel=$targetChannel
         }elseif($role -in @('AnyTlsEntry','ShadowsocksLanding')){
             $asset=$Context.Versions.sing_box.assets.$arch; $script=if($role -eq 'AnyTlsEntry'){'sing-box-anytls-install.sh'}else{'sing-box-install.sh'}
             $params=@{VERSION=[string]$Context.Versions.sing_box.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256}
@@ -357,15 +368,16 @@ function Invoke-MxhControlledUpgrade {
 
 function Invoke-MxhClientCandidateMerge {
     param($Context)
+    $layout=(Get-MxhClientLayoutTemplate -ProjectRoot $Context.ProjectRoot).Value
     $inventory=Get-MxhProtocolInventory -Plan $Context.Plan -State $Context.State
     $roles=@(Get-MxhManagedProtocolRoles|Where-Object{[bool]$inventory[$_].Installed})
     $selected=@()
     foreach($role in $roles){if(Read-VpsYesNo "候选中包含 $(Get-MxhProtocolRoleLabel $role)？" ([bool]$inventory[$role].Enabled) -AllowBack){$selected+=$role}}
     if(-not $selected.Count){throw '至少选择一种已安装协议。'}
     $entry=$null
-    if(@($selected|Where-Object{$_ -ne 'ShadowsocksLanding'}).Count){$entry=@('US-West Entry','Hong Kong Entry','Europe Entry')[(Read-VpsMenu '入口节点加入哪个地区入口组' @('US-West Entry','Hong Kong Entry','Europe Entry') 1 -AllowBack)-1]}
-    $clash=Read-VpsText 'Clash 权威 YAML' -Default 'F:\VPS\Clash YAML\Clash_General.yaml' -AllowBack -Validate{param($v)Test-Path $v.Trim('"')}
-    $sing=Read-VpsText 'sing-box 权威 JSON' -Default 'F:\VPS\Sing-box Config\sing-box-general.json' -AllowBack -Validate{param($v)Test-Path $v.Trim('"')}
+    if(@($selected|Where-Object{$_ -ne 'ShadowsocksLanding'}).Count){$entry=@($layout.region_groups)[(Read-VpsMenu '入口节点加入哪个地区入口组' @($layout.region_groups) 1 -AllowBack)-1]}
+    $clash=Read-VpsText 'Clash 权威 YAML' -Default ([string]$layout.authority_defaults.clash) -AllowBack -Validate{param($v)Test-Path $v.Trim('"')}
+    $sing=Read-VpsText 'sing-box 权威 JSON' -Default ([string]$layout.authority_defaults.sing_box) -AllowBack -Validate{param($v)Test-Path $v.Trim('"')}
     $out=Join-Path $Context.ArchivePath ('client-candidates\'+(Get-Date -Format yyyyMMdd-HHmmss))
     if($Context.DryRun){Write-VpsUi "DryRun：将生成候选到 $out，不修改权威文件或 AppData。" Success;return}
     [IO.Directory]::CreateDirectory($out)|Out-Null
@@ -374,7 +386,8 @@ function Invoke-MxhClientCandidateMerge {
     $r=Invoke-VpsProcess $python $args -TimeoutSeconds 300;if($r.ExitCode -ne 0){throw '客户端候选合并失败。'}
     $candidate=Join-Path $out 'Clash_General.candidate.yaml';$data=Join-Path $out 'mihomo-test-data';[IO.Directory]::CreateDirectory($data)|Out-Null
     foreach($core in @('D:\Program Files\Clash Verge\verge-mihomo.exe','D:\Program Files\Clash Verge\verge-mihomo-alpha.exe')){if(Test-Path $core){$t=Invoke-VpsProcess $core @('-t','-d',$data,'-f',$candidate) -TimeoutSeconds 180;if($t.ExitCode -ne 0){throw "候选未通过 $(Split-Path -Leaf $core)。"}}}
-    Get-Content -Raw (Join-Path $out 'sing-box-general.candidate.json')|ConvertFrom-Json|Out-Null
+    $singCandidate=Join-Path $out 'sing-box-general.candidate.json';Get-Content -Raw $singCandidate|ConvertFrom-Json|Out-Null
+    if((Get-Item $singCandidate).Length-ge 4MB){throw 'sing-box 候选超过 4 MiB 桌面端安全上限。'}
     Protect-VpsPrivateFile $candidate;Protect-VpsPrivateFile (Join-Path $out 'sing-box-general.candidate.json')
     Write-VpsUi "候选已生成并通过可用核心语法检查：$out" Success
     Write-VpsUi '权威文件和 Clash Verge AppData 均未修改。' Warning
@@ -384,14 +397,19 @@ function Invoke-MxhKomariLifecycle {
     param($Context)
     $choice=Read-VpsMenu 'Komari 完整生命周期' @('状态审计','安装/修复/轮换 Agent Token','按固定版本升级 Agent（保留 Token）','卸载 Agent','备份 Controller 数据/二进制/服务','从本地备份恢复 Controller','轮换 Cloudflare Tunnel Token','按固定版本升级 Controller（保留数据与启停状态）','卸载 Controller 与 Connector') 1 -AllowBack
     if($Context.DryRun){Write-VpsUi 'DryRun：只显示 Komari 生命周期动作，不读取 Token、不连接服务器。' Success;return}
+    $endpoint=$null
+    if($choice -eq 2){
+        $endpointDefault=if($Context.Plan.Komari.Endpoint){[string]$Context.Plan.Komari.Endpoint}else{[string]$Context.Versions.komari_agent.endpoint_default}
+        $endpoint=Read-VpsText 'Komari 站点 HTTPS 地址' -Default $endpointDefault -AllowBack -Validate{param($v)$uri=$null;[Uri]::TryCreate($v,'Absolute',[ref]$uri)-and$uri.Scheme-eq'https'}
+    }
     if($choice -eq 1){$r=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='Status'};Write-VpsUi 'Komari 服务状态审计完成（详细结果只写入私有日志）。' Success;return}
     if($choice -in @(2,3,4,7,8,9)){Start-MxhMaintenanceTransaction $Context 'KomariLifecycle'|Out-Null}
     try{
         if($choice -eq 2){
             $secure=Read-Host 'Komari Agent Token（不显示）' -AsSecureString;$token=ConvertFrom-VpsSecureString $secure
             try{$arch=if([string]$Context.State.Audit.Architecture -in @('x86_64','amd64')){'amd64'}else{'arm64'};$asset=$Context.Versions.komari_agent.assets.$arch
-                $r=Invoke-VpsRemoteScript $Context 'komari-agent.sh' @{ENDPOINT=if($Context.Plan.Komari.Endpoint){[string]$Context.Plan.Komari.Endpoint}else{[string]$Context.Versions.komari_agent.endpoint_default};TOKEN=$token;NODE_NAME=[string]$Context.Plan.NodeName;VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200 -SensitiveOutput
-            }finally{$token=$null;$secure.Dispose()};$Context.Plan.Komari.Enabled=$true;$Context.State.KomariInstalled=$true
+                $r=Invoke-VpsRemoteScript $Context 'komari-agent.sh' @{ENDPOINT=$endpoint;TOKEN=$token;NODE_NAME=[string]$Context.Plan.NodeName;VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200 -SensitiveOutput
+            }finally{$token=$null;$secure.Dispose()};$Context.Plan.Komari.Endpoint=$endpoint;$Context.Plan.Komari.Enabled=$true;$Context.State.KomariInstalled=$true
         }elseif($choice -eq 3){
             $arch=if([string]$Context.State.Audit.Architecture -in @('x86_64','amd64')){'amd64'}else{'arm64'};$asset=$Context.Versions.komari_agent.assets.$arch
             Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='AgentUpgrade';VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200|Out-Null
@@ -427,7 +445,8 @@ function Invoke-MxhDecommission {
     if((Read-VpsText '输入 DECOMMISSION 确认' -AllowBack)-cne 'DECOMMISSION'){Write-VpsUi '未退役。' Warning;return}
     if($removeController -and (Read-VpsText '再次输入 DECOMMISSION-ALL 确认移除 Controller/Connector' -AllowBack)-cne 'DECOMMISSION-ALL'){Write-VpsUi '未执行整机退役。' Warning;return}
     if($Context.DryRun){Write-VpsUi "DryRun：将执行 $scope；SSH 和系统文件保留。" Success;return}
-    $clash='F:\VPS\Clash YAML\Clash_General.yaml';$sing='F:\VPS\Sing-box Config\sing-box-general.json'
+    $layout=(Get-MxhClientLayoutTemplate -ProjectRoot $Context.ProjectRoot).Value
+    $clash=[string]$layout.authority_defaults.clash;$sing=[string]$layout.authority_defaults.sing_box
     if((Test-Path $clash) -and (Test-Path $sing)){
         $out=Join-Path $Context.ArchivePath ('decommission-client-candidate\'+(Get-Date -Format yyyyMMdd-HHmmss));[IO.Directory]::CreateDirectory($out)|Out-Null
         $python=Get-VpsCommandPath 'python.exe';$script=Join-Path $Context.ProjectRoot 'scripts\merge_client_authority.py'
@@ -435,7 +454,8 @@ function Invoke-MxhDecommission {
         if($r.ExitCode -ne 0){throw '无法生成退役节点删除候选，已停止远端退役。'}
         $clashCandidate=Join-Path $out 'Clash_General.candidate.yaml';$testData=Join-Path $out 'mihomo-test-data';[IO.Directory]::CreateDirectory($testData)|Out-Null
         foreach($core in @('D:\Program Files\Clash Verge\verge-mihomo.exe','D:\Program Files\Clash Verge\verge-mihomo-alpha.exe')){if(Test-Path $core){$test=Invoke-VpsProcess $core @('-t','-d',$testData,'-f',$clashCandidate) -TimeoutSeconds 180;if($test.ExitCode -ne 0){throw '退役删除候选未通过 Mihomo 双核心语法测试。'}}}
-        Get-Content -Raw (Join-Path $out 'sing-box-general.candidate.json')|ConvertFrom-Json|Out-Null
+        $singCandidate=Join-Path $out 'sing-box-general.candidate.json';Get-Content -Raw $singCandidate|ConvertFrom-Json|Out-Null
+        if((Get-Item $singCandidate).Length-ge 4MB){throw '退役 sing-box 候选超过 4 MiB 桌面端安全上限。'}
         Protect-VpsPrivateFile $clashCandidate;Protect-VpsPrivateFile (Join-Path $out 'sing-box-general.candidate.json')
         Write-VpsUi "已先生成客户端节点删除候选：$out" Success
     }

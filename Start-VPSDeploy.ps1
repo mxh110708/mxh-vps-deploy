@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Interactive', 'New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ValidateProject')]
+    [ValidateSet('Interactive', 'New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ClientConfig', 'ValidateProject')]
     [string]$Mode = 'Interactive',
 
     [string]$PlanPath,

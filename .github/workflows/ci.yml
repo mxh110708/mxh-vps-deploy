@@ -12,6 +12,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install pinned client-config dependency
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -r ./requirements-client-merge.txt
       - name: Run project tests
         shell: pwsh
         run: ./tests/Run-Tests.ps1 -ProjectRoot $PWD

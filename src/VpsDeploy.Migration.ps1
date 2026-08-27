@@ -439,6 +439,8 @@ function New-MxhProtocolMigrationPlan {
         [string]$RealityServerName,
         [string]$RealityTargetAddress,
         [int]$RealityLocalHttpsPort = 8443,
+        [string]$XrayVersion,
+        [ValidateSet('FixedVerified','LatestStable','ImportedOrLegacy')][string]$XrayVersionChannel = 'FixedVerified',
         [string]$AnyTlsServerName,
         [string]$EchPublicName,
         [string[]]$AnyTlsPaddingScheme = @(),
@@ -481,6 +483,8 @@ function New-MxhProtocolMigrationPlan {
         $plan.Reality.TargetAddress = $RealityTargetAddress
         $plan.Reality.LocalHttpsPort = $RealityLocalHttpsPort
         $plan.Reality.ForceIpv4Egress = $ForceIpv4Egress
+        if ($XrayVersion) { $plan.Reality.XrayVersion = $XrayVersion }
+        $plan.Reality.XrayVersionChannel = $XrayVersionChannel
     }
     if (-not $plan.Contains('AnyTls')) { $plan.AnyTls = [ordered]@{} }
     $plan.AnyTls.Enabled = ($TargetRole -eq 'AnyTlsEntry') -or [bool]$initialInventory.AnyTlsEntry.Installed
@@ -779,6 +783,7 @@ function New-MxhProtocolMigrationDetails {
     )
 
     $versions = Get-VpsVersions -ProjectRoot $ProjectRoot
+    $defaultTransitTag = [string](Get-MxhClientLayoutTemplate -ProjectRoot $ProjectRoot).Value.region_groups[0]
     $sourcePlan = $Source.Plan
     $initialInventory = Get-MxhProtocolInventory -Plan $sourcePlan -State $Source.State -RemoteInventory $Source.Inventory
     $sourceRole = Get-MxhInventoryPrimaryRole -Inventory $initialInventory
@@ -835,12 +840,14 @@ function New-MxhProtocolMigrationDetails {
         AnyTlsServerName = if ($sourcePlan.Contains('AnyTls') -and $sourcePlan.AnyTls.Contains('ServerName')) { [string]$sourcePlan.AnyTls.ServerName } else { $null }
         EchPublicName = if ($sourcePlan.Contains('AnyTls') -and $sourcePlan.AnyTls.Contains('EchPublicName')) { [string]$sourcePlan.AnyTls.EchPublicName } else { $null }
         AnyTlsPaddingScheme = $anyTlsPadding
+        XrayVersionChannel = 'FixedVerified'
+        XrayVersion = [string]$versions.xray.version
         CloudflareZoneName = if ($sourcePlan.Contains('TrustedTls') -and $sourcePlan.TrustedTls.Contains('ZoneName')) { [string]$sourcePlan.TrustedTls.ZoneName } else { $null }
         CertbotEmail = if ($sourcePlan.Contains('TrustedTls') -and $sourcePlan.TrustedTls.Contains('CertbotEmail')) { [string]$sourcePlan.TrustedTls.CertbotEmail } else { $null }
         CloudflareTokenFile = if ($sourcePlan.Contains('TrustedTls') -and $sourcePlan.TrustedTls.Contains('CloudflareTokenFile')) { [string]$sourcePlan.TrustedTls.CloudflareTokenFile } else { $null }
         AllowlistInput = $allowlistInput
         TrustedEntryIps = $trustedEntryIps
-        ClientTransitTag = if ($sourcePlan.Contains('Shadowsocks') -and $sourcePlan.Shadowsocks.Contains('ClientTransitTag') -and $sourcePlan.Shadowsocks.ClientTransitTag) { [string]$sourcePlan.Shadowsocks.ClientTransitTag } else { 'US-West Entry' }
+        ClientTransitTag = if ($sourcePlan.Contains('Shadowsocks') -and $sourcePlan.Shadowsocks.Contains('ClientTransitTag') -and $sourcePlan.Shadowsocks.ClientTransitTag) { [string]$sourcePlan.Shadowsocks.ClientTransitTag } else { $defaultTransitTag }
         ValidationEntryPlanPath = $null
         SecondaryIpv6Enabled = if ($sourcePlan.Contains('Shadowsocks') -and $sourcePlan.Shadowsocks.Contains('SecondaryIpv6Enabled')) { [bool]$sourcePlan.Shadowsocks.SecondaryIpv6Enabled } else { $false }
         SecondaryIpv6Address = if ($sourcePlan.Contains('Shadowsocks') -and $sourcePlan.Shadowsocks.Contains('SecondaryIpv6Address')) { [string]$sourcePlan.Shadowsocks.SecondaryIpv6Address } else { $null }
@@ -873,6 +880,17 @@ function New-MxhProtocolMigrationDetails {
                     $n = 0
                     [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -notin $sourceActivePorts
                 } -ValidationMessage '端口必须在 20000–59999，且不能与当前仍在运行的服务或 SSH 端口冲突。')
+            }
+        },
+        [pscustomobject]@{
+            Id = 'xray-version'; ShouldRun = { $wizard.TargetRole -eq 'RealityEntry' }; Run = {
+                $default = if ($wizard.XrayVersionChannel -eq 'LatestStable') { 2 } else { 1 }
+                $choice = Read-VpsMenu 'Xray 版本通道' @(
+                    "当前固定验证版（$($versions.xray.version)，推荐）",
+                    'XTLS/Xray-core 官方最新稳定版'
+                ) $default -AllowBack
+                $wizard.XrayVersionChannel = if ($choice -eq 2) { 'LatestStable' } else { 'FixedVerified' }
+                $wizard.XrayVersion = Resolve-VpsXrayVersion -ProjectRoot $ProjectRoot -Channel $wizard.XrayVersionChannel
             }
         },
         [pscustomobject]@{
@@ -950,7 +968,8 @@ function New-MxhProtocolMigrationDetails {
                 $wizard.TargetRole -eq 'AnyTlsEntry' -or ($wizard.TargetRole -eq 'RealityEntry' -and $wizard.RealityTargetMode -eq 'LocalOwnedTls')
             }; Run = {
                 $default = if ($wizard.CloudflareTokenFile) { [string]$wizard.CloudflareTokenFile } else {
-                    Join-Path ([string]$sourcePlan.Paths.Archive) 'cloudflare-certbot-token.private.txt'
+                    $tokenRoot = if ($sourcePlan.Paths.Contains('InstanceDirectory')) { [string]$sourcePlan.Paths.InstanceDirectory } else { [string]$sourcePlan.Paths.Archive }
+                    Join-Path $tokenRoot 'cloudflare-certbot-token.private.txt'
                 }
                 $value = Read-VpsText 'Cloudflare Certbot Token 本地私有文件' -Default $default -AllowBack `
                     -Validate { param($v) Test-Path -LiteralPath $v -PathType Leaf } `
@@ -1076,6 +1095,7 @@ function New-MxhProtocolMigrationDetails {
             -TargetRole $wizard.TargetRole -Operation $Operation -TargetServicePort $targetPort `
             -RealityTargetMode $wizard.RealityTargetMode -RealityTarget $wizard.RealityTarget `
             -RealityServerName $realityServerName -RealityTargetAddress $realityAddress `
+            -XrayVersion $wizard.XrayVersion -XrayVersionChannel $wizard.XrayVersionChannel `
             -AnyTlsServerName $wizard.AnyTlsServerName -EchPublicName $wizard.EchPublicName `
             -AnyTlsPaddingScheme @($wizard.AnyTlsPaddingScheme) -ForceIpv4Egress ([bool]$wizard.ForceIpv4) `
             -TrustedTlsEnabled $trustedTls -CloudflareZoneName $wizard.CloudflareZoneName `

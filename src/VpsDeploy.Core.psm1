@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:VpsWizardBackMarker = '__MXH_VPS_WIZARD_BACK__'
 $script:VpsWizardCancelMarker = '__MXH_VPS_WIZARD_CANCEL__'
+$script:VpsManagedDirectoryName = 'MXH-VPS-Deploy'
 
 function Write-VpsUi {
     [CmdletBinding()]
@@ -274,18 +275,16 @@ function Read-VpsNetworkTuningSettings {
         [switch]$AllowBack
     )
 
-    if ($Role -eq 'MonitorOnly') {
-        return [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
-    }
-    Write-VpsUi '参考 RTT 可以不提供：默认基础保守方案不依赖测速；只有明确掌握带宽和代表性 RTT 时才选择 BDP 自适应缓冲区。' Info
-    if (-not (Read-VpsYesNo '是否使用已知带宽和 RTT 计算额外的保守缓冲区？' $false -AllowBack:$AllowBack)) {
-        return [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
-    }
+    Write-VpsUi '套餐标称带宽是必填参考值；脚本不会把网卡协商速率或一次测速当成套餐带宽。参考 RTT 可不提供。' Info
     $bandwidth = [int](Read-VpsText '套餐标称带宽（Mbps，例如 100 或 1000）' -AllowBack:$AllowBack -Validate {
             param($v)
             $n = 0
             [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 100000
         } -ValidationMessage '请输入 1–100000 之间的整数 Mbps。')
+    if ($Role -eq 'MonitorOnly' -or
+        -not (Read-VpsYesNo '是否有可信的代表性 RTT，用于计算额外的保守缓冲区？' $false -AllowBack:$AllowBack)) {
+        return [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $bandwidth; ReferenceRttMs = $null }
+    }
     $rttPrompt = if ($Role -in @('RealityEntry', 'AnyTlsEntry')) {
         '主要使用地到该入口 VPS 的典型 RTT（ms）'
     }
@@ -338,12 +337,16 @@ function Get-VpsConservativeNetworkPlan {
         'ShadowsocksLanding' { 'landing' }
         default { 'monitor' }
     }
-    $queueFloor = switch ($Role) {
+    if ($BandwidthMbps -lt 0 -or $BandwidthMbps -gt 100000) { throw '标称带宽必须在 1–100000 Mbps；旧计划缺失时可为 0。' }
+    $bandwidthTier = if ($BandwidthMbps -le 0) { 'unknown' } elseif ($BandwidthMbps -le 100) { 'low' } elseif ($BandwidthMbps -le 500) { 'medium' } elseif ($BandwidthMbps -le 2000) { 'high' } else { 'very-high' }
+    $bandwidthQueue = if ($BandwidthMbps -le 0) { 0 } elseif ($BandwidthMbps -le 100) { 512 } elseif ($BandwidthMbps -le 500) { 1024 } elseif ($BandwidthMbps -le 2000) { 2048 } else { 4096 }
+    $roleQueue = switch ($Role) {
         'RealityEntry' { 1024 }
         'AnyTlsEntry' { 1024 }
         'ShadowsocksLanding' { 2048 }
         default { 0 }
     }
+    $queueFloor = [Math]::Max($roleQueue, $bandwidthQueue)
     $bdpBytes = [long]0
     $bufferTarget = [long]0
     if ($Mode -eq 'AdaptiveConservative') {
@@ -357,12 +360,13 @@ function Get-VpsConservativeNetworkPlan {
     }
     $modeSlug = if ($Mode -eq 'AdaptiveConservative') { 'adaptive' } else { 'baseline' }
     return [ordered]@{
-        Profile = "${roleSlug}-${memoryTier}-${modeSlug}"
+        Profile = "${roleSlug}-${memoryTier}-${bandwidthTier}-${modeSlug}"
         Mode = $Mode
         Role = $Role
         MemoryMiB = $memoryMiB
         MemoryTier = $memoryTier
-        BandwidthMbps = if ($Mode -eq 'AdaptiveConservative') { $BandwidthMbps } else { $null }
+        BandwidthMbps = if ($BandwidthMbps -gt 0) { $BandwidthMbps } else { $null }
+        BandwidthTier = $bandwidthTier
         ReferenceRttMs = if ($Mode -eq 'AdaptiveConservative') { $ReferenceRttMs } else { $null }
         BdpBytes = $bdpBytes
         BufferTargetBytes = $bufferTarget
@@ -444,6 +448,55 @@ function Get-VpsVersions {
     return Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
 }
 
+function Get-VpsManagedArchivePath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$InstanceRoot,
+        [Parameter(Mandatory)] [string]$Provider,
+        [Parameter(Mandatory)] [string]$Instance
+    )
+    $instanceDirectory = Join-Path (Join-Path $InstanceRoot $Provider) $Instance
+    return Join-Path $instanceDirectory $script:VpsManagedDirectoryName
+}
+
+function Get-VpsExistingPlanPath {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string]$InstanceDirectory)
+    foreach ($candidate in @(
+            (Join-Path (Join-Path $InstanceDirectory $script:VpsManagedDirectoryName) 'deployment-plan.json'),
+            (Join-Path $InstanceDirectory 'deployment-plan.json')
+        )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
+function Resolve-VpsXrayVersion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ProjectRoot,
+        [ValidateSet('FixedVerified', 'LatestStable')] [string]$Channel = 'FixedVerified'
+    )
+    $versions = Get-VpsVersions -ProjectRoot $ProjectRoot
+    if ($Channel -eq 'FixedVerified') { return [string]$versions.xray.version }
+    $testVersion = [Environment]::GetEnvironmentVariable('MXH_VPS_TEST_XRAY_LATEST')
+    if ($testVersion) {
+        if ($testVersion -notmatch '^\d+\.\d+\.\d+$') { throw '测试注入的 Xray 版本格式无效。' }
+        return $testVersion
+    }
+    try {
+        $api = if ($versions.xray.latest_stable_api) { [string]$versions.xray.latest_stable_api } else { 'https://api.github.com/repos/XTLS/Xray-core/releases/latest' }
+        $release = Invoke-RestMethod -Method Get -Headers @{ 'User-Agent' = 'MXH-VPS-Deploy' } -Uri $api -TimeoutSec 20
+        if ([bool]$release.draft -or [bool]$release.prerelease) { throw 'GitHub latest 指向草稿或预发行版。' }
+        $resolved = ([string]$release.tag_name).TrimStart('v')
+        if ($resolved -notmatch '^\d+\.\d+\.\d+$') { throw '官方 latest 标签格式无法识别。' }
+        return $resolved
+    }
+    catch {
+        throw "无法从 XTLS/Xray-core 官方发布页解析最新稳定版：$($_.Exception.Message)。可返回选择当前固定验证版。"
+    }
+}
+
 function New-VpsInteractivePlan {
     [CmdletBinding()]
     param(
@@ -452,9 +505,10 @@ function New-VpsInteractivePlan {
     )
 
     $versions = Get-VpsVersions -ProjectRoot $ProjectRoot
+    $defaultTransitTag = [string](Get-MxhClientLayoutTemplate -ProjectRoot $ProjectRoot).Value.region_groups[0]
     Write-Host ''
     Write-Host 'MXH VPS Deploy - 新部署向导' -ForegroundColor White
-    Write-Host '支持初始密码或服务商现有私钥；密码只由 OpenSSH 询问，现有私钥只用于一次性引导。' -ForegroundColor DarkGray
+    Write-Host '支持初始密码或服务商现有私钥；现有 OpenSSH 私钥默认复用，也可明确选择生成新的管理密钥。' -ForegroundColor DarkGray
     Write-Host '普通文本和是/否输入 b 可返回；编号菜单输入 0 或 b 可返回。第一项返回主菜单。' -ForegroundColor DarkGray
 
     $defaultInstanceRoot = [IO.Path]::GetFullPath($InstanceRoot.Trim().Trim('"')).TrimEnd('\', '/')
@@ -469,6 +523,7 @@ function New-VpsInteractivePlan {
         BootstrapPort = 22
         BootstrapAuth = 'Password'
         BootstrapKeyPath = $null
+        SshKeyMode = 'GenerateManaged'
         Role = 'RealityEntry'
         AdminUser = 'admin'
         ManualPorts = $false
@@ -490,12 +545,14 @@ function New-VpsInteractivePlan {
         AnyTlsServerName = $null
         EchPublicName = $null
         AnyTlsPaddingScheme = @()
+        XrayVersionChannel = 'FixedVerified'
+        XrayVersion = [string]$versions.xray.version
         CloudflareZoneName = $null
         CertbotEmail = $null
         CloudflareTokenFile = $null
         AllowlistInput = $null
         TrustedEntryIps = [ordered]@{ IPv4 = @(); IPv6 = @() }
-        ClientTransitTag = 'US-West Entry'
+        ClientTransitTag = $defaultTransitTag
         SecondaryIpv6Enabled = $false
         SecondaryIpv6Address = $null
         SecondaryBindInterface = $null
@@ -506,9 +563,8 @@ function New-VpsInteractivePlan {
         KomariEndpoint = [string]$versions.komari_agent.endpoint_default
     }
 
-    $getArchivePath = {
-        Join-Path (Join-Path ([string]$wizard.InstanceRoot) ([string]$wizard.Provider)) ([string]$wizard.Instance)
-    }
+    $getInstancePath = { Join-Path (Join-Path ([string]$wizard.InstanceRoot) ([string]$wizard.Provider)) ([string]$wizard.Instance) }
+    $getArchivePath = { Join-Path (& $getInstancePath) $script:VpsManagedDirectoryName }
     $ensureAutoPorts = {
         $basis = [string]$wizard.BootstrapPort
         if ($wizard.PortBasis -ne $basis -or -not $wizard.AutoSshPrimary) {
@@ -552,7 +608,7 @@ function New-VpsInteractivePlan {
         & $clearTrustedTlsState
         $wizard.AllowlistInput = $null
         $wizard.TrustedEntryIps = [ordered]@{ IPv4 = @(); IPv6 = @() }
-        $wizard.ClientTransitTag = 'US-West Entry'
+        $wizard.ClientTransitTag = $defaultTransitTag
         $wizard.SecondaryIpv6Enabled = $false
         $wizard.SecondaryIpv6Address = $null
         $wizard.SecondaryBindInterface = $null
@@ -591,9 +647,9 @@ function New-VpsInteractivePlan {
                 while ($true) {
                     $value = Read-VpsText '实例名称' -Default $old -AllowBack -Validate ${function:Test-VpsSafePathSegment} `
                         -ValidationMessage '名称不能包含路径分隔符或 Windows 非法字符。'
-                    $candidatePlan = Join-Path (Join-Path ([string]$wizard.InstanceRoot) ([string]$wizard.Provider)) `
-                        (Join-Path $value 'deployment-plan.json')
-                    if (-not (Test-Path -LiteralPath $candidatePlan)) { break }
+                    $candidateInstance = Join-Path (Join-Path ([string]$wizard.InstanceRoot) ([string]$wizard.Provider)) $value
+                    $candidatePlan = Get-VpsExistingPlanPath -InstanceDirectory $candidateInstance
+                    if (-not $candidatePlan) { break }
                     Write-VpsUi "该实例已有部署计划：$candidatePlan" Warning
                     Write-VpsUi '请换一个实例名称，或输入 b 返回主菜单后选择【继续未完成部署】。' Info
                     $old = $value
@@ -649,7 +705,10 @@ function New-VpsInteractivePlan {
                     '现有私钥登录（DMIT 等仅密钥模板）'
                 ) $default -AllowBack
                 $newAuth = if ($choice -eq 2) { 'ExistingKey' } else { 'Password' }
-                if ($wizard.BootstrapAuth -ne $newAuth) { $wizard.BootstrapKeyPath = $null }
+                if ($wizard.BootstrapAuth -ne $newAuth) {
+                    $wizard.BootstrapKeyPath = $null
+                    $wizard.SshKeyMode = if ($newAuth -eq 'ExistingKey') { 'ReuseExisting' } else { 'GenerateManaged' }
+                }
                 $wizard.BootstrapAuth = $newAuth
             }
         },
@@ -661,7 +720,17 @@ function New-VpsInteractivePlan {
                     Test-Path -LiteralPath $candidate -PathType Leaf
                 } -ValidationMessage '找不到该私钥文件，请输入文件本身而不是目录。'
                 $wizard.BootstrapKeyPath = (Resolve-Path -LiteralPath $inputPath.Trim().Trim('"')).Path
-                Write-VpsUi '该私钥只用于写入新的实例专用公钥；不会复制进源码仓库或上传 GitHub。' Info
+                Write-VpsUi '该私钥默认会复制到实例受管子目录并使用规范文件名；原文件与服务商面板记录不会改变。' Info
+            }
+        },
+        [pscustomobject]@{
+            Id = 'managed-key-mode'; ShouldRun = { $wizard.BootstrapAuth -eq 'ExistingKey' }; Run = {
+                $default = if ($wizard.SshKeyMode -eq 'GenerateManaged') { 2 } else { 1 }
+                $choice = Read-VpsMenu 'SSH 管理密钥策略' @(
+                    '复用现有 OpenSSH 私钥（推荐；不轮换服务器公钥）',
+                    '生成新的实例管理密钥并保留原密钥作为引导/救援'
+                ) $default -AllowBack
+                $wizard.SshKeyMode = if ($choice -eq 1) { 'ReuseExisting' } else { 'GenerateManaged' }
             }
         },
         [pscustomobject]@{
@@ -682,6 +751,18 @@ function New-VpsInteractivePlan {
                 if ($newRole -eq 'AnyTlsEntry' -and @($wizard.AnyTlsPaddingScheme).Count -eq 0) {
                     $wizard.AnyTlsPaddingScheme = @(New-MxhAnyTlsPaddingScheme)
                 }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'xray-version'; ShouldRun = { $wizard.Role -eq 'RealityEntry' }; Run = {
+                $default = if ($wizard.XrayVersionChannel -eq 'LatestStable') { 2 } else { 1 }
+                $choice = Read-VpsMenu 'Xray 版本通道' @(
+                    "当前固定验证版（$($versions.xray.version)，推荐）",
+                    'XTLS/Xray-core 官方最新稳定版（部署计划会记录解析到的具体版本）'
+                ) $default -AllowBack
+                $wizard.XrayVersionChannel = if ($choice -eq 2) { 'LatestStable' } else { 'FixedVerified' }
+                $wizard.XrayVersion = Resolve-VpsXrayVersion -ProjectRoot $ProjectRoot -Channel $wizard.XrayVersionChannel
+                Write-VpsUi "本次将使用 Xray $($wizard.XrayVersion)；安装脚本来源仍按 versions.json 固定并校验 SHA-256。" Info
             }
         },
         [pscustomobject]@{
@@ -821,7 +902,7 @@ function New-VpsInteractivePlan {
             }; Run = {
                 $defaultPath = if ($wizard.CloudflareTokenFile) {
                     [string]$wizard.CloudflareTokenFile
-                } else { Join-Path (& $getArchivePath) 'cloudflare-certbot-token.private.txt' }
+                } else { Join-Path (& $getInstancePath) 'cloudflare-certbot-token.private.txt' }
                 $value = Read-VpsText 'Cloudflare Certbot Token 本地私有文件' -Default $defaultPath -AllowBack `
                     -Validate { param($v) Test-Path -LiteralPath $v -PathType Leaf } `
                     -ValidationMessage '找不到 Token 文件；请先保存到实例私有归档。'
@@ -880,17 +961,16 @@ function New-VpsInteractivePlan {
         },
         [pscustomobject]@{
             Id = 'network-adaptive'; ShouldRun = { $wizard.Role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding') }; Run = {
-                Write-VpsUi '参考 RTT 不是必填项。默认基础保守方案只使用角色和实际内存，不猜测线路；仅在你明确知道带宽与典型 RTT 时启用 BDP 自适应缓冲区。' Info
+                Write-VpsUi '标称带宽是必填的套餐信息；参考 RTT 可不填。只有提供可信 RTT 时才启用 BDP 缓冲区计算。' Info
                 $default = if ($null -eq $wizard.NetworkAdaptive) { $false } else { [bool]$wizard.NetworkAdaptive }
-                $wizard.NetworkAdaptive = Read-VpsYesNo '是否使用已知带宽和 RTT 计算额外的保守缓冲区？' $default -AllowBack
+                $wizard.NetworkAdaptive = Read-VpsYesNo '是否提供代表性 RTT 并计算额外的保守缓冲区？' $default -AllowBack
                 if (-not $wizard.NetworkAdaptive) {
-                    $wizard.BandwidthMbps = $null
                     $wizard.ReferenceRttMs = $null
                 }
             }
         },
         [pscustomobject]@{
-            Id = 'network-bandwidth'; ShouldRun = { $wizard.Role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding') -and [bool]$wizard.NetworkAdaptive }; Run = {
+            Id = 'network-bandwidth'; ShouldRun = { $wizard.Role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding') }; Run = {
                 $wizard.BandwidthMbps = [int](Read-VpsText '套餐标称带宽（Mbps，例如 100 或 1000）' -Default ([string]$wizard.BandwidthMbps) -AllowBack -Validate {
                     param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 100000
                 } -ValidationMessage '请输入 1–100000 之间的整数 Mbps。')
@@ -932,10 +1012,14 @@ function New-VpsInteractivePlan {
                 ReferenceRttMs = [int]$wizard.ReferenceRttMs
             }
         } else {
-            [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
+            [ordered]@{
+                Mode = 'BaselineOnly'
+                BandwidthMbps = if ($wizard.Role -in @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding')) { [int]$wizard.BandwidthMbps } else { $null }
+                ReferenceRttMs = $null
+            }
         }
         [ordered]@{
-        SchemaVersion = 2
+        SchemaVersion = 3
         CreatedAt = (Get-Date).ToString('o')
         Provider = $wizard.Provider
         Instance = $wizard.Instance
@@ -964,6 +1048,12 @@ function New-VpsInteractivePlan {
             BootstrapAuth = $wizard.BootstrapAuth
             BootstrapKeyPath = $wizard.BootstrapKeyPath
         }
+        SshKey = [ordered]@{
+            Mode = if ($wizard.BootstrapAuth -eq 'ExistingKey') { [string]$wizard.SshKeyMode } else { 'GenerateManaged' }
+            SourcePrivateKeyPath = if ($wizard.BootstrapAuth -eq 'ExistingKey') { [string]$wizard.BootstrapKeyPath } else { $null }
+            ManagedFileName = if ($wizard.BootstrapAuth -eq 'ExistingKey' -and $wizard.SshKeyMode -eq 'ReuseExisting') { 'id_vps_management' } else { 'id_ed25519' }
+            PreserveSource = $true
+        }
         AdminUser = $wizard.AdminUser
         Ports = [ordered]@{
             SshPrimary = [int]$wizard.SshPrimary
@@ -982,7 +1072,8 @@ function New-VpsInteractivePlan {
             ForceIpv4Egress = [bool]$wizard.ForceIpv4
             TargetSamples = [int]$versions.target_audit.samples
             TargetMaxMedianMs = [int]$versions.target_audit.maximum_median_ms
-            XrayVersion = $versions.xray.version
+            XrayVersion = [string]$wizard.XrayVersion
+            XrayVersionChannel = [string]$wizard.XrayVersionChannel
         }
         AnyTls = [ordered]@{
             Enabled = ($wizard.Role -eq 'AnyTlsEntry')
@@ -1019,8 +1110,9 @@ function New-VpsInteractivePlan {
             AgentVersion = $versions.komari_agent.version
         }
         Paths = [ordered]@{
+            InstanceDirectory = (& $getInstancePath)
             Archive = $archivePath
-            KeyDirectory = (Join-Path $archivePath ([string]$wizard.NodeName + '-id_ed25519'))
+            KeyDirectory = (Join-Path $archivePath 'ssh')
         }
         }
     }
@@ -1057,8 +1149,8 @@ function New-VpsInteractivePlan {
         }
 
         $plan = & $buildPlan
-        $existingPlan = Join-Path ([string]$plan.Paths.Archive) 'deployment-plan.json'
-        if (Test-Path -LiteralPath $existingPlan) {
+        $existingPlan = Get-VpsExistingPlanPath -InstanceDirectory ([string]$plan.Paths.InstanceDirectory)
+        if ($existingPlan) {
             throw "该实例已有部署计划：${existingPlan}。请使用【继续未完成部署】，不要新建覆盖。"
         }
 
@@ -1097,6 +1189,7 @@ function Protect-VpsPrivateFile {
     param([Parameter(Mandatory)] [string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path)) { return }
+    $strict = [Environment]::GetEnvironmentVariable('MXH_VPS_STRICT_LOCAL_ACL') -eq '1'
     if ($IsWindows) {
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
         $commands = @(
@@ -1106,13 +1199,20 @@ function Protect-VpsPrivateFile {
         foreach ($arguments in $commands) {
             $result = Invoke-VpsProcess -FilePath 'icacls.exe' -ArgumentList $arguments -TimeoutSeconds 30
             if ($result.ExitCode -ne 0) {
-                throw "无法收紧私有文件 ACL：$Path"
+                $message = "无法收紧私有文件 ACL：$Path。文件仍已保存，请确认该目录只由当前 Windows 账户使用。"
+                if ($strict) { throw $message }
+                Write-VpsUi $message Warning
+                return
             }
         }
     }
     else {
         & chmod 600 -- $Path
-        if ($LASTEXITCODE -ne 0) { throw "无法设置私有文件权限：$Path" }
+        if ($LASTEXITCODE -ne 0) {
+            $message = "无法设置私有文件权限：$Path"
+            if ($strict) { throw $message }
+            Write-VpsUi $message Warning
+        }
     }
 }
 
@@ -1328,7 +1428,12 @@ function Get-VpsCommandPath {
 
 function Get-VpsSshKeyPath {
     param([Parameter(Mandatory)] $Context)
-    return Join-Path ([string]$Context.Plan.Paths.KeyDirectory) 'id_ed25519'
+    $fileName = 'id_ed25519'
+    if ($Context.Plan.Contains('SshKey') -and $Context.Plan.SshKey.Contains('ManagedFileName') -and
+        -not [string]::IsNullOrWhiteSpace([string]$Context.Plan.SshKey.ManagedFileName)) {
+        $fileName = [string]$Context.Plan.SshKey.ManagedFileName
+    }
+    return Join-Path ([string]$Context.Plan.Paths.KeyDirectory) $fileName
 }
 
 function Get-VpsSshArguments {
@@ -1383,11 +1488,51 @@ function Initialize-VpsSshKey {
 
     $keyPath = Get-VpsSshKeyPath $Context
     $publicPath = $keyPath + '.pub'
+    $sshKeygen = Get-VpsCommandPath 'ssh-keygen.exe'
     if ((Test-Path -LiteralPath $keyPath) -and (Test-Path -LiteralPath $publicPath)) {
         Protect-VpsPrivateFile -Path $keyPath
+        $derivedExisting = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $keyPath) -TimeoutSeconds 60
+        $derivedMatch = [regex]::Match($derivedExisting.StdOut.Trim(), '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+([A-Za-z0-9+/=]+)(?:\s+.*)?$')
+        $storedMatch = [regex]::Match((Get-Content -Raw -LiteralPath $publicPath).Trim(), '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+([A-Za-z0-9+/=]+)(?:\s+.*)?$')
+        if ($derivedExisting.ExitCode -ne 0 -or -not $derivedMatch.Success -or -not $storedMatch.Success -or
+            $derivedMatch.Groups[1].Value -ne $storedMatch.Groups[1].Value -or $derivedMatch.Groups[2].Value -ne $storedMatch.Groups[2].Value) {
+            throw '本地管理私钥与 .pub 不匹配或无法读取；为避免覆盖服务器入口，脚本已停止。'
+        }
         return
     }
-    $sshKeygen = Get-VpsCommandPath 'ssh-keygen.exe'
+    $keyMode = if ($Context.Plan.Contains('SshKey') -and $Context.Plan.SshKey.Contains('Mode')) {
+        [string]$Context.Plan.SshKey.Mode
+    }
+    else { 'GenerateManaged' }
+    if ($keyMode -eq 'ReuseExisting') {
+        $source = if ($Context.Plan.SshKey.Contains('SourcePrivateKeyPath')) {
+            [string]$Context.Plan.SshKey.SourcePrivateKeyPath
+        }
+        else { [string]$Context.Plan.Server.BootstrapKeyPath }
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "要复用的现有 OpenSSH 私钥不存在：$source"
+        }
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $keyPath)) | Out-Null
+        $sourceResolved = (Resolve-Path -LiteralPath $source).Path
+        $destinationFull = [IO.Path]::GetFullPath($keyPath)
+        if (-not $sourceResolved.Equals($destinationFull, [StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $sourceResolved -Destination $keyPath -Force
+        }
+        # OpenSSH refuses a copied private key before it is normalized to a
+        # current-user ACL, so protection must happen before ssh-keygen -y.
+        Protect-VpsPrivateFile -Path $keyPath
+        $derived = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $keyPath) -TimeoutSeconds 60
+        $publicMatch = [regex]::Match($derived.StdOut.Trim(), '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+([A-Za-z0-9+/=]+)(?:\s+.*)?$')
+        if ($derived.ExitCode -ne 0 -or -not $publicMatch.Success) {
+            throw '现有私钥无法作为无交互 OpenSSH 管理密钥使用；请确认格式和口令状态，或选择生成新 Ed25519 密钥。'
+        }
+        $publicMaterial = $publicMatch.Groups[1].Value + ' ' + $publicMatch.Groups[2].Value
+        [IO.File]::WriteAllText($publicPath, ($publicMaterial + ' ' + [string]$Context.Plan.NodeName + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+        Protect-VpsPrivateFile -Path $keyPath
+        Write-VpsUi '已复用现有 OpenSSH 私钥并建立规范文件名；原始私钥未改名、未删除，服务器公钥未轮换。' Success
+        return
+    }
+    if ($keyMode -ne 'GenerateManaged') { throw "不支持的 SSH 密钥模式：$keyMode" }
     $arguments = @('-t', 'ed25519', '-a', '64', '-N', '', '-C', $Context.Plan.NodeName, '-f', $keyPath)
     $result = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList $arguments -TimeoutSeconds 60
     if ($result.ExitCode -ne 0) { throw "生成 SSH 密钥失败：$($result.StdErr.Trim())" }
@@ -2203,6 +2348,10 @@ function Show-VpsPlanSummary {
     Write-Host "  地址：$($Plan.Server.IPv4)"
     $bootstrapAuthLabel = if ($Plan.Server.Contains('BootstrapAuth') -and $Plan.Server.BootstrapAuth -eq 'ExistingKey') { '现有服务商私钥' } else { '密码' }
     Write-Host "  初始认证：$bootstrapAuthLabel"
+    if ($Plan.Contains('SshKey')) {
+        $keyLabel = if ([string]$Plan.SshKey.Mode -eq 'ReuseExisting') { '复用现有密钥（不轮换公钥）' } else { '生成实例管理密钥' }
+        Write-Host "  管理密钥：$keyLabel"
+    }
     Write-Host "  SSH：$($Plan.Server.BootstrapSshPort) -> $($Plan.Ports.SshPrimary) + $($Plan.Ports.SshRescue)"
     $realityInstalled = Test-MxhProtocolInstalled -Plan $Plan -Role 'RealityEntry'
     $anyTlsInstalled = Test-MxhProtocolInstalled -Plan $Plan -Role 'AnyTlsEntry'
@@ -2211,6 +2360,10 @@ function Show-VpsPlanSummary {
         $target = Get-MxhRealityTargetSettings -Plan $Plan
         $portsText = if ($Plan.Ports.XrayBackup) { "443 + $($Plan.Ports.XrayBackup)" } else { '443（无救援入口）' }
         Write-Host "  Xray：$portsText，target=$($target.TargetAddress)，SNI=$($target.ServerName)"
+        if ($Plan.Reality.Contains('XrayVersion')) {
+            $channel = if ($Plan.Reality.Contains('XrayVersionChannel')) { [string]$Plan.Reality.XrayVersionChannel } else { 'ImportedOrLegacy' }
+            Write-Host "  Xray 版本：$($Plan.Reality.XrayVersion)（$channel）"
+        }
     }
     if ($anyTlsInstalled) {
         Write-Host "  AnyTLS：443，SNI=$($Plan.AnyTls.ServerName)，ECH public name=$($Plan.AnyTls.EchPublicName)"
@@ -2228,7 +2381,8 @@ function Show-VpsPlanSummary {
         Write-Host "  网络调优：保守自适应，$($Plan.NetworkTuning.BandwidthMbps) Mbps / $($Plan.NetworkTuning.ReferenceRttMs) ms"
     }
     else {
-        Write-Host '  网络调优：基础保守项（不调整缓冲区）'
+        $bandwidthText = if ($Plan.Contains('NetworkTuning') -and $null -ne $Plan.NetworkTuning.BandwidthMbps) { "，套餐 $($Plan.NetworkTuning.BandwidthMbps) Mbps" } else { '' }
+        Write-Host "  网络调优：基础保守项（不调整缓冲区）$bandwidthText"
     }
     Write-Host "  Komari：$($Plan.Komari.Enabled)"
     Write-Host "  私有归档：$($Plan.Paths.Archive)"
@@ -2327,7 +2481,7 @@ function Invoke-VpsDeploymentSession {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$ProjectRoot,
-        [Parameter(Mandatory)] [ValidateSet('New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork')] [string]$Mode,
+        [Parameter(Mandatory)] [ValidateSet('New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ClientConfig')] [string]$Mode,
         [string]$PlanPath,
         [string[]]$OnlyModule,
         [Parameter(Mandatory)] [string]$InstanceRoot,
@@ -2338,6 +2492,10 @@ function Invoke-VpsDeploymentSession {
     if ($Mode -eq 'Import') {
         $plan = New-MxhExistingImportPlanInteractive -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot
         Invoke-MxhExistingVpsImport -ProjectRoot $ProjectRoot -Plan $plan -DryRun:$DryRun -NonInteractive:$NonInteractive
+        return
+    }
+    if ($Mode -eq 'ClientConfig') {
+        Invoke-MxhClientAuthorityDesigner -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot -DryRun:$DryRun
         return
     }
     if ($Mode -eq 'New') {
@@ -2379,7 +2537,7 @@ function Start-VpsDeploy {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string]$ProjectRoot,
-        [ValidateSet('Interactive', 'New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ValidateProject')] [string]$Mode = 'Interactive',
+        [ValidateSet('Interactive', 'New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ClientConfig', 'ValidateProject')] [string]$Mode = 'Interactive',
         [string]$PlanPath,
         [string[]]$OnlyModule,
         [string]$InstanceRoot = 'F:\VPS\VPS-Instances',
@@ -2402,6 +2560,7 @@ function Start-VpsDeploy {
                     '现有 VPS 协议管理（安装/切换/停用/卸载/备份）',
                     '现有 VPS 运维中心（恢复/审计/轮换/SSH/防火墙/升级/客户端/Komari/退役）',
                     '现有 VPS 独立网络调优（RTT 可选）',
+                    'Clash/sing-box 客户端权威配置候选设计器',
                     '项目离线自检'
                 ) 1 `
                     -AllowBack -BackLabel '退出'
@@ -2410,7 +2569,7 @@ function Start-VpsDeploy {
                 if (Test-VpsWizardBackError $_) { return }
                 throw
             }
-            $selectedMode = @('New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ValidateProject')[$choice - 1]
+            $selectedMode = @('New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ClientConfig', 'ValidateProject')[$choice - 1]
             if ($selectedMode -eq 'ValidateProject') {
                 Test-VpsProject -ProjectRoot $ProjectRoot
                 Write-VpsUi '项目离线自检完成，已返回主菜单。' Success
@@ -2444,6 +2603,7 @@ function Start-VpsDeploy {
 . (Join-Path $PSScriptRoot 'VpsDeploy.Migration.ps1')
 . (Join-Path $PSScriptRoot 'VpsDeploy.Import.ps1')
 . (Join-Path $PSScriptRoot 'VpsDeploy.Operations.ps1')
+. (Join-Path $PSScriptRoot 'VpsDeploy.ClientConfig.ps1')
 
 Export-ModuleMember -Function @(
     'Start-VpsDeploy', 'Write-VpsUi', 'Write-VpsLog', 'Read-VpsYesNo', 'Read-VpsText',

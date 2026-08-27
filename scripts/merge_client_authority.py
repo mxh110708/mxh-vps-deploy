@@ -107,7 +107,7 @@ def main():
         current = list(selectors[0].get("outbounds") or [])
         selectors[0]["outbounds"] = current + [tag for tag in outbound_tags if tag not in current]
     sing_out = args.output / "sing-box-general.candidate.json"
-    sing_out.write_text(json.dumps(sing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    sing_out.write_text(json.dumps(sing, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
 
     manifest = {
         "roles": sorted(roles), "entry_group": args.entry_group,

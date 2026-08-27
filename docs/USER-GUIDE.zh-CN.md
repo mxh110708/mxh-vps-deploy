@@ -29,7 +29,7 @@
 
 工具在 Windows 上运行中文向导，通过 SSH 配置一台以 `apt` 和 systemd 为基础的 Debian/Ubuntu VPS。主要能力包括：
 
-- 从服务商初始 root 密码或现有私钥建立实例专用 SSH 公钥；
+- 从服务商初始 root 密码生成管理密钥，或复用服务商现有 OpenSSH 私钥；
 - 创建日常使用的 `admin` 用户并验证 sudo；
 - 把 SSH 迁移到主、救援两个随机高位端口，关闭 SSH 密码登录；
 - 部署以下角色之一：
@@ -37,7 +37,7 @@
   - sing-box AnyTLS + 公共可信 TLS + ECH 入口；
   - sing-box Shadowsocks 2022 纯落地节点；
   - 仅 SSH、防火墙、网络基础项和可选 Komari；
-  - 建立实例专用公钥后只做系统审计；
+  - 建立或复用管理公钥后只做系统审计；
 - 应用面向干净 VPS 的最小 nftables；
 - 按内存、角色、标称带宽和参考 RTT 做保守网络调优；
 - 可选安装低权限 Komari Agent；
@@ -69,7 +69,7 @@
 | 给已部署 VPS 增加备用协议、切换、停用或卸载 | 现有 VPS 协议管理 | Reality/AnyTLS 可同时安装但只启用一个；Shadowsocks 可独立并行；不重做 SSH/账号基础层 |
 | 只想调整一台已纳管 VPS 的网络参数 | 现有 VPS 独立网络调优 | 默认基础保守模式不需要 RTT；不会顺带重装协议或改防火墙 |
 | 只要 SSH 加固、防火墙和 Komari | 仅 SSH/防火墙/Komari 监控 | 仍会修改 SSH、nftables 和基础网络参数，不是只安装探针 |
-| 先查看系统情况，不部署服务 | 建立实例专用 SSH 公钥后执行审计 | 会向 root `authorized_keys` 添加实例公钥并写本地审计归档，除此之外不配置系统 |
+| 先查看系统情况，不部署服务 | 建立/复用管理 SSH 公钥后执行审计 | 初始密码时添加新公钥；现有私钥默认不改服务器公钥；除此之外只写本地审计归档 |
 
 ### 2.1 Reality 外部 target
 
@@ -152,11 +152,12 @@ Reality 与 AnyTLS 可同时安装但不能同时启用；Shadowsocks 使用独�
 导入流程会：
 
 1. 用现有 root 密码或私钥连接；
-2. 生成并写入新的实例专用 Ed25519 公钥；
-3. 如果 SSH 仍允许密码，写入可回退的最小 key-only 配置并复验；
-4. 只读检查系统、SSH、现有防火墙和三个协议服务；
-5. 从标准配置提取当前协议参数与凭据，直接写入本地私有归档，不在控制台打印；
-6. 生成 `deployment-plan.json`、状态、私有凭据和可用的客户端片段。
+2. 如果已经使用 OpenSSH 私钥，默认复制到 `MXH-VPS-Deploy\ssh\id_vps_management` 并继续使用同一把密钥；原文件和服务器公钥不变；
+3. 只有初始密码登录或人工选择“生成新管理密钥”时，才创建 Ed25519 密钥并把新公钥加入服务器；
+4. 默认保持服务器现有 SSH 认证策略；如明确选择 key-only，才写入可回退的最小加固配置并复验；
+5. 只读检查系统、SSH、现有防火墙和三个协议服务；
+6. 从标准配置提取当前协议参数与凭据，直接写入本地私有归档，不在控制台打印；
+7. 在实例目录下新建 `MXH-VPS-Deploy` 子目录，保存计划、状态、私有凭据和客户端片段。
 
 导入不会重装现有协议、改变代理端口或覆盖防火墙。计划标记为 `PreserveExisting`：以后 Reality/AnyTLS 在已有 TCP 443 上切换时保留原防火墙；新增 Shadowsocks 高位端口则拒绝自动操作，必须先单独审计并人工配置现有防火墙。
 
@@ -196,6 +197,8 @@ Reality 与 AnyTLS 可同时安装但不能同时启用；Shadowsocks 使用独�
 F:\VPS\VPS-Instances\服务商\实例名
 ```
 
+脚本新建的所有运行产物集中在其下的 `MXH-VPS-Deploy` 子目录；服务商原始密钥、账单和用户已有说明文件不会被搬动。
+
 该目录最终可能包含：
 
 - SSH 私钥；
@@ -206,7 +209,7 @@ F:\VPS\VPS-Instances\服务商\实例名
 - Komari 配置；
 - Cloudflare Token 文件路径以及完整客户端节点片段。
 
-工具会移除私有文件的继承 ACL，只授权当前 Windows 用户和 SYSTEM。其他 Windows 用户、沙箱或程序读取时出现 `Access is denied` 通常是预期行为。
+工具会尝试移除私有文件的继承 ACL，只授权当前 Windows 用户和 SYSTEM。默认模式下 ACL 收紧失败会警告但不中止，适合个人电脑和非标准磁盘权限；需要严格模式时，在启动前设置 `$env:MXH_VPS_STRICT_LOCAL_ACL='1'`。
 
 工具生成的 Ed25519 私钥没有口令，便于自动验证；安全性依赖严格 ACL。复制到移动硬盘、NAS 或云盘时，应额外使用 BitLocker、加密容器或加密备份。
 
@@ -428,7 +431,7 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Import
 
 ```powershell
 pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Maintain `
-  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\MXH-VPS-Deploy\deployment-plan.json'
 ```
 
 输入规则：
@@ -618,7 +621,7 @@ US-West Entry
 
 ### 9.7 网络调优
 
-参考 RTT **不是必填项**。默认选择基础保守模式即可，不需要测速，也不会调整 TCP 缓冲区上限。
+套餐标称带宽是必填项，填写服务商套餐页给出的 Mbps；参考 RTT **不是必填项**。没有可靠 RTT 时选择基础保守模式，不需要测速，也不会调整 TCP 缓冲区上限。
 
 只有已经掌握稳定参考值时才选择 BDP 自适应：入口角色的 RTT 是主要使用地到入口 VPS 的典型 RTT；落地角色是常用入口到落地 VPS 的典型 RTT。
 
@@ -626,7 +629,7 @@ US-West Entry
 
 标称带宽填写套餐值，不填写 `ip link` 显示的虚拟 10G/25G，也不根据一次测速峰值填写。
 
-如果带宽或 RTT 任一不确定，直接接受默认“否”。脚本仍会应用 fq、可用时的 BBR、TCP Fast Open、MTU 探测和角色队列下限等基础保守项。
+不要用网卡协商速率或一次测速峰值代替套餐带宽。RTT 不确定时直接接受默认“否”；脚本仍按角色、实际内存和标称带宽分档应用 fq、可用时的 BBR、TCP Fast Open、MTU 探测和保守队列下限。
 
 自适应模式使用 2×BDP，并按实际内存把 TCP 缓冲目标限制在 4/8/16/32 MiB。它不会降低服务器已有的更高值，也不保证改善服务商线路本身。
 
@@ -672,7 +675,7 @@ US-West Entry
 
 ```powershell
 pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Migrate `
-  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\MXH-VPS-Deploy\deployment-plan.json'
 ```
 
 `-Mode Migrate` 是为兼容旧命令保留的名称，实际打开“协议生命周期管理器”。实例必须同时满足：
@@ -764,12 +767,12 @@ sudo systemctl start mxh-protocol-migration-rollback.service
 
 ```powershell
 pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode TuneNetwork `
-  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\MXH-VPS-Deploy\deployment-plan.json'
 ```
 
 该流程会读取已纳管实例的实际内存和协议清单。如果入口与 Shadowsocks 同时安装，可选择按哪个主要角色计算队列下限。随后二选一：
 
-- 基础保守：默认，不需要带宽或 RTT，不调整 TCP 缓冲区上限；
+- 基础保守：默认，记录套餐标称带宽但不要求 RTT，不调整 TCP 缓冲区上限；
 - 已知带宽/RTT 自适应：只有明确掌握两个值时使用 2×BDP，并受内存分级上限约束。
 
 独立调优只运行前置审计、回滚快照、`network-tuning`、服务验收和私有归档，不运行协议安装，也不调用 nftables 应用模块。协议安装/切换本身保持已有网络参数；需要调优时由此入口单独执行。
@@ -811,13 +814,13 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode TuneNetwork `
 
 #### 10.3.6 可控版本升级
 
-升级只使用 `config/versions.json` 里固定的版本、资产名/安装器 URL 和 SHA-256。流程先备份，再下载校验、替换、配置检查、恢复升级前 enabled/active 组合并做健康审计。版本相同也可用于验证可重复安装；它不会自动追随 latest。
+sing-box、Komari 等组件只使用 `config/versions.json` 里固定的版本、资产名和 SHA-256。Xray 可选择计划当前版本、当前固定验证版，或从 XTLS/Xray-core 官方 `releases/latest` 解析的最新稳定版；解析结果会固化为精确版本，不会把模糊 `latest` 写进计划。所有分支都先备份，再安装、配置检查、恢复升级前 enabled/active 组合并做健康审计。
 
 #### 10.3.7 客户端权威配置候选
 
-填写两份权威文件路径，选择要包含的已安装协议和地区入口组。工具用客户端私有片段生成：
+这是为当前实例快速补充节点的兼容入口。填写两份权威文件路径，选择当前实例的已安装协议和地区入口组后生成候选。需要跨多台实例规划地区、落地和业务组时，应从主菜单进入独立设计器。
 
-第一次使用前安装保留注释/顺序的 YAML 依赖：`python -m pip install -r .\requirements-client-merge.txt`。工具不会在维护过程中静默安装 Python 包。
+第一次使用前安装保留注释/顺序的 YAML 依赖：`python -m pip install -r .\requirements-client-merge.txt`。
 
 ```text
 client-candidates\<时间>\Clash_General.candidate.yaml
@@ -826,6 +829,39 @@ client-candidates\<时间>\candidate-manifest.json
 ```
 
 Clash 候选运行 Mihomo 稳定/Alpha 双核心，sing-box 候选严格解析 JSON。源文件和 AppData 不修改。Shadowsocks 落地的 `dialer-proxy`/`detour` 必须在替换前确认入口组存在。
+
+### 10.4 独立 Clash/sing-box 权威配置候选设计器
+
+从主菜单选择“Clash/sing-box 客户端权威配置候选设计器”，或运行：
+
+```powershell
+pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode ClientConfig
+```
+
+它不连接 VPS，按以下顺序工作：
+
+1. 读取 `config/client-layout.local.json`；不存在时使用受版本控制的 `config/client-layout.default.json`；
+2. 选择默认地区入口组，也可新增、重命名或重排地区；
+3. 扫描 `-InstanceRoot` 下新旧两种布局的 `deployment-plan.json`，按实例、协议选择需要提取的私有客户端片段；
+4. 权威文件里已经存在但没有受管计划的节点可直接按名称复用，无需重新输入凭据；
+5. 对尚未存在于权威文件的未纳管 VPS，可手动添加 VLESS Reality、AnyTLS/ECH 或 Shadowsocks 节点；UUID、PublicKey、short-id、密码和 ECH 配置均为隐藏输入；
+6. 对每个地区入口组选择实际成员和排序，第一项是首次默认；
+7. 选择各个落地节点共用的地区入口，自动同步 Clash `dialer-proxy` 与 sing-box `detour`；
+8. 调整 `Default Exit` 以及每个业务组的完整顺序，第一项同样是首次默认；
+9. 可把本次地区列表和业务组默认项保存为被 Git 忽略的本机模板；
+10. 生成完整候选，拒绝未知 selector 引用、循环引用和无效 detour；运行可用的 Mihomo 双核心并严格解析 sing-box JSON；运行配置使用紧凑 JSON 并硬性拒绝达到 4 MiB 的候选。
+
+候选输出默认位于：
+
+```text
+F:\VPS\Client-Authority-Candidates\<时间>\
+├─ Clash_General.candidate.yaml
+├─ sing-box-general.candidate.json
+├─ client-layout-spec.private.json
+└─ candidate-manifest.json
+```
+
+`client-layout-spec.private.json` 可能含完整节点凭据，只能留在本地私有目录。设计器不会直接写入两份权威文件，也不会修改 Clash Verge AppData。
 
 #### 10.3.8 Komari 完整生命周期
 
@@ -841,16 +877,25 @@ Clash 候选运行 Mihomo 稳定/Alpha 双核心，sing-box 候选严格解析 J
 
 ## 11. 部署过程中会发生什么
 
-### 11.1 建立实例专用公钥
+### 11.1 建立或复用管理公钥
 
-脚本生成：
+初始使用服务商 OpenSSH 私钥时，默认不轮换服务器公钥。脚本把同一把私钥复制到规范路径，并从私钥重新推导 `.pub`：
 
 ```text
-实例目录\节点名-id_ed25519\节点名-id_ed25519
-实例目录\节点名-id_ed25519\节点名-id_ed25519.pub
+实例目录\MXH-VPS-Deploy\ssh\id_vps_management
+实例目录\MXH-VPS-Deploy\ssh\id_vps_management.pub
 ```
 
-公钥注释是节点名称。脚本通过服务商密码或现有私钥把该公钥写入 root `authorized_keys`，随后改用新密钥继续。
+原始私钥不改名、不删除，服务商面板提供的密钥与服务器实际授权关系保持一致。支持 Ed25519、RSA 和常用 ECDSA OpenSSH 私钥；带口令私钥不适合后续无交互维护，应选择生成新管理密钥或自行配置 `ssh-agent`。
+
+初始只有密码，或人工选择生成新密钥时，脚本创建：
+
+```text
+实例目录\MXH-VPS-Deploy\ssh\id_ed25519
+实例目录\MXH-VPS-Deploy\ssh\id_ed25519.pub
+```
+
+新公钥先加入 root，完成登录复验后才用于后续模块；原有公钥不会因引导过程被删除。
 
 ### 11.2 初始审计
 
@@ -878,7 +923,7 @@ Clash 候选运行 Mihomo 稳定/Alpha 双核心，sing-box 候选严格解析 J
 
 ### 11.5 角色服务
 
-- Reality 外部 target：审计 target，安装固定 Xray，生成凭据，部署主/救援入口；
+- Reality 外部 target：审计 target，安装所选的固定验证版或官方最新稳定版 Xray，生成凭据，部署主/救援入口；
 - Reality 本机 target：签发证书，部署回环 nginx，再部署 Xray；
 - AnyTLS：签发证书、生成 ECH 和 padding，部署低权限 sing-box；
 - Shadowsocks：生成 SS2022 服务端/用户密钥，部署 TCP+UDP 落地并自测；
@@ -910,20 +955,24 @@ Komari 启用时安装低权限 Agent。随后生成角色对应的客户端私�
 
 ```text
 F:\VPS\VPS-Instances\ExampleProvider\ExampleInstance\
-├─ deployment-plan.json
-├─ deployment-state.json
-├─ deployment-secrets.private.json
-├─ deployment.log
-├─ initial-audit.json
-├─ target-audit.json                  # 仅外部 Reality target
-├─ NODE-final-archive.txt             # AuditOnly 不生成
-├─ SHA256SUMS-private.txt
-├─ NODE-id_ed25519\
-│  ├─ NODE-id_ed25519
-│  └─ NODE-id_ed25519.pub
-├─ client-exports\
-└─ server-configs\
+├─ 服务商原始资料、账单或 Token 文件       # 用户已有文件，工具不整理或覆盖
+└─ MXH-VPS-Deploy\
+   ├─ deployment-plan.json
+   ├─ deployment-state.json
+   ├─ deployment-secrets.private.json
+   ├─ deployment.log
+   ├─ initial-audit.json
+   ├─ target-audit.json                # 仅外部 Reality target
+   ├─ NODE-final-archive.txt           # AuditOnly 不生成
+   ├─ SHA256SUMS-private.txt
+   ├─ ssh\
+   │  ├─ id_vps_management 或 id_ed25519
+   │  └─ 对应 .pub
+   ├─ client-exports\
+   └─ server-configs\
 ```
+
+旧版本直接把 `deployment-plan.json` 放在实例根目录的布局仍可读取和维护；脚本不会强制搬迁旧归档。新部署和新纳管统一使用上面的子目录，避免和服务商原始文件混在一起。
 
 主要文件作用：
 
@@ -997,7 +1046,7 @@ Clash/MXH Route/sing-box 可以同时安装，但不要让两个程序同时控�
 $vpsIp = '192.0.2.10'
 $sshPrimary = 30001
 $sshRescue = 30002
-$keyPath = 'F:\VPS\VPS-Instances\ExampleProvider\ExampleInstance\NODE-id_ed25519\NODE-id_ed25519'
+$keyPath = 'F:\VPS\VPS-Instances\ExampleProvider\ExampleInstance\MXH-VPS-Deploy\ssh\id_ed25519'
 
 ssh -i $keyPath -p $sshPrimary "admin@$vpsIp"
 ssh -i $keyPath -p $sshRescue "admin@$vpsIp"
@@ -1083,14 +1132,14 @@ sudo nft list ruleset
 再次双击 `Start-VPSDeploy.cmd`，选择“继续未完成部署”，粘贴：
 
 ```text
-F:\VPS\VPS-Instances\服务商\实例名\deployment-plan.json
+F:\VPS\VPS-Instances\服务商\实例名\MXH-VPS-Deploy\deployment-plan.json
 ```
 
 或运行：
 
 ```powershell
 pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Resume `
-  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例名\deployment-plan.json'
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例名\MXH-VPS-Deploy\deployment-plan.json'
 ```
 
 Resume 会跳过状态为 `Success` 的模块，从失败或未完成模块继续。凭据、端口、ECH 和 padding 不会无故轮换。
@@ -1177,7 +1226,7 @@ Resume 会跳过状态为 `Success` 的模块，从失败或未完成模块继�
 
 ```powershell
 pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Resume `
-  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json' `
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\MXH-VPS-Deploy\deployment-plan.json' `
   -OnlyModule 'final-validation'
 ```
 
@@ -1200,7 +1249,7 @@ DryRun 仍会询问计划字段，并检查填写的 Token 文件是否存在，
 
 ```powershell
 pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Migrate -DryRun `
-  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\deployment-plan.json'
+  -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\MXH-VPS-Deploy\deployment-plan.json'
 ```
 
 协议管理 DryRun 会使用本地计划/状态推导协议清单，验证目标字段并显示专用模块列表，但不会连接 VPS、创建变更备份或覆盖当前计划。备份清理的 DryRun 只计算本地候选数量，不删除本地或远端目录。
@@ -1217,7 +1266,12 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Migrate -DryRun `
 
 ## 17. 更新脚本
 
-脚本固定 Xray、sing-box、Komari 版本和下载 SHA-256，不会因为上游发布新版本自动升级服务器。
+sing-box、Komari 继续使用 `versions.json` 固定资产和 SHA-256，不会因为上游发布新版本自动升级服务器。Xray 新部署和受控升级可在两种通道中选择：
+
+- `FixedVerified`：项目当前固定验证版，默认且更稳妥；
+- `LatestStable`：实时读取 XTLS/Xray-core 官方 `releases/latest`，拒绝草稿和预发行标签，并把解析出的精确版本写入计划。
+
+两种 Xray 通道都使用项目锁定并校验 SHA-256 的官方安装脚本提交；“最新稳定版”不是每次运行都漂移的模糊值。离线或 GitHub 不可达时应返回选择固定验证版。
 
 只检查上游版本：
 
@@ -1268,12 +1322,16 @@ Token 未泄漏且仍用于其他证书时无需轮换；不再使用时应在 C
 - Reality、AnyTLS、Shadowsocks 的六个安装方向，以及安装为备用、启停切换、活动协议拒绝卸载、并行入口+落地防火墙和备份清理边界的离线测试；
 - `clear`/`cls`、跨层返回、摘要取消和协议管理向导的真实交互 DryRun；
 - 旧 DMIT 实机完成健康基线、凭据轮换后的哈希漂移识别、成对完整恢复、Reality 真实握手、Xray/Komari 固定版本重装、root/admin 双端口 SSH 密钥轮换、权威候选双核心验证、Controller 备份/恢复和可恢复退役；
+- 现有 OpenSSH 私钥复用的本地实测：私钥内容与 SHA-256 不变，原文件不改名，规范副本可推导相同公钥；
+- 独立客户端设计器的受管片段、手动落地、地区/业务组顺序、selector default、dialer-proxy/detour 同步、未知引用和循环拒绝测试；
+- Xray 固定验证版和可注入官方 latest 精确版本解析分支；
 - 项目离线断言、秘密扫描、固定核心解析和 ShellCheck。
 
 尚未覆盖所有系统和故障排列组合，包括：
 
 - root 初始密码方式的完整长期生产部署；
 - Ubuntu/ARM64 的同等级现场覆盖；
+- 真实生产 VPS 上首次使用官方最新稳定版 Xray 的完整握手回归（代码与安装路径已覆盖，仍需在非关键实例先验收）；
 - MonitorOnly/AuditOnly 的所有服务商组合；
 - 等待证书自然到期后的真实定时续期；
 - 所有故意破坏后的自动回滚分支。

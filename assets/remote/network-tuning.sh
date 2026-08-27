@@ -24,6 +24,10 @@ for value in "$VPS_PARAM_MEMORY_KIB" "$VPS_PARAM_BUFFER_TARGET_BYTES" \
   "$VPS_PARAM_BUFFER_CAP_BYTES" "$VPS_PARAM_QUEUE_FLOOR"; do
   is_uint "$value" || { echo 'Invalid numeric network tuning input.' >&2; exit 1; }
 done
+if [[ -n "${VPS_PARAM_BANDWIDTH_MBPS:-}" ]]; then
+  is_uint "$VPS_PARAM_BANDWIDTH_MBPS" || exit 1
+  (( VPS_PARAM_BANDWIDTH_MBPS >= 1 && VPS_PARAM_BANDWIDTH_MBPS <= 100000 )) || exit 1
+fi
 if [[ "$VPS_PARAM_MODE" == 'AdaptiveConservative' ]]; then
   is_uint "${VPS_PARAM_BANDWIDTH_MBPS:-}" || exit 1
   is_uint "${VPS_PARAM_REFERENCE_RTT_MS:-}" || exit 1
@@ -91,8 +95,11 @@ fi
 {
   echo '# Managed by MXH VPS Deploy. Conservative adaptive tuning.'
   echo "# profile=${VPS_PARAM_PROFILE} role=${VPS_PARAM_ROLE} memory_kib=${VPS_PARAM_MEMORY_KIB}"
+  if [[ -n "${VPS_PARAM_BANDWIDTH_MBPS:-}" ]]; then
+    echo "# nominal_bandwidth_mbps=${VPS_PARAM_BANDWIDTH_MBPS} (provider plan value; not an interface speed guess)"
+  fi
   if [[ "$VPS_PARAM_MODE" == 'AdaptiveConservative' ]]; then
-    echo "# nominal_bandwidth_mbps=${VPS_PARAM_BANDWIDTH_MBPS} reference_rtt_ms=${VPS_PARAM_REFERENCE_RTT_MS} buffer_cap_bytes=${VPS_PARAM_BUFFER_CAP_BYTES}"
+    echo "# reference_rtt_ms=${VPS_PARAM_REFERENCE_RTT_MS} buffer_cap_bytes=${VPS_PARAM_BUFFER_CAP_BYTES}"
   else
     echo '# buffer tuning disabled: baseline-only mode'
   fi

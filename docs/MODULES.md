@@ -26,11 +26,15 @@
 
 新部署仍用单一 `Role` 选择初始模块。实例进入协议生命周期管理后，`Role` 只表示当前主角色（规划阶段可暂时表示本次执行目标），实际共存状态以 `ProtocolInventory` 为准；提交模块会把 `Role` 收口为启用的入口角色，若没有入口则使用已启用 Shadowsocks，全部停用时为 `MonitorOnly`。
 
+Schema 3 新计划把运行数据放在 `<InstanceDirectory>/MXH-VPS-Deploy`，`Paths.InstanceDirectory` 指向用户实例目录，`Paths.Archive` 指向受管子目录，`Paths.KeyDirectory` 指向其下 `ssh`。旧 schema 的根目录布局仍按计划原值读取，不自动迁移。
+
+`SshKey.Mode` 为 `ReuseExisting` 或 `GenerateManaged`。复用模式复制私钥、先收紧到 OpenSSH 可接受的 ACL，再用 `ssh-keygen -y` 推导公钥；它不会修改源文件或服务器 `authorized_keys`。Import 的 `EnforceKeyOnlySsh` 是显式用户选择而非纳管前置条件。
+
 供应商专有 IPv6 获取、策略路由或网络命名空间应作为单独模块加入，不应修改通用 `sing-box-shadowsocks` 模块。
 
 `network-tuning` 使用计划中的 `NetworkTuning.Mode/BandwidthMbps/ReferenceRttMs` 和初始审计的实际内存计算参数。标称带宽与代表性 RTT 属于用户输入，禁止通过公网测速或虚拟网卡显示速率自动猜测。
 
-`BaselineOnly` 是默认且不要求 RTT；只在用户显式选择 `AdaptiveConservative` 时要求带宽和 RTT。`TuneNetwork` 将网络调优包装成独立生命周期操作：复用前置审计、远端文件/服务快照、最终验收和提交，但模块白名单不包含 `nftables-transition` 或协议安装模块。
+`BaselineOnly` 仍记录服务商标称带宽，但不要求 RTT、不修改缓冲区；`AdaptiveConservative` 在同一标称带宽基础上额外要求 RTT。`TuneNetwork` 将网络调优包装成独立生命周期操作：复用前置审计、远端文件/服务快照、最终验收和提交，但模块白名单不包含 `nftables-transition` 或协议安装模块。
 
 `shadowsocks-self-test.sh` 是落地模块的规范功能测试：TCP 通过 HTTPS 检查真实出口，UDP 通过临时 direct inbound 转发 DNS 查询并校验响应。`shadowsocks-external-probe.sh` 供维护验收使用，会下载并校验固定版本临时核心、复用同一套 TCP/UDP 测试，结束后不保留客户端文件。
 
@@ -40,6 +44,8 @@
 - `local-https-target`：仅在 Reality 的 `LocalOwnedTls` 模式启用，部署回环 nginx 静态站；
 - `sing-box-anytls`：安装固定版本低权限核心、生成 AnyTLS 密码与 ECH 密钥、切换 443 并执行 TCP/UDP/ECH 自测；
 - `anytls-client-export`：生成 Mihomo 测试 YAML、sing-box 出站和 ECH client config 私有片段。
+
+Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`FixedVerified` 使用版本目录的当前基线；`LatestStable` 只接受 XTLS/Xray-core 官方 latest API 返回的非草稿、非预发行数字标签。远端安装始终使用锁定提交且校验 SHA-256 的 Xray-install 脚本，并在安装后核对实际版本。
 
 `anytls-apply-config.sh` 在停止既有 Xray 前记录 active/enabled 状态。AnyTLS 启动或监听验证失败时，会停用失败服务并恢复原 Xray 状态；成功后才解除回滚。服务端配置不启用 `auto_detect_interface`，避免为了普通直连出站给低权限服务额外授予 `CAP_NET_RAW`。
 
@@ -66,7 +72,7 @@
 
 备份清理不进入可恢复模块流水线，因为它本身删除恢复材料。交互层只允许清理实例 `migration-backups` 与远端时间戳目录中的 `protocol-lifecycle`/旧 `protocol-migration` 子目录，支持保留最近 N 份；活动 rollback timer 或未完成操作存在时拒绝执行。
 
-现有实例导入逻辑位于 `src/VpsDeploy.Import.ps1`，远端解析器为 `existing-vps-import-audit.sh`。导入不套用新机模块图：它先建立实例专用 root 公钥并验证 key-only，再只读识别标准路径中的协议配置，创建 `ProtocolInventory`、私有 secrets 和导入状态。导入计划设置 `Firewall.Mode=PreserveExisting`；相关防火墙模块只做语法检查，不执行 `flush ruleset`。
+现有实例导入逻辑位于 `src/VpsDeploy.Import.ps1`，远端解析器为 `existing-vps-import-audit.sh`。导入不套用新机模块图：现有 OpenSSH 私钥默认复制为 `ssh/id_vps_management` 并直接复验，不轮换服务器公钥；密码引导或人工选择时才生成新 Ed25519。SSH 认证策略默认保持，也可选择 key-only。之后只读识别标准路径中的协议配置，创建 `ProtocolInventory`、私有 secrets 和导入状态。导入计划设置 `Firewall.Mode=PreserveExisting`；相关防火墙模块只做语法检查，不执行 `flush ruleset`。
 
 统一运维中心位于 `src/VpsDeploy.Operations.ps1`。它不是 `modules/*.ps1` 的新机流水线，而是复用计划、SSH、协议清单和统一事务的有界操作集合：
 
@@ -75,6 +81,8 @@
 - 手动恢复、凭据轮换、防火墙、固定资产升级、Komari 和退役：所有远端修改都必须先事务化，只有功能测试后提交；
 - SSH 维护单独使用 `mxh-ssh-maintenance-rollback.timer`，因为错误端口或公钥不能依赖普通协议回滚连接；
 - 客户端候选由 `scripts/merge_client_authority.py` 使用 ruamel.yaml round-trip 处理 Clash、标准 JSON 处理 sing-box，只写实例 `client-candidates`/`decommission-client-candidate`。
+
+独立客户端设计器位于 `src/VpsDeploy.ClientConfig.ps1`，结构默认值位于 `config/client-layout.default.json`，个人默认写入被 Git 忽略的 `config/client-layout.local.json`。`scripts/build_client_authority.py` 同时读取已纳管私有片段与手动节点，重写所选 selector 的成员/顺序/default，自动统一 Shadowsocks 的 `dialer-proxy`/`detour`，并拒绝未知引用和 selector 环。它只生成完整候选，不写权威文件或 AppData。
 
 运维远端脚本统一使用 `maintenance-*.sh`。健康审计不得输出配置正文；备份/恢复路径必须解析后严格位于 `/root/vps-deploy-backups`；退役脚本永远不删除 SSH 或操作系统。
 

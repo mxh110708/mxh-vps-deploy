@@ -49,7 +49,8 @@ case "$VPS_PARAM_ACTION" in
     ((${#current[@]} == 0)) || tar --numeric-owner -czpf "$safety/current.tar.gz" -C / "${current[@]}"
     was_enabled=false; was_active=false; systemctl is-enabled --quiet komari.service 2>/dev/null && was_enabled=true; systemctl is-active --quiet komari.service 2>/dev/null && was_active=true
     rollback(){ set +e; systemctl disable --now cloudflared.service komari.service >/dev/null 2>&1; [[ ! -f "$safety/current.tar.gz" ]] || tar --numeric-owner -xzpf "$safety/current.tar.gz" -C /; systemctl daemon-reload; [[ "$was_enabled" == false ]] || systemctl enable komari.service >/dev/null; [[ "$was_active" == false ]] || systemctl start komari.service; }
-    trap 'status=$?; if ((status!=0)); then rollback; fi; exit $status' EXIT
+    on_restore_exit(){ local rc=$?; trap - EXIT; if ((rc != 0)); then rollback; fi; exit "$rc"; }
+    trap on_restore_exit EXIT
     systemctl stop cloudflared.service komari.service >/dev/null 2>&1 || true
     tar --numeric-owner -xzpf "$file" -C /; systemctl daemon-reload
     systemctl enable --now komari.service >/dev/null

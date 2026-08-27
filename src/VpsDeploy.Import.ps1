@@ -16,8 +16,12 @@ function New-MxhExistingImportPlanInteractive {
         SshPort = 22
         BootstrapAuth = 'ExistingKey'
         BootstrapKeyPath = $null
+        SshKeyMode = 'ReuseExisting'
+        EnforceKeyOnlySsh = $false
+        BandwidthMbps = $null
     }
-    $getArchive = { Join-Path (Join-Path $wizard.InstanceRoot $wizard.Provider) $wizard.Instance }
+    $getInstance = { Join-Path (Join-Path $wizard.InstanceRoot $wizard.Provider) $wizard.Instance }
+    $getArchive = { Join-Path (& $getInstance) $script:VpsManagedDirectoryName }
     $steps = @(
         [pscustomobject]@{
             Id = 'archive-root'; ShouldRun = { $true }; Run = {
@@ -69,7 +73,10 @@ function New-MxhExistingImportPlanInteractive {
                 $default = if ($wizard.BootstrapAuth -eq 'ExistingKey') { 1 } else { 2 }
                 $choice = Read-VpsMenu '当前 root SSH 认证方式' @('现有 OpenSSH 私钥', '密码（由 ssh.exe 询问）') $default -AllowBack
                 $wizard.BootstrapAuth = if ($choice -eq 1) { 'ExistingKey' } else { 'Password' }
-                if ($wizard.BootstrapAuth -ne 'ExistingKey') { $wizard.BootstrapKeyPath = $null }
+                if ($wizard.BootstrapAuth -ne 'ExistingKey') {
+                    $wizard.BootstrapKeyPath = $null
+                    $wizard.SshKeyMode = 'GenerateManaged'
+                }
             }
         },
         [pscustomobject]@{
@@ -79,13 +86,40 @@ function New-MxhExistingImportPlanInteractive {
                     -ValidationMessage '找不到该私钥。'
                 $wizard.BootstrapKeyPath = (Resolve-Path -LiteralPath $value.Trim().Trim('"')).Path
             }
+        },
+        [pscustomobject]@{
+            Id = 'ssh-key-mode'; ShouldRun = { $wizard.BootstrapAuth -eq 'ExistingKey' }; Run = {
+                $default = if ($wizard.SshKeyMode -eq 'GenerateManaged') { 2 } else { 1 }
+                $choice = Read-VpsMenu '纳管后的 SSH 管理密钥' @(
+                    '复用当前 OpenSSH 私钥并复制为规范文件名（推荐；不改服务器公钥）',
+                    '生成新的实例管理密钥并写入服务器（保留旧密钥）'
+                ) $default -AllowBack
+                $wizard.SshKeyMode = if ($choice -eq 1) { 'ReuseExisting' } else { 'GenerateManaged' }
+            }
+        },
+        [pscustomobject]@{
+            Id = 'ssh-policy'; ShouldRun = { $true }; Run = {
+                $default = if ($wizard.EnforceKeyOnlySsh) { 2 } else { 1 }
+                $choice = Read-VpsMenu '纳管时是否调整现有 SSH 认证策略' @(
+                    '保持服务器当前认证策略（推荐用于既有 VPS）',
+                    '在密钥复验后收口为 key-only'
+                ) $default -AllowBack
+                $wizard.EnforceKeyOnlySsh = $choice -eq 2
+            }
+        },
+        [pscustomobject]@{
+            Id = 'bandwidth'; ShouldRun = { $true }; Run = {
+                $wizard.BandwidthMbps = [int](Read-VpsText '套餐标称带宽（Mbps，例如 100 或 1000）' -Default ([string]$wizard.BandwidthMbps) -AllowBack -Validate {
+                        param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 100000
+                    } -ValidationMessage '请输入服务商标称的 1–100000 Mbps 整数。')
+            }
         }
     )
 
     $buildPlan = {
         $archive = & $getArchive
         [ordered]@{
-            SchemaVersion = 2
+            SchemaVersion = 3
             CreatedAt = (Get-Date).ToString('o')
             Provider = $wizard.Provider
             Instance = $wizard.Instance
@@ -102,6 +136,12 @@ function New-MxhExistingImportPlanInteractive {
                 BootstrapSshPort = [int]$wizard.SshPort; BootstrapAuth = $wizard.BootstrapAuth
                 BootstrapKeyPath = $wizard.BootstrapKeyPath
             }
+            SshKey = [ordered]@{
+                Mode = if ($wizard.BootstrapAuth -eq 'ExistingKey') { [string]$wizard.SshKeyMode } else { 'GenerateManaged' }
+                SourcePrivateKeyPath = if ($wizard.BootstrapAuth -eq 'ExistingKey') { [string]$wizard.BootstrapKeyPath } else { $null }
+                ManagedFileName = if ($wizard.BootstrapAuth -eq 'ExistingKey' -and $wizard.SshKeyMode -eq 'ReuseExisting') { 'id_vps_management' } else { 'id_ed25519' }
+                PreserveSource = $true
+            }
             AdminUser = 'root'
             Ports = [ordered]@{
                 SshPrimary = [int]$wizard.SshPort; SshRescue = [int]$wizard.SshPort
@@ -113,6 +153,7 @@ function New-MxhExistingImportPlanInteractive {
                 TargetSamples = [int]$versions.target_audit.samples
                 TargetMaxMedianMs = [int]$versions.target_audit.maximum_median_ms
                 XrayVersion = [string]$versions.xray.version
+                XrayVersionChannel = 'ImportedOrLegacy'
             }
             AnyTls = [ordered]@{
                 Enabled = $false; ServerName = $null; EchPublicName = $null
@@ -128,16 +169,17 @@ function New-MxhExistingImportPlanInteractive {
                 TrustedEntryIPv4s = @(); TrustedEntryIPv6s = @(); ClientTransitTag = 'Imported Entry'
                 SecondaryIpv6Enabled = $false; SecondaryIpv6Address = $null; SecondaryBindInterface = $null
             }
-            NetworkTuning = [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $null; ReferenceRttMs = $null }
+            NetworkTuning = [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = [int]$wizard.BandwidthMbps; ReferenceRttMs = $null }
             Firewall = [ordered]@{ Mode = 'PreserveExisting' }
             Komari = [ordered]@{ Enabled = $false; Endpoint = $null; AgentVersion = [string]$versions.komari_agent.version }
             Import = [ordered]@{
                 Enabled = $true; Status = 'Planned'; PreserveExistingFirewall = $true
-                EnforceKeyOnlySsh = $true; CreatedAt = (Get-Date).ToString('o')
+                EnforceKeyOnlySsh = [bool]$wizard.EnforceKeyOnlySsh; CreatedAt = (Get-Date).ToString('o')
             }
             Paths = [ordered]@{
+                InstanceDirectory = (& $getInstance)
                 Archive = $archive
-                KeyDirectory = Join-Path $archive ($wizard.NodeName + '-id_ed25519')
+                KeyDirectory = Join-Path $archive 'ssh'
             }
         }
     }
@@ -159,8 +201,8 @@ function New-MxhExistingImportPlanInteractive {
             }
         }
         $plan = & $buildPlan
-        $existingPlan = Join-Path ([string]$plan.Paths.Archive) 'deployment-plan.json'
-        if (Test-Path -LiteralPath $existingPlan -PathType Leaf) {
+        $existingPlan = Get-VpsExistingPlanPath -InstanceDirectory ([string]$plan.Paths.InstanceDirectory)
+        if ($existingPlan) {
             Write-VpsUi '目标实例目录已经存在 deployment-plan.json；请使用现有 VPS 协议管理或 Resume，不能重复导入。' Warning
             $index = 2
             continue
@@ -171,7 +213,10 @@ function New-MxhExistingImportPlanInteractive {
         Write-Host "  实例：$($plan.Provider) / $($plan.Instance)"
         Write-Host "  地址：$($plan.Server.IPv4) / $($plan.Server.IPv6)"
         Write-Host "  当前 root SSH：$($plan.Server.BootstrapSshPort) / $($plan.Server.BootstrapAuth)"
-        Write-Host '  将执行：写入新的实例专用公钥、强制 SSH key-only、只读识别现有协议和配置'
+        $keyAction = if ($plan.SshKey.Mode -eq 'ReuseExisting') { '复用当前 OpenSSH 密钥，不轮换服务器公钥' } else { '写入新的实例管理公钥并保留旧密钥' }
+        $sshAction = if ($plan.Import.EnforceKeyOnlySsh) { '收口为 key-only' } else { '保持现有 SSH 认证策略' }
+        Write-Host "  将执行：$keyAction；$sshAction；只读识别现有协议和配置"
+        Write-Host "  套餐标称带宽：$($plan.NetworkTuning.BandwidthMbps) Mbps（RTT 稍后可选）"
         Write-Host '  不会执行：重装协议、改端口、覆盖现有防火墙、修改客户端权威配置'
         $choice = Read-VpsMenu '请核对纳管方案' @('确认并开始纳管', '返回修改', '取消') 1 -AllowBack
         if ($choice -eq 1) { return $plan }
@@ -234,8 +279,9 @@ function Invoke-MxhExistingVpsImport {
     }
     $imported = & $readImport
     $managedKeyOnlyDropIn = $false
-    if ($imported.Audit.PasswordAuthentication -ne 'no' -or $imported.Audit.KbdInteractiveAuthentication -ne 'no' -or
-        $imported.Audit.PubkeyAuthentication -ne 'yes') {
+    $enforceKeyOnly = $Plan.Import.Contains('EnforceKeyOnlySsh') -and [bool]$Plan.Import.EnforceKeyOnlySsh
+    if ($enforceKeyOnly -and ($imported.Audit.PasswordAuthentication -ne 'no' -or
+            $imported.Audit.KbdInteractiveAuthentication -ne 'no' -or $imported.Audit.PubkeyAuthentication -ne 'yes')) {
         Write-VpsUi '现有 SSH 尚非 key-only；实例专用公钥已验证，现在应用最小认证加固，不修改监听端口。' Warning
         $harden = Invoke-VpsRemoteScript -Context $context -Asset 'existing-vps-import-ssh-keyonly.sh' -TimeoutSeconds 180
         if ($harden.StdOut -notmatch 'VPSDEPLOY_IMPORT_SSH_KEYONLY_OK') { throw '导入实例 SSH key-only 加固失败。' }
@@ -246,9 +292,12 @@ function Invoke-MxhExistingVpsImport {
         }
         $imported = & $readImport
     }
-    if ($imported.Audit.PasswordAuthentication -ne 'no' -or $imported.Audit.KbdInteractiveAuthentication -ne 'no' -or
-        $imported.Audit.PubkeyAuthentication -ne 'yes') {
+    if ($enforceKeyOnly -and ($imported.Audit.PasswordAuthentication -ne 'no' -or
+            $imported.Audit.KbdInteractiveAuthentication -ne 'no' -or $imported.Audit.PubkeyAuthentication -ne 'yes')) {
         throw 'SSH 有效配置仍未达到 key-only；已停止纳管，不修改代理协议或防火墙。'
+    }
+    if (-not $enforceKeyOnly -and $imported.Audit.PubkeyAuthentication -ne 'yes') {
+        throw '当前 sshd 有效配置未启用公钥认证，无法建立可自动维护的管理入口。脚本未修改现有认证策略。'
     }
     if ([int]$Plan.Server.BootstrapSshPort -notin @($imported.Audit.SshPorts | ForEach-Object { [int]$_ })) {
         throw '用户填写的 SSH 端口不在 sshd 有效监听配置中。'
@@ -286,6 +335,7 @@ function Invoke-MxhExistingVpsImport {
         }
         $Plan.Reality.ForceIpv4Egress = [bool]$reality.ForceIpv4Egress
         $Plan.Reality.XrayVersion = [string]$reality.XrayVersion
+        $Plan.Reality.XrayVersionChannel = 'ImportedOrLegacy'
         $context.Secrets.Xray = Copy-MxhHashtable -Value $reality.Secrets
     }
     if ($inventory.AnyTlsEntry.Installed) {
@@ -324,6 +374,7 @@ function Invoke-MxhExistingVpsImport {
     $Plan.Import.CompletedAt = (Get-Date).ToString('o')
     $Plan.Import.SingleSshPort = ([int]$Plan.Ports.SshPrimary -eq [int]$Plan.Ports.SshRescue)
     $Plan.Import.ManagedKeyOnlyDropIn = $managedKeyOnlyDropIn
+    $Plan.Import.SshAuthenticationPreserved = -not $enforceKeyOnly
     $context.State.CurrentManagementPort = [int]$Plan.Ports.SshPrimary
     $context.State.BootstrapSshRemoved = $true
     $context.State.ProtocolInventory = Copy-MxhHashtable -Value $inventory

@@ -2,20 +2,29 @@
 
 ## Unreleased
 
+- 新部署和 Import 的运行产物统一进入 `<实例>\MXH-VPS-Deploy`；旧版实例根目录计划仍保持兼容，不执行强制搬迁。
+- 现有 OpenSSH 私钥默认复制为 `ssh\id_vps_management` 并复用同一公钥，原文件与服务商面板关系不变；只有密码引导或人工选择时才生成新 Ed25519。
+- Import 的 SSH 认证策略改为显式选择：默认保持现状，可选 key-only；不再把“纳管”与“强制轮换密钥/关闭密码”绑定。
+- 网络调优改为标称带宽必填、RTT 可选；基础模式按角色、实际内存和带宽分档选择保守队列，不设置 TCP 缓冲上限。
+- 新增独立 `ClientConfig` 模式、可版本控制的基础布局和本机覆盖模板；支持多实例私有片段提取、未纳管节点隐藏输入、地区/落地/业务组排序与默认值、selector 引用/循环检查及 dialer-proxy/detour 同步。
+- 客户端合并器对 sing-box 运行配置使用紧凑 JSON，并在 4 MiB 前硬性停止；完整权威回放从约 4.94 MiB 降至约 2.44 MiB，避免桌面端 IPC 导入失败。
+- Xray 新部署、协议补充和受控升级同时支持 `FixedVerified` 与官方 `LatestStable` 通道；latest 会解析并固化具体非预发行版本。
+- Windows 本地 ACL 默认改为尽力收紧并明确警告；设置 `MXH_VPS_STRICT_LOCAL_ACL=1` 可恢复硬失败策略。远端秘密、回滚和 Git 防泄漏边界不放宽。
+- 修复 GitHub Actions：Windows runner 先安装固定 YAML 依赖；Linux ShellCheck 修正 Komari trap 状态变量和恢复脚本递归删除保护。
 - 新增统一 `Maintain` 运维中心：手动恢复、健康/漂移审计、协议凭据轮换、SSH/防火墙独立维护、固定资产升级、客户端权威候选合并、Komari 生命周期和分级退役。
 - 健康报告只保存脱敏状态和配置 SHA-256；支持建立基线、发现计划外哈希变化，并只在纯哈希变化且人工确认时更新基线。
 - 手动恢复中心把本地计划/状态/凭据与远端 `protocol-lifecycle` 快照成对展示；恢复前再次快照，支持仅配置或完整服务/防火墙/sysctl 恢复。
 - Reality、AnyTLS 和 Shadowsocks 凭据轮换现在先生成候选、应用回滚保护、导出客户端并完成真实测试；提交后同步私有服务端快照。
 - SSH 独立维护支持实例 Ed25519 密钥轮换及受管双端口重设；旧入口/旧公钥在 root/admin 全部验证前保留，并有独立 10 分钟回滚。
 - 防火墙独立维护默认保留未知规则；显式接管受管最小 nftables 需要确认短语，支持 Shadowsocks 白名单维护和 check-only 预检。
-- 可控版本升级仅使用 `versions.json` 固定版本、资产名/安装器 URL 和 SHA-256，并恢复升级前 enabled/active 状态。
+- 可控版本升级恢复升级前 enabled/active 状态；sing-box/Komari 使用 `versions.json` 固定资产，Xray 额外支持解析并固化官方最新稳定版。
 - 新增基于 ruamel.yaml 的 Clash/sing-box 权威配置候选引擎，保留源文件、只生成候选，并支持退役节点删除候选。
 - Komari 支持 Agent 安装/修复/Token 轮换/保状态升级/卸载，以及 Controller 状态、备份、恢复、Tunnel Token 轮换和卸载。
 - 分级退役会先生成客户端删除候选和下载最终备份；可选择仅停用、删除受管文件、清理远端恢复点或连同本机 Controller/Connector 退役，始终保留 SSH 与系统。
 - 旧 DMIT 实机验收修复 Xray 26.3.27 `x25519` 的 `Password (PublicKey)` 字段兼容、无扩展名临时 Xray 配置无法识别格式、历史 ACL 文件阻断校验和，以及 `authorized_keys` 无末尾换行导致新密钥粘连。
 
 - 新部署向导将 VPS 私有归档根目录提升为第一项，显示 `-InstanceRoot` 当前默认值并允许输入其他绝对路径；摘要确认前不创建目录。
-- 归档根目录拒绝相对路径和裸磁盘根目录；最终路径固定为 `<根目录>\<服务商>\<实例>`，Resume/迁移继续使用计划内的 `Paths.Archive`。
+- 归档根目录拒绝相对路径和裸磁盘根目录；新计划路径固定为 `<根目录>\<服务商>\<实例>\MXH-VPS-Deploy`，Resume/迁移继续兼容计划内的旧 `Paths.Archive`。
 - 将“现有 VPS 协议迁移/维护”升级为协议生命周期管理：Reality、AnyTLS、Shadowsocks 支持安装并启用、安装为停用备用、启用/停用、切换和安全卸载。
 - 新增 `ProtocolInventory`，分别记录 installed/enabled/active；Reality 与 AnyTLS 可同时安装但只能一个启用，Shadowsocks 可与入口协议并行运行。
 - 变更前在本地备份计划、状态、凭据、服务端快照和客户端片段，并验证计划 SHA-256；VPS 端打包全部受管协议文件，记录三个 systemd 服务状态及 nftables/sysctl。
@@ -23,7 +32,7 @@
 - 安装为备用仍会临时切换并完成真实测试，然后恢复原状态；Reality/AnyTLS 必须通过 Mihomo 出口测试，新增 Shadowsocks 必须从白名单入口完成 TCP、UDP 和出口链式探测。
 - 卸载只允许 disabled/inactive 协议，移除运行时、systemd 单元、服务端配置、当前凭据索引和客户端片段；共享 Certbot/ACME 环境与回滚备份保留。
 - 新增受限备份清理：本地、远端或同时清理，支持保留最近 N 份；只匹配本工具协议备份，活动回滚或未完成变更期间拒绝删除。
-- 新增 `Import` 模式：没有 `deployment-plan.json` 的既有标准 Reality/AnyTLS/Shadowsocks VPS 可建立实例专用密钥、收口为 key-only、解析现有私有配置并生成受管计划；代理端口和现有防火墙保持不变。
+- 新增 `Import` 模式：没有 `deployment-plan.json` 的既有标准 Reality/AnyTLS/Shadowsocks VPS 可复用现有 OpenSSH 密钥或生成新密钥，自选保持 SSH 认证或 key-only，并解析现有私有配置生成受管计划；代理端口和现有防火墙保持不变。
 - 导入实例使用 `PreserveExisting` 防火墙模式；Reality/AnyTLS 可在既有 443 上管理，新增 Shadowsocks 高位端口时拒绝自动覆盖未知规则。
 - 新增独立 `TuneNetwork` 模式；协议生命周期操作不再隐式重跑网络调优。默认 `BaselineOnly` 不要求 RTT，只有显式选择 BDP 自适应时才询问带宽和 RTT。
 - Reality target 自动审计失败时展示完整结果，允许交互式输入 `ACCEPT-TARGET-RISK` 并记录原因后人工覆写；非交互模式禁止，真实握手/出口验收仍不可跳过。
