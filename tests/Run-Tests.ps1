@@ -1214,6 +1214,10 @@ $pipelineSource = & $coreModule { (Get-Command Invoke-VpsModulePipeline).ScriptB
 $successStateIndex = $pipelineSource.IndexOf("Set-VpsModuleState -Context `$Context -Id `$module.Id -Status Success")
 $finalChecksumIndex = $pipelineSource.IndexOf('Update-VpsPrivateArchiveChecksums -Context $Context')
 Assert-True ($successStateIndex -ge 0 -and $finalChecksumIndex -gt $successStateIndex) 'pipeline refreshes archive checksums after success state persistence'
+$missingStateJson = & $coreModule { ConvertTo-VpsOptionalStateJson -State ([ordered]@{}) -Name 'RealityEgressTest' }
+$presentStateJson = & $coreModule { ConvertTo-VpsOptionalStateJson -State ([ordered]@{ RealityEgressTest = [ordered]@{ Status = 'Passed' } }) -Name 'RealityEgressTest' }
+Assert-True ($missingStateJson -eq '{"Status":"NotRecorded"}') 'legacy archive marks missing historical validation as not recorded'
+Assert-True ($presentStateJson -eq '{"Status":"Passed"}') 'archive preserves recorded historical validation'
 [IO.Directory]::Delete($checksumFixture, $true)
 
 $testOutputRoot = Join-Path $ProjectRoot '.test-output'

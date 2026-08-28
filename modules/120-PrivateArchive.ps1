@@ -67,6 +67,10 @@
         $archivePath = Join-Path $Context.ArchivePath ($Context.Plan.NodeName + '-final-archive.txt')
         $bootstrapAuth = if ($Context.Plan.Server.Contains('BootstrapAuth')) { $Context.Plan.Server.BootstrapAuth } else { 'Password' }
         $bootstrapKeyPath = if ($Context.Plan.Server.Contains('BootstrapKeyPath')) { $Context.Plan.Server.BootstrapKeyPath } else { $null }
+        $realityEgressJson = ConvertTo-VpsOptionalStateJson -State $Context.State -Name 'RealityEgressTest' -Depth 5
+        $anyTlsValidationJson = ConvertTo-VpsOptionalStateJson -State $Context.State -Name 'AnyTls' -Depth 8
+        $anyTlsEgressJson = ConvertTo-VpsOptionalStateJson -State $Context.State -Name 'AnyTlsEgressTest' -Depth 5
+        $shadowsocksSelfTestJson = ConvertTo-VpsOptionalStateJson -State $Context.State -Name 'ShadowsocksSelfTest' -Depth 5
         $xrayBlock = if ($realityInstalled) {
             $targetSettings = Get-MxhRealityTargetSettings -Plan $Context.Plan
 @"
@@ -81,7 +85,7 @@ Reality PrivateKey: $($s.RealityPrivateKey)
 Reality ClientKey: $($s.RealityClientKey)
 Short ID: $($s.ShortId)
 Force IPv4 Egress: $($Context.Plan.Reality.ForceIpv4Egress)
-Reality Egress Test: $($Context.State.RealityEgressTest | ConvertTo-Json -Compress -Depth 5)
+Reality Egress Test: $realityEgressJson
 "@
         }
         else { 'Xray: Not installed by this deployment role.' }
@@ -99,8 +103,8 @@ ECH Client Config Base64: $($anyTls.EchClientConfigBase64)
 Force IPv4 Egress: $($Context.Plan.AnyTls.ForceIpv4Egress)
 Padding Scheme Mode: $(if ($Context.Plan.AnyTls.Contains('PaddingSchemeMode')) { $Context.Plan.AnyTls.PaddingSchemeMode } else { 'OfficialDefault' })
 Padding Scheme: $((Get-MxhAnyTlsPaddingScheme -Plan $Context.Plan) | ConvertTo-Json -Compress)
-AnyTLS Validation: $($Context.State.AnyTls | ConvertTo-Json -Compress -Depth 8)
-AnyTLS Client Egress Test: $($Context.State.AnyTlsEgressTest | ConvertTo-Json -Compress -Depth 5)
+AnyTLS Validation: $anyTlsValidationJson
+AnyTLS Client Egress Test: $anyTlsEgressJson
 "@
         }
         else { 'AnyTLS: Not installed by this deployment role.' }
@@ -126,7 +130,7 @@ Secondary Bind Interface: $($Context.Plan.Shadowsocks.SecondaryBindInterface)
 Trusted Entry IPv4: $(@($Context.Plan.Shadowsocks.TrustedEntryIPv4s) -join ',')
 Trusted Entry IPv6: $(@($Context.Plan.Shadowsocks.TrustedEntryIPv6s) -join ',')
 Client Transit Tag: $($Context.Plan.Shadowsocks.ClientTransitTag)
-Server Self Test: $($Context.State.ShadowsocksSelfTest | ConvertTo-Json -Compress -Depth 5)
+Server Self Test: $shadowsocksSelfTestJson
 "@
         }
         else { 'Shadowsocks: Not installed by this deployment role.' }

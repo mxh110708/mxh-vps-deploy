@@ -1516,6 +1516,23 @@ function Update-VpsPrivateArchiveChecksums {
     Protect-VpsPrivateFile $checksumPath
 }
 
+function ConvertTo-VpsOptionalStateJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [System.Collections.IDictionary]$State,
+        [Parameter(Mandatory)] [string]$Name,
+        [int]$Depth = 8
+    )
+
+    $value = if ($State.Contains($Name)) {
+        $State[$Name]
+    }
+    else {
+        [ordered]@{ Status = 'NotRecorded' }
+    }
+    return $value | ConvertTo-Json -Compress -Depth $Depth
+}
+
 function Invoke-VpsProcess {
     [CmdletBinding()]
     param(
