@@ -53,6 +53,8 @@ pwsh -File .\Start-VPSDeploy.ps1
 
 完整的新手说明见 [中文完整使用手册](docs/USER-GUIDE.zh-CN.md)。
 
+部署 AnyTLS 或 Reality 本机 target 前，建议单独收藏 [Cloudflare、Certbot、AnyTLS 与 Reality 本机 target 配置手册](docs/CLOUDFLARE-CERTBOT.zh-CN.md)。
+
 ## 应该选择哪个入口
 
 | 你的目标 | 主菜单 |
@@ -214,6 +216,7 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New -DryRun
 详细说明：
 
 - [中文完整使用手册](docs/USER-GUIDE.zh-CN.md)
+- [Cloudflare、Certbot、AnyTLS 与 Reality 本机 target 配置手册](docs/CLOUDFLARE-CERTBOT.zh-CN.md)
 - [安全模型](docs/SECURITY.md)
 - [模块开发与内部结构](docs/MODULES.md)
 - [变更记录](CHANGELOG.md)

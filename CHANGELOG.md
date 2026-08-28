@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 新增独立 Cloudflare/Certbot 中文操作手册：逐项说明 AnyTLS SNI、ECH public name、Reality 本机 target 的 DNS-only 记录、最小权限长期 Token、客户端 IP 白名单、Token 文件格式、续期验证、迁移和退役清理。
 - 客户端设计器改为默认使用项目内无个人数据的 Clash/sing-box 完整模板；现有权威配置降为可选只读来源，运行不再依赖个人盘符或固定文件名。
 - 新增客户端设计器子菜单和可持久编辑的本机布局默认值：地区/节点顺序、落地 transit、业务组、来源与输出路径均可修改或恢复通用默认。
 - 客户端输出明确分为“生成新配置”和“校验后覆盖权威配置”；覆盖模式使用时间戳备份、相邻临时文件和成对失败恢复，并拒绝 Clash Verge AppData。

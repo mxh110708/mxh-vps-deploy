@@ -90,6 +90,8 @@ Padding scheme 不是认证秘密。新计划为每台实例生成一组稳定�
 
 Token 仅授予目标 Zone 的 `DNS:Edit` 和 `Zone:Read`，不得使用全局 API Key。服务器凭据文件 `/etc/letsencrypt/cloudflare.ini` 为 root:root 0600，本地 Token 文件也必须收紧 ACL。若启用 Token 客户端 IP 白名单，所有续期 VPS 的稳定公网出口都必须在列表中。
 
+AnyTLS SNI、ECH public name 与 Reality 本机 target 的 Cloudflare 记录、长期 Token、迁移和退役操作见 [Cloudflare、Certbot、AnyTLS 与 Reality 本机 target 配置手册](CLOUDFLARE-CERTBOT.zh-CN.md)。这些记录必须保持 DNS-only；Cloudflare 的 HTTP 代理、Origin CA 和 Cloudflare ECH 开关不参与本项目的协议路径。
+
 Certbot 通过 DNS-01 签发和续期证书，不要求开放 80。工具停用发行版的 `certbot.timer`，只保留 `mxh-certbot-renew.timer`，以确保每次成功续期都执行部署 hook。hook 只识别固定证书名，以临时文件和原子替换更新 `/etc/mxh-tls`，然后检查并重启 AnyTLS 或 reload nginx。
 
 ## 9. Shadowsocks 落地边界

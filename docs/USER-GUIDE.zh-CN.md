@@ -238,12 +238,16 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
 
 ### 6.4 自有域名、AnyTLS 与 Certbot
 
-需要可信证书时，在 Cloudflare 准备 DNS-only（灰云）记录：
+完整的 Cloudflare 面板操作、域名角色映射、API Token 权限、IP 白名单、Token 文件、迁移和排错步骤见：
+
+- [Cloudflare、Certbot、AnyTLS 与 Reality 本机 target 配置手册](CLOUDFLARE-CERTBOT.zh-CN.md)
+
+以下是部署前必须记住的摘要。需要可信证书时，在 Cloudflare 准备 DNS-only（灰云）记录：
 
 - AnyTLS：一个内部证书/SNI 名称和一个不同的 ECH public name；
 - Reality 本机 target：一个独立站点名称。
 
-记录应同时创建适用的 A/AAAA，指向实际 VPS。不要开启 Cloudflare 代理。
+建议为每个名称创建适用的 A/AAAA 并指向实际 VPS。没有可用 IPv6 就不要创建 AAAA。不要开启 Cloudflare 代理，也不需要另建 HTTPS/SVCB 记录；本项目由 sing-box 生成 ECH key/config，并把 ECH config 直接写入客户端。
 
 API Token 最小权限：
 
@@ -253,7 +257,7 @@ Zone / Zone / Read
 资源：只包含目标 Zone
 ```
 
-不要使用 Global API Key 或 Origin CA Key。若设置客户端 IP 白名单，必须包含实际运行 Certbot 的每台 VPS 出口 IPv4/IPv6；地址变化前要先更新 Token，否则续期会失败。
+不要使用 Global API Key 或 Origin CA Key。Token 应长期有效，不要设置早于证书使用期的到期日。若设置客户端 IP 白名单，必须包含实际运行 Certbot 的每台 VPS 出口 IPv4/IPv6；不要使用当前 Windows 浏览器旁边的“使用我的 IP”。地址变化前要先更新 Token，否则续期会失败。
 
 将 Token 作为唯一一行保存到实例私人资料目录，例如：
 
@@ -261,7 +265,7 @@ Zone / Zone / Read
 cloudflare-certbot-token.private.txt
 ```
 
-向导读取文件路径，不把 Token 值写进计划或日志。Certbot 是本项目使用的 ACME 客户端；“ACME”是证书协议名称，不代表另装了其他证书程序。
+文件只能包含一行原始 Token，不要添加 `Bearer`、变量名、引号或 `dns_cloudflare_api_token =` 前缀。向导读取文件路径，不把 Token 值写进计划或日志。Certbot 是本项目使用的 ACME 客户端；“ACME”是证书协议名称，不代表另装了其他证书程序。
 
 脚本会：
 
