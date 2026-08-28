@@ -37,12 +37,99 @@ function Test-VpsClearCommand {
     return $Value.Trim().ToLowerInvariant() -in @('clear', 'cls')
 }
 
+function Test-VpsHelpCommand {
+    param([AllowNull()] [string]$Value)
+    if ($null -eq $Value) { return $false }
+    return $Value.Trim().ToLowerInvariant() -in @('help', 'h', '?')
+}
+
 function Clear-VpsScreen {
     try { Clear-Host }
     catch {
         try { [Console]::Clear() }
         catch { }
     }
+}
+
+function Show-VpsHelp {
+    param([string]$Text)
+    Write-Host ''
+    Write-Host '帮助说明' -ForegroundColor Cyan
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        Write-Host '  输入列表编号执行对应操作；0、b 或 back 返回上一级。'
+        Write-Host '  输入 clear 或 cls 清屏；输入 help 或 h 再次显示帮助。'
+    }
+    else {
+        foreach ($line in $Text -split "`r?`n") { Write-Host ('  ' + $line) }
+    }
+}
+
+function Merge-VpsHashtable {
+    param([hashtable]$Base,[hashtable]$Overlay)
+    $result = [ordered]@{}
+    if ($Base) { foreach ($key in $Base.Keys) { $result[$key] = $Base[$key] } }
+    if ($Overlay) {
+        foreach ($key in $Overlay.Keys) {
+            if ($result.Contains($key) -and $result[$key] -is [hashtable] -and $Overlay[$key] -is [hashtable]) {
+                $result[$key] = Merge-VpsHashtable -Base $result[$key] -Overlay $Overlay[$key]
+            }
+            else { $result[$key] = $Overlay[$key] }
+        }
+    }
+    return $result
+}
+
+function Get-VpsAppDefaults {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+    $genericPath = Join-Path $ProjectRoot 'config\app-defaults.json'
+    $localPath = Join-Path $ProjectRoot 'config\app-defaults.local.json'
+    $generic = if (Test-Path -LiteralPath $genericPath -PathType Leaf) { Read-VpsJsonHashtable -Path $genericPath } else { [ordered]@{} }
+    $local = if (Test-Path -LiteralPath $localPath -PathType Leaf) { Read-VpsJsonHashtable -Path $localPath } else { [ordered]@{} }
+    return Merge-VpsHashtable -Base $generic -Overlay $local
+}
+
+function Resolve-VpsPortablePath {
+    param([Parameter(Mandatory)][string]$ProjectRoot,[AllowEmptyString()][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path.Trim().Trim('"'))
+    if ([IO.Path]::IsPathRooted($expanded)) { return [IO.Path]::GetFullPath($expanded) }
+    return [IO.Path]::GetFullPath((Join-Path $ProjectRoot $expanded))
+}
+
+function Get-VpsMihomoCorePaths {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+    $settings = Get-VpsAppDefaults -ProjectRoot $ProjectRoot
+    $found = [Collections.Generic.List[string]]::new()
+    foreach ($value in @($env:MXH_VPS_MIHOMO_STABLE,$env:MXH_VPS_MIHOMO_ALPHA,[string]$settings.mihomo.stable_executable,[string]$settings.mihomo.alpha_executable)) {
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+        $path = Resolve-VpsPortablePath -ProjectRoot $ProjectRoot -Path $value
+        if ((Test-Path -LiteralPath $path -PathType Leaf) -and $path -notin $found) { $found.Add($path) }
+    }
+    foreach ($name in @('verge-mihomo.exe','verge-mihomo-alpha.exe')) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($command -and $command.Source -notin $found) { $found.Add($command.Source) }
+    }
+    $searchRoots=[Collections.Generic.List[string]]::new()
+    foreach($root in @($env:ProgramFiles,${env:ProgramFiles(x86)})){if(-not[string]::IsNullOrWhiteSpace($root)){$searchRoots.Add($root)}}
+    if(-not[string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)){$searchRoots.Add((Join-Path $env:LOCALAPPDATA 'Programs'))}
+    foreach ($root in $searchRoots) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        foreach ($relative in @('Clash Verge\verge-mihomo.exe','Clash Verge\verge-mihomo-alpha.exe','Clash Verge Rev\verge-mihomo.exe','Clash Verge Rev\verge-mihomo-alpha.exe')) {
+            $path = Join-Path $root $relative
+            if ((Test-Path -LiteralPath $path -PathType Leaf) -and $path -notin $found) { $found.Add($path) }
+        }
+    }
+    foreach ($registryRoot in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
+        foreach ($item in @(Get-ItemProperty $registryRoot -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties['DisplayName'] -and [string]$_.DisplayName -match 'Clash Verge' })) {
+            $location = ([string]$item.InstallLocation).Trim().Trim('"')
+            if ([string]::IsNullOrWhiteSpace($location)) { continue }
+            foreach ($name in @('verge-mihomo.exe','verge-mihomo-alpha.exe')) {
+                $path = Join-Path $location $name
+                if ((Test-Path -LiteralPath $path -PathType Leaf) -and $path -notin $found) { $found.Add($path) }
+            }
+        }
+    }
+    return @($found)
 }
 
 function Read-VpsText {
@@ -53,20 +140,27 @@ function Read-VpsText {
         [scriptblock]$Validate,
         [string]$ValidationMessage = '输入无效，请重新输入。',
         [switch]$AllowEmpty,
-        [switch]$AllowBack
+        [switch]$AllowBack,
+        [string]$HelpText
     )
 
     while ($true) {
         $suffix = if ($Default) { " [$Default]" } else { '' }
-        $backHint = if ($AllowBack) { '（输入 b 返回）' } else { '' }
+        $backHint = if ($AllowBack) { '（b/back 返回；字面值 b 输入 \\b）' } else { '' }
         $value = Read-Host ($Prompt + $suffix + $backHint)
+        if ($null -eq $value) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         if (Test-VpsClearCommand $value) {
             Clear-VpsScreen
             continue
         }
-        if ($AllowBack -and $value.Trim().Equals('b', [StringComparison]::OrdinalIgnoreCase)) {
+        if (Test-VpsHelpCommand $value) {
+            Show-VpsHelp $(if ($HelpText) { $HelpText } else { "请按提示输入此字段；clear/cls 清屏$(if($AllowBack){'；b/back 返回；\\b 表示字面值 b'})。" })
+            continue
+        }
+        if ($AllowBack -and $value.Trim().ToLowerInvariant() -in @('b','back')) {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
         }
+        if ($AllowBack -and $value -eq '\b') { $value = 'b' }
         if ([string]::IsNullOrWhiteSpace($value)) {
             $value = $Default
         }
@@ -98,7 +192,11 @@ function Read-VpsYesNo {
             Clear-VpsScreen
             continue
         }
-        if ($AllowBack -and $answer -eq 'b') {
+        if (Test-VpsHelpCommand $answer) {
+            Show-VpsHelp '输入 y/yes/是 表示确认；输入 n/no/否 表示拒绝；留空采用方括号中的默认值。'
+            continue
+        }
+        if ($AllowBack -and $answer -in @('b','back')) {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
         }
         if (-not $answer) { return $Default }
@@ -115,7 +213,8 @@ function Read-VpsMenu {
         [Parameter(Mandatory)] [string[]]$Options,
         [int]$Default = 1,
         [switch]$AllowBack,
-        [string]$BackLabel = '返回上一步'
+        [string]$BackLabel = '返回上一步',
+        [string]$HelpText
     )
 
     $showMenu = {
@@ -126,6 +225,7 @@ function Read-VpsMenu {
         }
         if ($AllowBack) { Write-Host ("  0. {0}" -f $BackLabel) }
         Write-Host '  clear / cls. 清除当前屏幕输出' -ForegroundColor DarkGray
+        Write-Host '  help / h. 查看帮助说明' -ForegroundColor DarkGray
     }
     & $showMenu
     while ($true) {
@@ -135,7 +235,12 @@ function Read-VpsMenu {
             & $showMenu
             continue
         }
-        if ($AllowBack -and ($raw.Trim() -eq '0' -or $raw.Trim().Equals('b', [StringComparison]::OrdinalIgnoreCase))) {
+        if (Test-VpsHelpCommand $raw) {
+            Show-VpsHelp $HelpText
+            & $showMenu
+            continue
+        }
+        if ($AllowBack -and $raw.Trim().ToLowerInvariant() -in @('0','b','back')) {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
         }
         if (-not $raw) { return $Default }
@@ -625,7 +730,7 @@ function New-VpsInteractivePlan {
             Id = 'archive-root'; ShouldRun = { $true }; Run = {
                 $value = Read-VpsText 'VPS 私有归档根目录（不会立即创建）' `
                     -Default ([string]$wizard.InstanceRoot) -AllowBack -Validate ${function:Test-VpsArchiveRoot} `
-                    -ValidationMessage '请输入不是磁盘根目录的完整绝对路径，例如 F:\VPS\VPS-Instances。'
+                    -ValidationMessage '请输入不是磁盘根目录的完整绝对路径，例如某个私有数据目录下的 VPS-Instances。'
                 $wizard.InstanceRoot = [IO.Path]::GetFullPath($value.Trim().Trim('"')).TrimEnd('\', '/')
             }
         },
@@ -2485,6 +2590,9 @@ function Invoke-VpsDeploymentSession {
         [string]$PlanPath,
         [string[]]$OnlyModule,
         [Parameter(Mandatory)] [string]$InstanceRoot,
+        [string]$ClashAuthorityPath,
+        [string]$SingBoxAuthorityPath,
+        [string]$ClientOutputRoot,
         [switch]$DryRun,
         [switch]$NonInteractive
     )
@@ -2495,7 +2603,9 @@ function Invoke-VpsDeploymentSession {
         return
     }
     if ($Mode -eq 'ClientConfig') {
-        Invoke-MxhClientAuthorityDesigner -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot -DryRun:$DryRun
+        Invoke-MxhClientAuthorityDesigner -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot `
+            -ClashAuthorityPath $ClashAuthorityPath -SingBoxAuthorityPath $SingBoxAuthorityPath `
+            -ClientOutputRoot $ClientOutputRoot -DryRun:$DryRun
         return
     }
     if ($Mode -eq 'New') {
@@ -2540,12 +2650,20 @@ function Start-VpsDeploy {
         [ValidateSet('Interactive', 'New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ClientConfig', 'ValidateProject')] [string]$Mode = 'Interactive',
         [string]$PlanPath,
         [string[]]$OnlyModule,
-        [string]$InstanceRoot = 'F:\VPS\VPS-Instances',
+        [string]$InstanceRoot,
+        [string]$ClashAuthorityPath,
+        [string]$SingBoxAuthorityPath,
+        [string]$ClientOutputRoot,
         [switch]$DryRun,
         [switch]$NonInteractive
     )
 
     if ($PSVersionTable.PSVersion.Major -lt 7) { throw '需要 PowerShell 7 或更高版本。' }
+    if ([string]::IsNullOrWhiteSpace($InstanceRoot)) {
+        $settings = Get-VpsAppDefaults -ProjectRoot $ProjectRoot
+        $configuredRoot = if ($env:MXH_VPS_INSTANCE_ROOT) { $env:MXH_VPS_INSTANCE_ROOT } else { [string]$settings.instance_root }
+        $InstanceRoot = Resolve-VpsPortablePath -ProjectRoot $ProjectRoot -Path $configuredRoot
+    }
     if ($Mode -eq 'ValidateProject') {
         Test-VpsProject -ProjectRoot $ProjectRoot
         return
@@ -2557,18 +2675,29 @@ function Start-VpsDeploy {
                     '新部署',
                     '继续未完成部署',
                     '导入/纳管没有 deployment-plan 的现有 VPS',
-                    '现有 VPS 协议管理（安装/切换/停用/卸载/备份）',
-                    '现有 VPS 运维中心（恢复/审计/轮换/SSH/防火墙/升级/客户端/Komari/退役）',
-                    '现有 VPS 独立网络调优（RTT 可选）',
-                    'Clash/sing-box 客户端权威配置候选设计器',
-                    '项目离线自检'
-                ) 1 `
-                    -AllowBack -BackLabel '退出'
+                    '现有 VPS 协议管理',
+                    '现有 VPS 运维中心',
+                    '现有 VPS 独立网络调优',
+                    'Clash/sing-box 客户端权威配置设计器',
+                    '项目离线自检',
+                    '退出'
+                ) 1 -HelpText @'
+1 新部署：为新 VPS 建立归档、SSH、防火墙和所选协议，会修改服务器。
+2 继续未完成部署：读取已有 deployment-plan.json，从未完成模块继续。
+3 导入/纳管：保留现有服务，建立可维护计划和基线。
+4 协议管理：进入安装、共存、切换、停用、卸载和备份子菜单。
+5 运维中心：进入恢复、审计、轮换、SSH、防火墙、升级、客户端、Komari 和退役子菜单。
+6 独立网络调优：可单独为已有 VPS 应用保守参数，标称带宽必填，RTT 可选。
+7 客户端配置设计器：使用通用模板、受管片段、手动节点或可选现有配置生成并验证配置。
+8 项目离线自检：不连接 VPS，仅检查本地代码、模板和依赖。
+9 退出：结束脚本，不修改任何内容。
+'@
             }
             catch {
                 if (Test-VpsWizardBackError $_) { return }
                 throw
             }
+            if ($choice -eq 9) { return }
             $selectedMode = @('New', 'Resume', 'Import', 'Migrate', 'Maintain', 'TuneNetwork', 'ClientConfig', 'ValidateProject')[$choice - 1]
             if ($selectedMode -eq 'ValidateProject') {
                 Test-VpsProject -ProjectRoot $ProjectRoot
@@ -2577,7 +2706,9 @@ function Start-VpsDeploy {
             }
             try {
                 Invoke-VpsDeploymentSession -ProjectRoot $ProjectRoot -Mode $selectedMode -PlanPath $PlanPath `
-                    -OnlyModule $OnlyModule -InstanceRoot $InstanceRoot -DryRun:$DryRun -NonInteractive:$NonInteractive
+                    -OnlyModule $OnlyModule -InstanceRoot $InstanceRoot -ClashAuthorityPath $ClashAuthorityPath `
+                    -SingBoxAuthorityPath $SingBoxAuthorityPath -ClientOutputRoot $ClientOutputRoot `
+                    -DryRun:$DryRun -NonInteractive:$NonInteractive
                 return
             }
             catch {
@@ -2591,7 +2722,9 @@ function Start-VpsDeploy {
 
     try {
         Invoke-VpsDeploymentSession -ProjectRoot $ProjectRoot -Mode $Mode -PlanPath $PlanPath `
-            -OnlyModule $OnlyModule -InstanceRoot $InstanceRoot -DryRun:$DryRun -NonInteractive:$NonInteractive
+            -OnlyModule $OnlyModule -InstanceRoot $InstanceRoot -ClashAuthorityPath $ClashAuthorityPath `
+            -SingBoxAuthorityPath $SingBoxAuthorityPath -ClientOutputRoot $ClientOutputRoot `
+            -DryRun:$DryRun -NonInteractive:$NonInteractive
     }
     catch {
         if (-not (Test-VpsNavigationError $_)) { throw }

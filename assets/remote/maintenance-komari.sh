@@ -66,14 +66,24 @@ case "$VPS_PARAM_ACTION" in
     binary=''; for candidate in /opt/komari/komari /var/lib/komari/komari /usr/local/bin/komari /usr/bin/komari; do [[ -x "$candidate" ]] && binary="$candidate" && break; done
     [[ -n "$binary" ]]; systemctl cat komari.service >/dev/null
     was_active=false; was_enabled=false; systemctl is-active --quiet komari.service && was_active=true; systemctl is-enabled --quiet komari.service 2>/dev/null && was_enabled=true
-    tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+    tmp="$(mktemp)"; previous="$(mktemp)"; cp -a "$binary" "$previous"
+    rollback_upgrade(){ set +e; systemctl stop komari.service >/dev/null 2>&1 || true; install -o root -g root -m 0755 "$previous" "$binary"; [[ "$was_active" == false ]] || systemctl start komari.service; [[ "$was_enabled" == false ]] && systemctl disable komari.service >/dev/null 2>&1 || true; }
+    on_upgrade_exit(){ local rc=$?; trap - EXIT; if ((rc != 0)); then rollback_upgrade; fi; rm -f "$tmp" "$previous"; exit "$rc"; }
+    trap on_upgrade_exit EXIT
     curl --fail --location --silent --show-error --retry 3 --output "$tmp" "https://github.com/komari-monitor/komari/releases/download/${VPS_PARAM_VERSION}/${VPS_PARAM_ASSET_NAME}"
     printf '%s  %s\n' "$VPS_PARAM_SHA256" "$tmp" | sha256sum --check --status
     systemctl stop komari.service >/dev/null 2>&1 || true
     install -o root -g root -m 0755 "$tmp" "$binary"
     version_output="$("$binary" --version 2>&1 || true)"; grep -Fq "Komari Monitor ${VPS_PARAM_VERSION}" <<<"$version_output"
-    if [[ "$was_active" == true ]]; then systemctl start komari.service; systemctl is-active --quiet komari.service; fi
+    if [[ "$was_active" == true ]]; then
+      systemctl start komari.service; systemctl is-active --quiet komari.service
+      for _ in {1..30}; do ss -H -lnt 'sport = :25774' 2>/dev/null | grep -Fq '127.0.0.1:25774' && break; sleep 1; done
+      ss -H -lnt 'sport = :25774' | grep -Fq '127.0.0.1:25774'
+      code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 http://127.0.0.1:25774/)"
+      [[ "$code" =~ ^(200|302|303|307|308|401|403)$ ]]
+    fi
     if [[ "$was_enabled" == false ]]; then systemctl disable komari.service >/dev/null 2>&1 || true; fi
+    trap - EXIT; rm -f "$tmp" "$previous"
     ;;
   TunnelRotate)
     : "${VPS_PARAM_TUNNEL_TOKEN:?}"

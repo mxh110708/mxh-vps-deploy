@@ -82,7 +82,7 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 - SSH 维护单独使用 `mxh-ssh-maintenance-rollback.timer`，因为错误端口或公钥不能依赖普通协议回滚连接；
 - 客户端候选由 `scripts/merge_client_authority.py` 使用 ruamel.yaml round-trip 处理 Clash、标准 JSON 处理 sing-box，只写实例 `client-candidates`/`decommission-client-candidate`。
 
-独立客户端设计器位于 `src/VpsDeploy.ClientConfig.ps1`，结构默认值位于 `config/client-layout.default.json`，个人默认写入被 Git 忽略的 `config/client-layout.local.json`。`scripts/build_client_authority.py` 同时读取已纳管私有片段与手动节点，重写所选 selector 的成员/顺序/default，自动统一 Shadowsocks 的 `dialer-proxy`/`detour`，并拒绝未知引用和 selector 环。它只生成完整候选，不写权威文件或 AppData。
+独立客户端设计器位于 `src/VpsDeploy.ClientConfig.ps1`。`templates/client/` 是无个人路径、节点和凭据的完整基础配置；`config/client-layout.default.json` 是通用布局，个人默认写入被 Git 忽略的 `config/client-layout.local.json`。`scripts/build_client_authority.py` 同时读取已纳管私有片段、手动节点和可选现有配置，重写 selector 成员/顺序/default，统一 Shadowsocks 的 `dialer-proxy`/`detour`，并拒绝未知引用和 selector 环。发布层可生成新文件，或在双客户端校验后备份并原子覆盖用户明确选择的独立权威文件；AppData 永远拒绝。
 
 运维远端脚本统一使用 `maintenance-*.sh`。健康审计不得输出配置正文；备份/恢复路径必须解析后严格位于 `/root/vps-deploy-backups`；退役脚本永远不删除 SSH 或操作系统。
 

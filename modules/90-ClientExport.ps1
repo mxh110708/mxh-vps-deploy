@@ -62,15 +62,12 @@
 - mihomo-test-backup.yaml：$(if ($hasBackup) { '救援端口真实握手/出口测试' } else { '此导入实例没有第二个 Reality 入口，因此未生成' })
 - sing-box-outbounds.private.json：仅为 outbounds 片段，不是完整 profile
 
-不要直接修改 Clash Verge AppData。需要加入主配置时，只审计并修改 F:\VPS\Clash YAML 下的权威文件；sing-box 同理维护 F:\VPS\Sing-box Config。
+不要直接修改 Clash Verge AppData。需要加入主配置时，请使用客户端权威配置设计器生成、校验并写入你明确选择的独立权威文件。
 "@
         [IO.File]::WriteAllText($notePath, $note, [Text.UTF8Encoding]::new($false))
         Protect-VpsPrivateFile $notePath
 
-        $cores = @(@(
-                'D:\Program Files\Clash Verge\verge-mihomo.exe',
-                'D:\Program Files\Clash Verge\verge-mihomo-alpha.exe'
-            ) | Where-Object { Test-Path -LiteralPath $_ })
+        $cores = @(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot)
         $testData = Join-Path $exportDir 'syntax-test-data'
         [IO.Directory]::CreateDirectory($testData) | Out-Null
         foreach ($core in $cores) {

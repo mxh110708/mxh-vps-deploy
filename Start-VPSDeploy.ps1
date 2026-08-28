@@ -7,7 +7,13 @@ param(
 
     [string[]]$OnlyModule,
 
-    [string]$InstanceRoot = 'F:\VPS\VPS-Instances',
+    [string]$InstanceRoot,
+
+    [string]$ClashAuthorityPath,
+
+    [string]$SingBoxAuthorityPath,
+
+    [string]$ClientOutputRoot,
 
     [switch]$DryRun,
 
@@ -27,5 +33,8 @@ Start-VpsDeploy `
     -PlanPath $PlanPath `
     -OnlyModule $OnlyModule `
     -InstanceRoot $InstanceRoot `
+    -ClashAuthorityPath $ClashAuthorityPath `
+    -SingBoxAuthorityPath $SingBoxAuthorityPath `
+    -ClientOutputRoot $ClientOutputRoot `
     -DryRun:$DryRun `
     -NonInteractive:$NonInteractive

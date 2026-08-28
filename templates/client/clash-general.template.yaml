@@ -1,0 +1,128 @@
+mixed-port: 7890
+allow-lan: false
+bind-address: 127.0.0.1
+mode: rule
+log-level: info
+ipv6: true
+find-process-mode: strict
+profile:
+  store-selected: true
+  store-fake-ip: true
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  respect-rules: true
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://1.1.1.1/dns-query
+    - https://8.8.8.8/dns-query
+  proxy-server-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+proxies: []
+proxy-groups:
+  - name: US-West Entry
+    type: select
+    proxies: [DIRECT]
+  - name: Hong Kong Entry
+    type: select
+    proxies: [DIRECT]
+  - name: Europe Entry
+    type: select
+    proxies: [DIRECT]
+  - name: Default Exit
+    type: select
+    proxies: [DIRECT]
+  - name: Direct Route
+    type: select
+    proxies: [DIRECT]
+  - name: AI Services
+    type: select
+    proxies: [Default Exit, DIRECT]
+  - name: Developer Tools
+    type: select
+    proxies: [Default Exit, DIRECT]
+  - name: Academic Research
+    type: select
+    proxies: [Default Exit, DIRECT]
+  - name: Microsoft Services
+    type: select
+    proxies: [Direct Route, Default Exit]
+  - name: Microsoft Global
+    type: select
+    proxies: [Default Exit, DIRECT]
+  - name: Apple Services
+    type: select
+    proxies: [Direct Route, Default Exit]
+  - name: Game Platforms
+    type: select
+    proxies: [Default Exit, DIRECT]
+  - name: Game Downloads
+    type: select
+    proxies: [Direct Route, Default Exit]
+  - name: Social & Messaging
+    type: select
+    proxies: [Default Exit, DIRECT]
+  - name: Streaming Media
+    type: select
+    proxies: [Default Exit, DIRECT]
+  - name: UDP Guard
+    type: select
+    proxies: [Default Exit, DIRECT, REJECT]
+  - name: Catch-All
+    type: select
+    proxies: [Default Exit, DIRECT]
+  - name: WebRTC Guard
+    type: select
+    proxies: [REJECT, Default Exit, DIRECT]
+  - name: QUIC Guard
+    type: select
+    proxies: [REJECT, Default Exit, DIRECT]
+  - name: Ad Block
+    type: select
+    proxies: [REJECT, DIRECT, Default Exit]
+  - name: Legacy Ports
+    type: select
+    proxies: [REJECT, DIRECT, Default Exit]
+rules:
+  - DST-PORT,25,Legacy Ports
+  - DST-PORT,3306,Legacy Ports
+  - AND,((NETWORK,UDP),(DST-PORT,443)),QUIC Guard
+  - AND,((NETWORK,UDP),(DST-PORT,3478-3481)),WebRTC Guard
+  - DOMAIN-SUFFIX,openai.com,AI Services
+  - DOMAIN-SUFFIX,chatgpt.com,AI Services
+  - DOMAIN-SUFFIX,anthropic.com,AI Services
+  - DOMAIN-SUFFIX,claude.ai,AI Services
+  - DOMAIN-SUFFIX,perplexity.ai,AI Services
+  - DOMAIN-SUFFIX,github.com,Developer Tools
+  - DOMAIN-SUFFIX,githubusercontent.com,Developer Tools
+  - DOMAIN-SUFFIX,npmjs.org,Developer Tools
+  - DOMAIN-SUFFIX,pypi.org,Developer Tools
+  - DOMAIN-SUFFIX,docker.com,Developer Tools
+  - DOMAIN-SUFFIX,docker.io,Developer Tools
+  - DOMAIN-SUFFIX,arxiv.org,Academic Research
+  - DOMAIN-SUFFIX,ieee.org,Academic Research
+  - DOMAIN-SUFFIX,springer.com,Academic Research
+  - DOMAIN-SUFFIX,nature.com,Academic Research
+  - DOMAIN-SUFFIX,microsoft.com,Microsoft Services
+  - DOMAIN-SUFFIX,office.com,Microsoft Services
+  - DOMAIN-SUFFIX,live.com,Microsoft Services
+  - DOMAIN-SUFFIX,apple.com,Apple Services
+  - DOMAIN-SUFFIX,icloud.com,Apple Services
+  - DOMAIN-SUFFIX,xbox.com,Game Platforms
+  - DOMAIN-SUFFIX,xboxlive.com,Game Platforms
+  - DOMAIN-SUFFIX,steampowered.com,Game Platforms
+  - DOMAIN-SUFFIX,steamcommunity.com,Game Platforms
+  - DOMAIN-SUFFIX,steamcontent.com,Game Downloads
+  - DOMAIN-SUFFIX,telegram.org,Social & Messaging
+  - DOMAIN-SUFFIX,t.me,Social & Messaging
+  - DOMAIN-SUFFIX,twitter.com,Social & Messaging
+  - DOMAIN-SUFFIX,x.com,Social & Messaging
+  - DOMAIN-SUFFIX,youtube.com,Streaming Media
+  - DOMAIN-SUFFIX,netflix.com,Streaming Media
+  - DOMAIN-SUFFIX,spotify.com,Streaming Media
+  - MATCH,Catch-All

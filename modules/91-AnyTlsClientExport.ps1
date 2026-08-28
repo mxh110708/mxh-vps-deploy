@@ -40,10 +40,7 @@ AnyTLS 与 Xray Reality 共用 TCP 443 时必须互斥，不能同时启动。
         [IO.File]::WriteAllText($notePath, $note, [Text.UTF8Encoding]::new($false))
         Protect-VpsPrivateFile $notePath
 
-        $cores = @(@(
-                'D:\Program Files\Clash Verge\verge-mihomo.exe',
-                'D:\Program Files\Clash Verge\verge-mihomo-alpha.exe'
-            ) | Where-Object { Test-Path -LiteralPath $_ })
+        $cores = @(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot)
         $testData = Join-Path $exportDir 'anytls-syntax-test-data'
         [IO.Directory]::CreateDirectory($testData) | Out-Null
         foreach ($core in $cores) {

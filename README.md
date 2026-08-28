@@ -39,7 +39,7 @@
 
 要求：Windows 10/11、PowerShell 7、Windows OpenSSH Client；目标机是带 systemd/apt 的 Debian 12/13 或 Ubuntu 22.04/24.04，初始可用 root SSH 登录。
 
-只有使用“客户端权威配置候选设计器”时还需要 Python 3 和 round-trip YAML 依赖。首次使用缺失时，向导会询问是否安装固定依赖；也可提前手动安装：
+只有使用“客户端权威配置设计器”时还需要 Python 3 和 round-trip YAML 依赖。首次使用缺失时，向导会询问是否安装固定依赖；也可提前手动安装：
 
 ```powershell
 python -m pip install -r .\requirements-client-merge.txt
@@ -56,11 +56,11 @@ pwsh -File .\Start-VPSDeploy.ps1
 - 密码：工具不读取或保存密码，由 `ssh.exe` 自己显示密码提示；
 - 现有私钥：默认复用同一把 OpenSSH 私钥，复制到实例 `MXH-VPS-Deploy\ssh` 下并改为规范文件名；原文件不改名、不删除，服务器公钥不轮换。也可明确选择生成新的 Ed25519 管理密钥，旧密钥仍保留作引导/救援。
 
-新部署第一项会显示 VPS 私有归档根目录，默认是 `F:\VPS\VPS-Instances`。它只是 `-InstanceRoot` 提供的可编辑默认值，不会在显示提示时创建；可以直接输入另一个完整绝对路径。实例目录仍是 `<根目录>\<服务商>\<实例>`，本工具创建的计划、密钥、日志、快照和候选统一进入其下的 `MXH-VPS-Deploy` 子目录。旧版直接放在实例根目录的计划仍可继续使用。
+新部署第一项会显示 VPS 私有归档根目录。未传 `-InstanceRoot` 时，程序按“命令行参数 → `MXH_VPS_INSTANCE_ROOT` → `config/app-defaults.local.json` → 项目通用相对默认值”解析；发布包放在某个资料目录下时，通用默认会自然落到其同级 `VPS-Instances`，不绑定盘符或用户名。实例目录仍是 `<根目录>\<服务商>\<实例>`，本工具创建的计划、密钥、日志、快照和候选统一进入其下的 `MXH-VPS-Deploy` 子目录。旧版直接放在实例根目录的计划仍可继续使用。
 
-填写中发现上一项有误时，普通输入或是/否提示整项只输入 `b`，编号菜单输入 `0` 或 `b`。只有去除首尾空格后恰好等于 `b` 才是返回命令，`BreadCloud` 等以 b 开头的正常名称不受影响。在新部署第一项返回会回到主菜单；继续部署的路径输入和计划摘要也有完整返回链路。最后的部署摘要可返回修改或无写入取消，只有选择“确认方案并继续”后才会创建部署计划。
+填写中发现上一项有误时，普通输入或是/否提示整项输入 `b`/`back`，编号菜单输入 `0`/`b`/`back`。`BreadCloud` 等以 b 开头的名称不受影响；如果合法字段值本身恰好就是单个 `b`，请输入 `\b`。在新部署第一项返回会回到主菜单；继续部署的路径输入和计划摘要也有完整返回链路。最后的部署摘要可返回修改或无写入取消，只有选择“确认方案并继续”后才会创建部署计划。
 
-输出过长时，在普通文本、是/否或编号菜单中整项输入 `clear` 或 `cls` 即可清屏并重新显示当前提示；命令采用精确匹配，`Clearwater` 等正常值不会被截获。
+输出过长时，在普通文本、是/否或编号菜单中整项输入 `clear` 或 `cls` 即可清屏并重新显示当前提示；输入 `help` 或 `h` 查看当前菜单的用途、写入范围和风险。命令采用精确匹配，`Clearwater`、`Hetzner` 等正常值不会被截获。
 
 部署开始前，请先在服务商安全组临时放行向导生成的两个 SSH 高位端口。Reality 角色还需要 TCP 443 和 Xray 救援端口，AnyTLS 角色只额外需要 TCP 443；Shadowsocks 落地端口必须按可信入口地址同时限制 TCP/UDP。
 
@@ -68,8 +68,8 @@ pwsh -File .\Start-VPSDeploy.ps1
 
 - 源码目录和 Git 仓库内不保存任何实例信息或秘密。
 - 每台实例的计划、状态、日志、SSH 私钥、UUID、Reality 密钥、short-id、AnyTLS 密码、TLS 私钥、ECH 服务端密钥、Komari 配置和客户端片段只写入向导选择的：
-  `<VPS 私有归档根目录>\<服务商>\<实例名>\MXH-VPS-Deploy`（默认根目录为 `F:\VPS\VPS-Instances`）。
-- 工具不修改 Clash Verge AppData，也不覆盖 `Clash_General.yaml` 或 `sing-box-general.json`；独立设计器只读取权威文件，在单独候选目录生成完整替换候选。
+  `<VPS 私有归档根目录>\<服务商>\<实例名>\MXH-VPS-Deploy`。
+- 工具绝不修改 Clash Verge AppData。客户端设计器默认使用项目通用模板并生成新文件；只有用户显式选择“覆盖权威配置”、指定两份独立文件并再次确认后，才会在双核心/JSON/体积检查通过后建立时间戳备份并原子替换。
 - Komari Token 通过隐藏输入取得，只经 SSH 标准输入传送，不写入命令行和普通日志。
 - Cloudflare API Token 从实例私有文件读取，只经 SSH 标准输入传送，并在服务器保存为 root-only 的 Certbot 凭据；Token 值不进入部署计划、普通日志或 Git。
 - Windows 私有文件 ACL 默认按“尽力收紧”处理：失败会明确警告但不让个人电脑上的整个流程报废；需要把 ACL 失败视为硬错误时，可先设置 `MXH_VPS_STRICT_LOCAL_ACL=1`。
@@ -84,7 +84,7 @@ pwsh -File .\Start-VPSDeploy.ps1
 pwsh -File .\scripts\Check-UpstreamVersions.ps1
 ```
 
-sing-box/Komari 等固定资产升级必须先阅读变更、更新 `config/versions.json` 的版本与下载校验，再跑配置测试和真实握手。Xray 是例外：安装器脚本本身固定到校验过的提交，用户可选择当前固定验证版，或从 XTLS/Xray-core 官方 `releases/latest` 解析一个非草稿、非预发行的精确版本；两种模式都不会使用模糊的 `latest` 写进计划。
+sing-box/Komari 等固定资产升级必须先阅读变更、更新 `config/versions.json` 的版本与下载校验，再跑配置测试和真实握手。当前 Komari Controller 固定到官方最新正式版 1.4.3，Agent 仍为 1.2.60；Controller 升级会先下载完整备份并保留主题、数据库和启停状态。Xray 安装器脚本固定到校验过的提交，用户可选择当前固定验证版，或从 XTLS/Xray-core 官方 `releases/latest` 解析一个非草稿、非预发行的精确版本；两种模式都不会使用模糊的 `latest` 写进计划。
 
 ## 保守自适应网络调优
 
@@ -122,7 +122,7 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode Maintain `
 pwsh -File .\Start-VPSDeploy.ps1 -Mode TuneNetwork `
   -PlanPath 'F:\VPS\VPS-Instances\服务商\实例\MXH-VPS-Deploy\deployment-plan.json'
 
-# 独立设计 Clash/sing-box 完整候选，不连接 VPS、不覆盖权威文件
+# 独立设计 Clash/sing-box 完整配置；可生成新文件或校验后备份并覆盖指定权威文件
 pwsh -File .\Start-VPSDeploy.ps1 -Mode ClientConfig
 
 # 只做项目离线自检
@@ -146,7 +146,7 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New -DryRun
 
 没有计划的现有 VPS 先使用 `-Mode Import`。导入器只支持标准路径和可解析的 VLESS+Reality、AnyTLS、Shadowsocks 配置；已有 OpenSSH 私钥默认直接复用，服务器公钥不轮换。SSH 认证策略默认保持现状，也可在公钥复验后选择 key-only。导入不改代理端口、不重装协议、不覆盖现有防火墙。导入计划使用 `PreserveExisting`，因此可以在既有 Reality 的同一 TCP 443 上补装 AnyTLS 备用；新增 Shadowsocks 高位端口仍必须单独审计现有防火墙。
 
-客户端配置设计器使用 `config/client-layout.default.json` 作为无凭据结构模板；本机个性化默认值保存到被 Git 忽略的 `config/client-layout.local.json`。设计器会扫描新旧两种归档布局中的已纳管计划，也允许手动隐藏输入未纳管的 VLESS Reality、AnyTLS 或 Shadowsocks 节点。它会校验 selector 引用和循环、同步 `dialer-proxy`/`detour`、执行可用的 Mihomo 双核心测试并严格解析 sing-box JSON，但始终只写候选。
+客户端配置设计器默认读取 `templates/client/` 中不含个人节点、域名、盘符和凭据的完整 Clash/sing-box 骨架；现有权威配置只是可选只读基础来源。布局通用默认位于 `config/client-layout.default.json`，本机个性化覆盖保存到被 Git 忽略的 `config/client-layout.local.json`，可从子菜单查看、修订或恢复。设计器会扫描新旧归档布局中的已纳管计划，也允许隐藏输入未纳管节点；它校验 selector 引用和循环、同步 `dialer-proxy`/`detour`、执行 Mihomo 双核心与 sing-box 结构/体积检查。输出可选“生成新配置”或“验证后备份并原子覆盖指定权威配置”，两种模式都拒绝 Clash Verge AppData。
 
 ## Reality target 与 AnyTLS 的选择
 
@@ -178,7 +178,7 @@ Certbot 安装在实际持有证书的每台 VPS 上。脚本会申请 ECDSA P-2
 - 健康审计只读取服务、监听、有效 SSH、证书、版本和配置 SHA-256，不回传配置正文。严重状态异常不能靠“更新基线”掩盖。
 - 凭据轮换先生成候选并做真实协议测试。Reality 为事务化原子切换；AnyTLS 默认轮换用户密码并保留 ECH/证书；Shadowsocks 默认轮换用户密钥并保留服务器主密钥。
 - `PreserveExisting` 防火墙默认只能审计；接管为最小 nftables 必须输入确认短语。未知 Docker、面板和第三方规则不会被静默覆盖。
-- 客户端合并与退役删除只生成候选，候选通过 Mihomo 双核心和严格 JSON 检查后仍由用户替换权威文件。
+- 运维中心的客户端合并与退役删除默认只生成候选；独立客户端设计器另可在双核心/严格 JSON 校验后，备份并成对原子覆盖用户明确指定的权威文件。两条路径都拒绝 Clash Verge AppData。
 - 退役分为预检、可恢复停用、删除受管文件、清除远端恢复点及包含 Controller/Connector 的整机受管组件退役；最后两类需要二次确认，并始终保留 SSH 与基础系统。
 
 ## 当前明确不自动处理的内容

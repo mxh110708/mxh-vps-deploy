@@ -213,7 +213,7 @@ function Invoke-MxhCredentialRotation {
         $modulePath=if($role -eq 'RealityEntry'){'modules\90-ClientExport.ps1'}elseif($role -eq 'AnyTlsEntry'){'modules\91-AnyTlsClientExport.ps1'}else{'modules\92-LandingClientExport.ps1'}
         $module=&(Join-Path $Context.ProjectRoot $modulePath); & $module.Invoke $candidate
         if($role -eq 'RealityEntry'){
-            $core='D:\Program Files\Clash Verge\verge-mihomo.exe'; if(-not(Test-Path $core)){throw '找不到 Mihomo 稳定核心，不能完成 Reality 真实握手。'}
+            $core=@(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot|Where-Object{(Split-Path -Leaf $_)-eq'verge-mihomo.exe'}|Select-Object -First 1);if(-not$core.Count){throw '找不到 Mihomo 稳定核心，不能完成 Reality 真实握手。'};$core=$core[0]
             Invoke-MxhMihomoEgressTest $candidate $core $candidate.State.ClientExports.PrimaryProfile ([int]$candidate.State.ClientExports.PrimaryMixedPort) 'credential-candidate'|Out-Null
         } elseif($role -eq 'AnyTlsEntry'){
             $r=Invoke-VpsRemoteScript $Context 'anytls-self-test.sh' @{PASSWORD=$candidateSecrets.AnyTls.Password;PORT=[string]$Context.Plan.Ports.AnyTlsPrimary;SERVER=[string]$Context.Plan.Server.IPv4;SERVER_NAME=[string]$Context.Plan.AnyTls.ServerName;ECH_CONFIG_PEM=[string]$candidateSecrets.AnyTls.EchClientConfigPem} -TimeoutSeconds 300 -SensitiveOutput
@@ -349,8 +349,11 @@ function Invoke-MxhControlledUpgrade {
             if($r.StdOut -notmatch 'VPSDEPLOY_KOMARI_LIFECYCLE_OK'){throw 'Komari Agent 升级未确认。'}
         }else{
             $asset=$Context.Versions.komari_controller.assets.$arch
+            $backupResult=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerBackup'} -TimeoutSeconds 600;$remoteBackup=Get-VpsMarkerValue $backupResult.StdOut KOMARI_BACKUP -Required
+            $backupDirectory=Join-Path $Context.ArchivePath 'komari-backups';[IO.Directory]::CreateDirectory($backupDirectory)|Out-Null;$localBackup=Join-Path $backupDirectory (Split-Path -Leaf $remoteBackup);Invoke-VpsScpDownload $Context $remoteBackup $localBackup
             $r=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerUpgrade';VERSION=[string]$Context.Versions.komari_controller.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200
             if($r.StdOut -notmatch 'VPSDEPLOY_KOMARI_LIFECYCLE_OK'){throw 'Komari Controller 升级未确认。'}
+            Write-VpsUi "Controller 升级前完整备份已下载：$localBackup" Success
         }
         if($role -notin @('KomariAgent','KomariController')){
             $stateResult=Invoke-VpsRemoteScript $Context 'protocol-lifecycle-apply-state.sh' @{
@@ -368,34 +371,20 @@ function Invoke-MxhControlledUpgrade {
 
 function Invoke-MxhClientCandidateMerge {
     param($Context)
-    $layout=(Get-MxhClientLayoutTemplate -ProjectRoot $Context.ProjectRoot).Value
-    $inventory=Get-MxhProtocolInventory -Plan $Context.Plan -State $Context.State
-    $roles=@(Get-MxhManagedProtocolRoles|Where-Object{[bool]$inventory[$_].Installed})
-    $selected=@()
-    foreach($role in $roles){if(Read-VpsYesNo "候选中包含 $(Get-MxhProtocolRoleLabel $role)？" ([bool]$inventory[$role].Enabled) -AllowBack){$selected+=$role}}
-    if(-not $selected.Count){throw '至少选择一种已安装协议。'}
-    $entry=$null
-    if(@($selected|Where-Object{$_ -ne 'ShadowsocksLanding'}).Count){$entry=@($layout.region_groups)[(Read-VpsMenu '入口节点加入哪个地区入口组' @($layout.region_groups) 1 -AllowBack)-1]}
-    $clash=Read-VpsText 'Clash 权威 YAML' -Default ([string]$layout.authority_defaults.clash) -AllowBack -Validate{param($v)Test-Path $v.Trim('"')}
-    $sing=Read-VpsText 'sing-box 权威 JSON' -Default ([string]$layout.authority_defaults.sing_box) -AllowBack -Validate{param($v)Test-Path $v.Trim('"')}
-    $out=Join-Path $Context.ArchivePath ('client-candidates\'+(Get-Date -Format yyyyMMdd-HHmmss))
-    if($Context.DryRun){Write-VpsUi "DryRun：将生成候选到 $out，不修改权威文件或 AppData。" Success;return}
-    [IO.Directory]::CreateDirectory($out)|Out-Null
-    $python=Get-VpsCommandPath 'python.exe';$script=Join-Path $Context.ProjectRoot 'scripts\merge_client_authority.py'
-    $args=@($script,'--clash',$clash.Trim('"'),'--sing-box',$sing.Trim('"'),'--fragments',(Join-Path $Context.ArchivePath 'client-exports'),'--output',$out,'--roles',($selected-join','));if($entry){$args+=@('--entry-group',$entry)}
-    $r=Invoke-VpsProcess $python $args -TimeoutSeconds 300;if($r.ExitCode -ne 0){throw '客户端候选合并失败。'}
-    $candidate=Join-Path $out 'Clash_General.candidate.yaml';$data=Join-Path $out 'mihomo-test-data';[IO.Directory]::CreateDirectory($data)|Out-Null
-    foreach($core in @('D:\Program Files\Clash Verge\verge-mihomo.exe','D:\Program Files\Clash Verge\verge-mihomo-alpha.exe')){if(Test-Path $core){$t=Invoke-VpsProcess $core @('-t','-d',$data,'-f',$candidate) -TimeoutSeconds 180;if($t.ExitCode -ne 0){throw "候选未通过 $(Split-Path -Leaf $core)。"}}}
-    $singCandidate=Join-Path $out 'sing-box-general.candidate.json';Get-Content -Raw $singCandidate|ConvertFrom-Json|Out-Null
-    if((Get-Item $singCandidate).Length-ge 4MB){throw 'sing-box 候选超过 4 MiB 桌面端安全上限。'}
-    Protect-VpsPrivateFile $candidate;Protect-VpsPrivateFile (Join-Path $out 'sing-box-general.candidate.json')
-    Write-VpsUi "候选已生成并通过可用核心语法检查：$out" Success
-    Write-VpsUi '权威文件和 Clash Verge AppData 均未修改。' Warning
+    $instanceDirectory=[string]$Context.Plan.Paths.InstanceDirectory
+    $providerDirectory=Split-Path -Parent $instanceDirectory
+    $instanceRoot=Split-Path -Parent $providerDirectory
+    Write-VpsUi "将打开独立客户端配置设计器；当前实例可从受管计划列表提取：$($Context.Plan.NodeName)" Info
+    Invoke-MxhClientAuthorityDesigner -ProjectRoot $Context.ProjectRoot -InstanceRoot $instanceRoot -DryRun:$Context.DryRun
 }
 
 function Invoke-MxhKomariLifecycle {
     param($Context)
-    $choice=Read-VpsMenu 'Komari 完整生命周期' @('状态审计','安装/修复/轮换 Agent Token','按固定版本升级 Agent（保留 Token）','卸载 Agent','备份 Controller 数据/二进制/服务','从本地备份恢复 Controller','轮换 Cloudflare Tunnel Token','按固定版本升级 Controller（保留数据与启停状态）','卸载 Controller 与 Connector') 1 -AllowBack
+    $choice=Read-VpsMenu 'Komari 完整生命周期' @('状态审计','安装/修复/轮换 Agent Token','按固定版本升级 Agent（保留 Token）','卸载 Agent','备份 Controller 数据/二进制/服务','从本地备份恢复 Controller','轮换 Cloudflare Tunnel Token','按固定版本升级 Controller（自动备份并保留数据、主题和启停状态）','卸载 Controller 与 Connector') 1 -AllowBack -HelpText @'
+状态审计只读；安装、轮换、升级和卸载会修改当前 VPS。
+Controller 升级会先下载一份完整本地备份，再进入事务；失败会恢复旧二进制和事务快照。
+脚本验证版本、回环监听、HTTP、服务状态与 Tunnel 服务；登录、TOTP 和主题视觉效果仍需用户在浏览器最终确认。
+'@
     if($Context.DryRun){Write-VpsUi 'DryRun：只显示 Komari 生命周期动作，不读取 Token、不连接服务器。' Success;return}
     $endpoint=$null
     if($choice -eq 2){
@@ -426,7 +415,11 @@ function Invoke-MxhKomariLifecycle {
             try{Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='TunnelRotate';TUNNEL_TOKEN=$token} -TimeoutSeconds 300 -SensitiveOutput|Out-Null}finally{$token=$null;$secure.Dispose()}
         }elseif($choice -eq 8){
             $arch=if([string]$Context.State.Audit.Architecture -in @('x86_64','amd64')){'amd64'}else{'arm64'};$asset=$Context.Versions.komari_controller.assets.$arch
+            $backupResult=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerBackup'} -TimeoutSeconds 600;$remoteBackup=Get-VpsMarkerValue $backupResult.StdOut KOMARI_BACKUP -Required
+            $backupDirectory=Join-Path $Context.ArchivePath 'komari-backups';[IO.Directory]::CreateDirectory($backupDirectory)|Out-Null;$localBackup=Join-Path $backupDirectory (Split-Path -Leaf $remoteBackup);Invoke-VpsScpDownload $Context $remoteBackup $localBackup
             Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerUpgrade';VERSION=[string]$Context.Versions.komari_controller.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200|Out-Null
+            $audit=Get-MxhHealthAudit $Context;if($audit.Status -eq 'Critical'){throw 'Komari Controller 升级后健康审计出现严重项。'}
+            Write-VpsUi "升级前完整备份已下载：$localBackup" Success
         }else{
             if((Read-VpsText '输入 REMOVE-KOMARI-CONTROLLER 确认' -AllowBack)-cne 'REMOVE-KOMARI-CONTROLLER'){throw '确认短语不匹配。'}
             Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerUninstall'} -TimeoutSeconds 300|Out-Null
@@ -453,7 +446,7 @@ function Invoke-MxhDecommission {
         $r=Invoke-VpsProcess $python @($script,'--clash',$clash,'--sing-box',$sing,'--fragments',(Join-Path $Context.ArchivePath 'client-exports'),'--output',$out,'--roles','','--remove-prefix',[string]$Context.Plan.NodeName) -TimeoutSeconds 300
         if($r.ExitCode -ne 0){throw '无法生成退役节点删除候选，已停止远端退役。'}
         $clashCandidate=Join-Path $out 'Clash_General.candidate.yaml';$testData=Join-Path $out 'mihomo-test-data';[IO.Directory]::CreateDirectory($testData)|Out-Null
-        foreach($core in @('D:\Program Files\Clash Verge\verge-mihomo.exe','D:\Program Files\Clash Verge\verge-mihomo-alpha.exe')){if(Test-Path $core){$test=Invoke-VpsProcess $core @('-t','-d',$testData,'-f',$clashCandidate) -TimeoutSeconds 180;if($test.ExitCode -ne 0){throw '退役删除候选未通过 Mihomo 双核心语法测试。'}}}
+        foreach($core in @(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot)){if(Test-Path $core){$test=Invoke-VpsProcess $core @('-t','-d',$testData,'-f',$clashCandidate) -TimeoutSeconds 180;if($test.ExitCode -ne 0){throw '退役删除候选未通过 Mihomo 双核心语法测试。'}}}
         $singCandidate=Join-Path $out 'sing-box-general.candidate.json';Get-Content -Raw $singCandidate|ConvertFrom-Json|Out-Null
         if((Get-Item $singCandidate).Length-ge 4MB){throw '退役 sing-box 候选超过 4 MiB 桌面端安全上限。'}
         Protect-VpsPrivateFile $clashCandidate;Protect-VpsPrivateFile (Join-Path $out 'sing-box-general.candidate.json')
@@ -489,7 +482,11 @@ function Invoke-MxhMaintenanceCenter {
         $source=Read-MxhProtocolMigrationSource -ProjectRoot $ProjectRoot -PlanPath $candidate -DryRun:$DryRun
         $context=Get-MxhMaintenanceContext $ProjectRoot $source -DryRun:$DryRun
         try{
-            $choice=Read-VpsMenu '现有 VPS 运维中心' @('手动恢复中心','只读健康审计与配置漂移检测','代理凭据轮换','SSH 独立维护','防火墙独立维护','可控版本升级','生成客户端权威配置合并候选','Komari 完整生命周期','完整退役','重新选择实例') 2 -AllowBack
+            $choice=Read-VpsMenu '现有 VPS 运维中心' @('手动恢复中心','只读健康审计与配置漂移检测','代理凭据轮换','SSH 独立维护','防火墙独立维护','可控版本升级','客户端权威配置设计器','Komari 完整生命周期','完整退役','重新选择实例') 2 -AllowBack -HelpText @'
+恢复、轮换、SSH、防火墙、升级、Komari 和退役会先建立事务/备份，再修改 VPS。
+健康审计与漂移检测只读。客户端配置设计器主要操作本地文件，不连接 VPS；只有选择覆盖权威配置时才会写入所选文件。
+完整退役是高风险操作，分级确认且保留 SSH；请先完成最终备份。
+'@
             switch($choice){
                 1{Invoke-MxhManualRestoreCenter $context}
                 2{Invoke-MxhHealthAuditInteractive $context}

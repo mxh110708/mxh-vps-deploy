@@ -51,7 +51,7 @@
 - 不修改 Cloudflare 网页中的 DNS 记录或 API Token；
 - 不在 Cloudflare 控制台自动创建/撤销 Tunnel；脚本可以备份/恢复本机 Komari Controller 数据和轮换已有 Connector Token，但最终跨主机切换仍需用户确认外部状态；
 - 不修改 Clash Verge AppData profile；
-- 不覆盖权威 `Clash_General.yaml`、`sing-box-general.json` 或 AppData；只生成完整候选供人工替换；
+- 不会静默覆盖权威配置，也绝不写 Clash Verge AppData；独立客户端设计器可由用户明确选择“生成新文件”，或在全部校验通过后“备份并成对原子覆盖”指定的两份权威文件；
 - 不适合直接覆盖已有 Docker、3x-ui/s-ui、复杂 nftables 或生产服务的主机；
 - 不在同一台机器上同时运行 Xray Reality 和 AnyTLS 占用 TCP 443。
 
@@ -405,11 +405,14 @@ F:\VPS\MXH-VPS-Deploy\Start-VPSDeploy.cmd
 1. 新部署
 2. 继续未完成部署
 3. 导入/纳管没有 deployment-plan 的现有 VPS
-4. 现有 VPS 协议管理（安装/切换/停用/卸载/备份）
-5. 现有 VPS 运维中心（恢复/审计/轮换/SSH/防火墙/升级/客户端/Komari/退役）
-6. 现有 VPS 独立网络调优（RTT 可选）
-7. 项目离线自检
-0. 退出
+4. 现有 VPS 协议管理
+5. 现有 VPS 运维中心
+6. 现有 VPS 独立网络调优
+7. Clash/sing-box 客户端权威配置设计器
+8. 项目离线自检
+9. 退出
+clear / cls. 清除当前屏幕输出
+help / h. 查看帮助说明
 ```
 
 第一次选择 `1`。
@@ -439,18 +442,19 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode Maintain `
 - 提示后有 `[默认值]` 时，直接按 Enter 接受默认值；
 - `Y/n` 表示默认“是”，直接 Enter 即可；
 - `y/N` 表示默认“否”，直接 Enter 即可；
-- 普通文本和是/否提示输入 `b`，返回上一个当前有效的输入项；
-- 编号菜单输入 `0` 或 `b`，返回上一个当前有效的输入项；
+- 普通文本和是/否提示输入 `b`/`back`，返回上一个当前有效的输入项；如果字段值本身就是单个 `b`，输入 `\b`；
+- 编号菜单输入 `0`/`b`/`back`，返回上一个当前有效的输入项；
 - 部署摘要选择“返回修改上一项”，或输入 `0`/`b`，可继续修改；
 - 只有整项输入去除首尾空格后恰好等于小写或大写 `b` 才是返回命令；`BreadCloud`、`BandwagonHost` 等以 b 开头的名称仍是正常值；
 - 所有普通文本、是/否和编号菜单中，整项输入 `clear` 或 `cls` 会清除当前屏幕并重新显示当前提示；只有精确匹配才触发，`Clearwater` 等名称不受影响；
+- 输入 `help` 或 `h` 显示当前菜单用途、是否连接服务器和主要风险；只有精确匹配才触发，`Hetzner` 等名称不受影响；
 - SSH 密码和 Komari Token 输入时屏幕不显示字符，这是正常行为。
 
 “当前有效”表示向导会自动跳过与角色无关的字段。例如选择 MonitorOnly 后，从 Komari 项返回会回到端口选择，而不会进入 Reality 或 AnyTLS 字段。回退并改变角色、初始认证方式、Reality target 模式、IPv6 或网络调优开关时，向导会清除新分支不应继承的旧值。
 
 层级导航规则：
 
-- 主菜单输入 `0` 或 `b`：退出脚本；
+- 主菜单选择 `9`：退出脚本；主菜单不再同时提供一个重复的 `0. 退出`；
 - 新部署的“VPS 私有归档根目录”输入 `b`：返回主菜单；
 - “服务商名称”输入 `b`：返回归档根目录，不会把 `b` 保存为名称；
 - “继续未完成部署”的计划路径输入 `b`：返回主菜单；
@@ -828,9 +832,9 @@ client-candidates\<时间>\sing-box-general.candidate.json
 client-candidates\<时间>\candidate-manifest.json
 ```
 
-Clash 候选运行 Mihomo 稳定/Alpha 双核心，sing-box 候选严格解析 JSON。源文件和 AppData 不修改。Shadowsocks 落地的 `dialer-proxy`/`detour` 必须在替换前确认入口组存在。
+Clash 候选运行 Mihomo 稳定/Alpha 双核心，sing-box 候选严格解析 JSON。本节运维流程默认不修改源文件；独立设计器另有经确认的备份覆盖模式。所有流程都不修改 AppData。Shadowsocks 落地的 `dialer-proxy`/`detour` 必须在替换前确认入口组存在。
 
-### 10.4 独立 Clash/sing-box 权威配置候选设计器
+### 10.4 独立 Clash/sing-box 权威配置设计器
 
 从主菜单选择“Clash/sing-box 客户端权威配置候选设计器”，或运行：
 
@@ -840,32 +844,32 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode ClientConfig
 
 它不连接 VPS，按以下顺序工作：
 
-1. 读取 `config/client-layout.local.json`；不存在时使用受版本控制的 `config/client-layout.default.json`；
-2. 选择默认地区入口组，也可新增、重命名或重排地区；
-3. 扫描 `-InstanceRoot` 下新旧两种布局的 `deployment-plan.json`，按实例、协议选择需要提取的私有客户端片段；
-4. 权威文件里已经存在但没有受管计划的节点可直接按名称复用，无需重新输入凭据；
-5. 对尚未存在于权威文件的未纳管 VPS，可手动添加 VLESS Reality、AnyTLS/ECH 或 Shadowsocks 节点；UUID、PublicKey、short-id、密码和 ECH 配置均为隐藏输入；
-6. 对每个地区入口组选择实际成员和排序，第一项是首次默认；
-7. 选择各个落地节点共用的地区入口，自动同步 Clash `dialer-proxy` 与 sing-box `detour`；
-8. 调整 `Default Exit` 以及每个业务组的完整顺序，第一项同样是首次默认；
-9. 可把本次地区列表和业务组默认项保存为被 Git 忽略的本机模板；
-10. 生成完整候选，拒绝未知 selector 引用、循环引用和无效 detour；运行可用的 Mihomo 双核心并严格解析 sing-box JSON；运行配置使用紧凑 JSON 并硬性拒绝达到 4 MiB 的候选。
+1. 进入子菜单：生成配置、查看/修改本机默认值、查看数据源、校验一对现有配置；
+2. 生成时默认使用 `templates/client/` 的通用完整骨架；也可明确选择一对现有配置作为只读基础，以保留其高级 DNS/TUN/规则；
+3. 路径默认值按“命令行参数 → 环境变量 → `client-layout.local.json` → 项目通用默认 → 交互输入”解析，不绑定个人盘符；
+4. 扫描 `-InstanceRoot` 下新旧布局的受管计划，也可隐藏输入未纳管 VLESS Reality、AnyTLS/ECH 或 Shadowsocks 节点；
+5. 只有选择现有配置为基础时，才会列出其中可复用的现有节点；
+6. 对每个地区入口组选择成员/顺序，对每个落地选择 transit/detour，再设置默认出口与业务组顺序；
+7. “修改默认值”子菜单可持久修订地区组、节点优先级、落地默认入口、业务组顺序/默认项和输出路径；个人文件被 Git 忽略，可恢复通用默认；
+8. 生成后拒绝未知 selector、循环和无效 detour；运行可用 Mihomo 双核心、严格 JSON 和 4 MiB 检查；
+9. 保存方式二选一：生成全新文件（目标存在即停止），或在全部校验成功后时间戳备份并原子覆盖用户指定的两份权威配置；
+10. 两种方式都拒绝写入 Clash Verge AppData/profile 副本。
 
-候选输出默认位于：
+通用输出根目录使用相对项目路径；实际位置会在界面显示。生成新配置的目录包含：
 
 ```text
-F:\VPS\Client-Authority-Candidates\<时间>\
-├─ Clash_General.candidate.yaml
-├─ sing-box-general.candidate.json
+<输出根目录>\generated-<时间>\
+├─ Clash_General.yaml
+├─ sing-box-general.json
 ├─ client-layout-spec.private.json
-└─ candidate-manifest.json
+└─ generation-manifest.json
 ```
 
-`client-layout-spec.private.json` 可能含完整节点凭据，只能留在本地私有目录。设计器不会直接写入两份权威文件，也不会修改 Clash Verge AppData。
+`client-layout-spec.private.json` 可能含完整节点凭据，只能留在本地私有目录。覆盖模式另在 `<输出根目录>\backups\<时间>` 保留原文件，并在第二份文件替换失败时恢复第一份；任何模式都不修改 Clash Verge AppData。
 
 #### 10.3.8 Komari 完整生命周期
 
-可审计服务，安装/修复 Agent、隐藏输入新 Token、保留原 Token 做固定版本升级、卸载 Agent；Controller 支持私有备份下载、从备份恢复并验证回环监听、按 `versions.json` 固定资产保数据/保启停状态升级、轮换已有 cloudflared Token，以及卸载本机 Controller/Connector。
+可审计服务，安装/修复 Agent、隐藏输入新 Token、保留原 Token 做固定版本升级、卸载 Agent；Controller 支持私有备份下载、从备份恢复并验证回环监听、按 `versions.json` 固定资产保数据/主题/启停状态升级、轮换已有 cloudflared Token，以及卸载本机 Controller/Connector。当前固定正式版为 Controller 1.4.3、Agent 1.2.60；升级前会自动下载完整备份，升级失败恢复旧二进制和事务快照。
 
 恢复 Controller 时默认验证后停用，只有明确选择才保持启用；不会自动启动 Tunnel。跨主机迁移仍遵循“新主控恢复并验证 → 用户确认 Cloudflare 外部状态 → 轮换 Connector → 停旧主控”。
 

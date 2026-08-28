@@ -52,10 +52,7 @@ sing-box 片段中的 detour 已指向同名 tag。合并时必须确认主配�
         [IO.File]::WriteAllText($notePath, $note, [Text.UTF8Encoding]::new($false))
         Protect-VpsPrivateFile $notePath
 
-        $cores = @(@(
-                'D:\Program Files\Clash Verge\verge-mihomo.exe',
-                'D:\Program Files\Clash Verge\verge-mihomo-alpha.exe'
-            ) | Where-Object { Test-Path -LiteralPath $_ })
+        $cores = @(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot)
         $testData = Join-Path $exportDir 'landing-syntax-test-data'
         [IO.Directory]::CreateDirectory($testData) | Out-Null
         foreach ($core in $cores) {

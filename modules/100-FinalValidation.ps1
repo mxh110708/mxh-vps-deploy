@@ -54,7 +54,8 @@
         }
 
         if ([bool]$inventory.RealityEntry.Enabled) {
-            $core = 'D:\Program Files\Clash Verge\verge-mihomo.exe'
+            $core = @(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot | Where-Object { (Split-Path -Leaf $_) -eq 'verge-mihomo.exe' } | Select-Object -First 1)
+            $core = if($core.Count){$core[0]}else{''}
             if (Test-Path -LiteralPath $core) {
                 $primaryEgress = Invoke-MxhMihomoEgressTest -Context $Context -CorePath $core `
                     -ProfilePath $Context.State.ClientExports.PrimaryProfile `
@@ -80,7 +81,8 @@
             }
         }
         elseif ([bool]$inventory.AnyTlsEntry.Enabled) {
-            $core = 'D:\Program Files\Clash Verge\verge-mihomo.exe'
+            $core = @(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot | Where-Object { (Split-Path -Leaf $_) -eq 'verge-mihomo.exe' } | Select-Object -First 1)
+            $core = if($core.Count){$core[0]}else{''}
             if (Test-Path -LiteralPath $core) {
                 $egress = Invoke-MxhMihomoEgressTest -Context $Context -CorePath $core `
                     -ProfilePath $Context.State.AnyTlsClientExports.MihomoProfile `

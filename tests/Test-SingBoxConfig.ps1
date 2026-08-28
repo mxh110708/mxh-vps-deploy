@@ -72,6 +72,10 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "sing-box config check failed: $config" }
     }
 
+    $genericTemplate=Join-Path $ProjectRoot 'templates\client\sing-box-general.template.json'
+    & $SingBoxPath check -c $genericTemplate
+    if($LASTEXITCODE-ne 0){throw 'generic sing-box authority template check failed'}
+
     $echOutput = (& $SingBoxPath generate ech-keypair 'www.example.invalid' 2>&1) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw 'sing-box ECH keypair generation failed' }
     $ech = ConvertFrom-MxhEchKeyPairText -Text $echOutput

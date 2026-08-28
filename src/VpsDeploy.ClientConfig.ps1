@@ -1,8 +1,135 @@
 function Get-MxhClientLayoutTemplate {
     param([Parameter(Mandatory)][string]$ProjectRoot)
+    $genericPath = Join-Path $ProjectRoot 'config\client-layout.default.json'
     $local = Join-Path $ProjectRoot 'config\client-layout.local.json'
-    $path = if (Test-Path -LiteralPath $local -PathType Leaf) { $local } else { Join-Path $ProjectRoot 'config\client-layout.default.json' }
-    return [pscustomobject]@{ Path = $path; Value = (Read-VpsJsonHashtable -Path $path) }
+    $generic = Read-VpsJsonHashtable -Path $genericPath
+    $value = if (Test-Path -LiteralPath $local -PathType Leaf) {
+        Merge-VpsHashtable -Base $generic -Overlay (Read-VpsJsonHashtable -Path $local)
+    } else { $generic }
+    return [pscustomobject]@{ Path = $(if (Test-Path -LiteralPath $local -PathType Leaf) { $local } else { $genericPath }); GenericPath=$genericPath; LocalPath=$local; Value=$value }
+}
+
+function Get-MxhClientTemplatePaths {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+    $clash = Join-Path $ProjectRoot 'templates\client\clash-general.template.yaml'
+    $sing = Join-Path $ProjectRoot 'templates\client\sing-box-general.template.json'
+    if (-not (Test-Path -LiteralPath $clash -PathType Leaf) -or -not (Test-Path -LiteralPath $sing -PathType Leaf)) {
+        throw '项目通用客户端模板缺失，请先运行项目离线自检。'
+    }
+    return [pscustomobject]@{ Clash=$clash; SingBox=$sing }
+}
+
+function Get-MxhClientDefaultPath {
+    param([Parameter(Mandatory)][string]$ProjectRoot,[AllowEmptyString()][string]$CommandLine,[AllowEmptyString()][string]$Environment,[AllowEmptyString()][string]$LocalOrGeneric)
+    $value = if (-not [string]::IsNullOrWhiteSpace($CommandLine)) { $CommandLine } elseif (-not [string]::IsNullOrWhiteSpace($Environment)) { $Environment } else { $LocalOrGeneric }
+    return Resolve-VpsPortablePath -ProjectRoot $ProjectRoot -Path $value
+}
+
+function Show-MxhClientLayoutDefaults {
+    param([Parameter(Mandatory)][hashtable]$Layout,[Parameter(Mandatory)][string]$SourcePath)
+    Write-Host ''
+    Write-Host '当前客户端布局默认值' -ForegroundColor Cyan
+    Write-Host "  来源：$SourcePath"
+    Write-Host "  地区入口组：$(@($Layout.region_groups) -join ' -> ')"
+    Write-Host "  默认出口组：$($Layout.default_exit_group)"
+    Write-Host "  直连组：$($Layout.direct_group)"
+    Write-Host "  默认出口优先：$(@($Layout.default_exit_members) -join ' -> ')"
+    Write-Host "  业务组：$(@($Layout.business_groups.name) -join ' -> ')"
+    Write-Host "  基础来源：$($Layout.authority_defaults.source_mode)"
+    Write-Host "  默认输出：$($Layout.authority_defaults.output_root)"
+}
+
+function ConvertTo-MxhPreferenceMap {
+    param([AllowEmptyString()][string]$Text,[Parameter(Mandatory)][string[]]$AllowedValues)
+    $map = [ordered]@{}
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $map }
+    foreach ($pair in $Text -split '[;；]+') {
+        $parts = @($pair -split '=',2)
+        if ($parts.Count -ne 2) { throw "映射格式无效：$pair" }
+        $name=$parts[0].Trim();$value=$parts[1].Trim()
+        if (-not $name -or $value -notin $AllowedValues) { throw "映射值无效：$pair" }
+        $map[$name]=$value
+    }
+    return $map
+}
+
+function Invoke-MxhEditClientLayoutDefaults {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+    while ($true) {
+        $template = Get-MxhClientLayoutTemplate -ProjectRoot $ProjectRoot
+        $layout = $template.Value
+        try {
+            $choice = Read-VpsMenu '客户端布局默认值' @(
+                '查看当前默认值',
+                '修改地区入口组及显示顺序',
+                '修改地区组内节点优先顺序',
+                '修改落地节点默认入口映射',
+                '修改默认出口与直连组',
+                '修改业务组名称、顺序和默认项',
+                '修改基础来源与输出默认值',
+                '恢复项目通用默认值'
+            ) 1 -AllowBack -HelpText @'
+这里修改的是以后运行设计器时采用的本机默认值，不会立刻生成配置或连接 VPS。
+个人默认写入 config/client-layout.local.json，该文件被 Git 忽略；恢复通用默认值时会先保留时间戳备份。
+'@
+            if ($choice -eq 1) { Show-MxhClientLayoutDefaults -Layout $layout -SourcePath $template.Path; continue }
+            if ($choice -eq 2) {
+                $layout.region_groups = @(Read-MxhRegionGroups -Defaults @($layout.region_groups))
+            }
+            elseif ($choice -eq 3) {
+                $map=[ordered]@{}
+                foreach($region in @($layout.region_groups)){
+                    $existing=if($layout.region_member_defaults.Contains($region)){@($layout.region_member_defaults[$region])}else{@()}
+                    $raw=Read-VpsText "$region 默认节点顺序（节点名逗号分隔；可留空）" -Default ($existing -join ', ') -AllowEmpty -AllowBack
+                    $map[$region]=@($raw -split '[,;，]+'|ForEach-Object{$_.Trim()}|Where-Object{$_}|Select-Object -Unique)
+                }
+                $layout.region_member_defaults=$map
+            }
+            elseif ($choice -eq 4) {
+                $current=@($layout.landing_transit_defaults.Keys|ForEach-Object{"$_=$($layout.landing_transit_defaults[$_])"}) -join '; '
+                while($true){try{$raw=Read-VpsText '落地节点=地区入口组（多项用分号；可留空）' -Default $current -AllowEmpty -AllowBack;$layout.landing_transit_defaults=ConvertTo-MxhPreferenceMap -Text $raw -AllowedValues @($layout.region_groups);break}catch{if(Test-VpsWizardBackError $_){throw};Write-VpsUi $_.Exception.Message Warning}}
+            }
+            elseif ($choice -eq 5) {
+                $oldExit=[string]$layout.default_exit_group;$oldDirect=[string]$layout.direct_group
+                $layout.default_exit_group=Read-VpsText '默认出口组名称' -Default $oldExit -AllowBack -Validate ${function:Test-VpsNodeName}
+                $layout.direct_group=Read-VpsText '直连策略组名称' -Default $oldDirect -AllowBack -Validate ${function:Test-VpsNodeName}
+                foreach($definition in $layout.business_groups){if([string]$definition.default-eq$oldExit){$definition.default=[string]$layout.default_exit_group}elseif([string]$definition.default-eq$oldDirect){$definition.default=[string]$layout.direct_group};if($definition.Contains('order')){$definition.order=@($definition.order|ForEach-Object{if($_-eq$oldExit){[string]$layout.default_exit_group}elseif($_-eq$oldDirect){[string]$layout.direct_group}else{$_}}|Select-Object -Unique)}}
+                foreach($guard in $layout.guard_groups){$guard.members=@($guard.members|ForEach-Object{if($_-eq$oldExit){[string]$layout.default_exit_group}elseif($_-eq$oldDirect){[string]$layout.direct_group}else{$_}}|Select-Object -Unique)}
+                $allowed=@($layout.region_groups)+@('DIRECT')
+                $layout.default_exit_members=@(Read-MxhOrderedNames '默认出口候选优先顺序' -Allowed $allowed -Default @($layout.default_exit_members|Where-Object{$_ -in $allowed}))
+            }
+            elseif ($choice -eq 6) {
+                $names=@($layout.business_groups.name)
+                $ordered=Read-MxhOrderedNames '业务组显示顺序' -Allowed $names -Default $names
+                $byName=@{};foreach($item in $layout.business_groups){$byName[[string]$item.name]=$item}
+                $new=[Collections.Generic.List[object]]::new()
+                $allowed=@([string]$layout.default_exit_group,[string]$layout.direct_group)+@($layout.region_groups)
+                foreach($name in $ordered){
+                    $item=$byName[$name];$default=Read-VpsText "$name 默认出口" -Default ([string]$item.default) -AllowBack -Validate{param($v)$v -in $allowed} -ValidationMessage ('可选项：'+($allowed -join ', '))
+                    $order=@($default)+@($allowed|Where-Object{$_ -ne $default});$item.default=$default;$item.order=$order;$new.Add($item)
+                }
+                $layout.business_groups=@($new)
+            }
+            elseif ($choice -eq 7) {
+                $mode=Read-VpsMenu '默认基础来源' @('项目通用模板','导入现有 Clash/sing-box 配置') $(if([string]$layout.authority_defaults.source_mode -eq 'ExistingAuthority'){2}else{1}) -AllowBack
+                $layout.authority_defaults.source_mode=if($mode -eq 2){'ExistingAuthority'}else{'GenericTemplate'}
+                if($mode -eq 2){
+                    $layout.authority_defaults.clash=Read-VpsText '默认 Clash 配置路径（可留空，运行时再填）' -Default ([string]$layout.authority_defaults.clash) -AllowEmpty -AllowBack
+                    $layout.authority_defaults.sing_box=Read-VpsText '默认 sing-box 配置路径（可留空，运行时再填）' -Default ([string]$layout.authority_defaults.sing_box) -AllowEmpty -AllowBack
+                }
+                $layout.authority_defaults.output_root=Read-VpsText '默认输出目录（可用相对项目路径）' -Default ([string]$layout.authority_defaults.output_root) -AllowBack
+            }
+            else {
+                if(-not(Read-VpsYesNo '恢复项目通用默认值？当前个人默认会改名保留。' $false -AllowBack)){continue}
+                if(Test-Path -LiteralPath $template.LocalPath){Move-Item -LiteralPath $template.LocalPath -Destination ($template.LocalPath+'.backup.'+(Get-Date -Format yyyyMMdd-HHmmss))}
+                Write-VpsUi '已恢复项目通用默认值。' Success
+                continue
+            }
+            Save-VpsJson -Value $layout -Path $template.LocalPath -Private
+            Write-VpsUi '本机客户端布局默认值已保存。' Success
+        }
+        catch { if (Test-VpsWizardBackError $_) { return }; throw }
+    }
 }
 
 function Read-MxhOrderedNames {
@@ -120,7 +247,7 @@ function Get-MxhFragmentNodeNames {
 }
 
 function New-MxhManualClientNode {
-    param([Parameter(Mandatory)][string[]]$RegionGroups)
+    param([Parameter(Mandatory)][string[]]$RegionGroups,[hashtable]$LandingTransitDefaults)
     $kind = Read-VpsMenu '手动节点协议' @('VLESS + Reality + Vision 入口','AnyTLS + TLS/ECH 入口','Shadowsocks 2022 落地') 1 -AllowBack
     $name = Read-VpsText '节点名称/tag' -AllowBack -Validate ${function:Test-VpsNodeName}
     $server = Read-VpsText '服务器地址（IPv4、IPv6 或域名）' -AllowBack -Validate { param($v) -not [string]::IsNullOrWhiteSpace($v) }
@@ -151,7 +278,9 @@ function New-MxhManualClientNode {
     }
     $method = Read-VpsText 'Shadowsocks 方法' -Default '2022-blake3-aes-128-gcm' -AllowBack
     $password = Read-MxhSecretText 'Shadowsocks 客户端组合密码' -AllowBack
-    $transit = $RegionGroups[(Read-VpsMenu '该落地节点经由哪个地区入口组连接' $RegionGroups 1 -AllowBack)-1]
+    $preferred=if($LandingTransitDefaults -and $LandingTransitDefaults.Contains($name)){[string]$LandingTransitDefaults[$name]}else{''}
+    $defaultIndex=[Array]::IndexOf($RegionGroups,$preferred)+1;if($defaultIndex -lt 1){$defaultIndex=1}
+    $transit = $RegionGroups[(Read-VpsMenu '该落地节点经由哪个地区入口组连接' $RegionGroups $defaultIndex -AllowBack)-1]
     $clash = [ordered]@{name=$name;type='ss';server=$server;port=$port;cipher=$method;password=$password;udp=$true;'dialer-proxy'=$transit}
     $sing = [ordered]@{type='shadowsocks';tag=$name;server=$server;server_port=$port;method=$method;password=$password;detour=$transit}
     return [ordered]@{name=$name;kind='landing';region_group=$null;transit_group=$transit;clash=$clash;sing_box=$sing}
@@ -171,11 +300,52 @@ function Test-MxhClientBuilderRuntime {
     return $python
 }
 
-function Invoke-MxhClientAuthorityDesigner {
+function Test-MxhForbiddenAuthorityPath {
+    param([Parameter(Mandatory)][string]$Path)
+    $full=[IO.Path]::GetFullPath($Path)
+    return $full -match '(?i)[\\/]AppData[\\/].*clash-verge|io\.github\.clash-verge'
+}
+
+function Publish-MxhAuthorityPair {
+    param(
+        [Parameter(Mandatory)][string]$CandidateClash,
+        [Parameter(Mandatory)][string]$CandidateSingBox,
+        [Parameter(Mandatory)][string]$TargetClash,
+        [Parameter(Mandatory)][string]$TargetSingBox,
+        [Parameter(Mandatory)][string]$BackupRoot
+    )
+    if((Test-MxhForbiddenAuthorityPath $TargetClash) -or (Test-MxhForbiddenAuthorityPath $TargetSingBox)){throw '拒绝写入 Clash Verge AppData/profile 副本；请选择独立权威文件。'}
+    foreach($target in @($TargetClash,$TargetSingBox)){
+        $parent=Split-Path -Parent $target
+        if([string]::IsNullOrWhiteSpace($parent)){throw "目标必须是完整路径：$target"}
+        [IO.Directory]::CreateDirectory($parent)|Out-Null
+    }
+    [IO.Directory]::CreateDirectory($BackupRoot)|Out-Null
+    $clashBackup=$null;$singBackup=$null
+    if(Test-Path -LiteralPath $TargetClash -PathType Leaf){$clashBackup=Join-Path $BackupRoot (Split-Path -Leaf $TargetClash);Copy-Item -LiteralPath $TargetClash -Destination $clashBackup}
+    if(Test-Path -LiteralPath $TargetSingBox -PathType Leaf){$singBackup=Join-Path $BackupRoot (Split-Path -Leaf $TargetSingBox);Copy-Item -LiteralPath $TargetSingBox -Destination $singBackup}
+    $clashTemp=$TargetClash+'.mxh-new';$singTemp=$TargetSingBox+'.mxh-new'
+    try{
+        Copy-Item -LiteralPath $CandidateClash -Destination $clashTemp -Force
+        Copy-Item -LiteralPath $CandidateSingBox -Destination $singTemp -Force
+        [IO.File]::Move($clashTemp,$TargetClash,$true)
+        try{[IO.File]::Move($singTemp,$TargetSingBox,$true)}catch{
+            if($clashBackup){Copy-Item -LiteralPath $clashBackup -Destination $TargetClash -Force}else{Remove-Item -LiteralPath $TargetClash -ErrorAction SilentlyContinue}
+            throw
+        }
+    }
+    finally{Remove-Item -LiteralPath $clashTemp,$singTemp -Force -ErrorAction SilentlyContinue}
+    return [pscustomobject]@{Clash=$TargetClash;SingBox=$TargetSingBox;BackupRoot=$BackupRoot}
+}
+
+function Invoke-MxhBuildClientAuthority {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ProjectRoot,
         [Parameter(Mandatory)][string]$InstanceRoot,
+        [string]$ClashAuthorityPath,
+        [string]$SingBoxAuthorityPath,
+        [string]$ClientOutputRoot,
         [switch]$DryRun
     )
     $templateResult = Get-MxhClientLayoutTemplate -ProjectRoot $ProjectRoot
@@ -184,8 +354,27 @@ function Invoke-MxhClientAuthorityDesigner {
     $originalRegions = @($layout.region_groups)
     $regions = @(Read-MxhRegionGroups -Defaults $originalRegions)
     $customRegions = (($regions -join "`n") -ne ($originalRegions -join "`n"))
-    $clash = Read-VpsText 'Clash 权威 YAML（只读源）' -Default ([string]$layout.authority_defaults.clash) -AllowBack -Validate { param($v) Test-Path $v.Trim('"') -PathType Leaf }
-    $sing = Read-VpsText 'sing-box 权威 JSON（只读源）' -Default ([string]$layout.authority_defaults.sing_box) -AllowBack -Validate { param($v) Test-Path $v.Trim('"') -PathType Leaf }
+    $defaultSource = if ([string]$layout.authority_defaults.source_mode -eq 'ExistingAuthority') { 2 } else { 1 }
+    $sourceChoice = Read-VpsMenu '选择基础配置来源' @(
+        '项目通用模板（推荐；不依赖任何个人配置）',
+        '导入一对现有 Clash/sing-box 配置作为基础（只读）'
+    ) $defaultSource -AllowBack -HelpText @'
+通用模板适合新人或全新环境；它提供最小可用的 DNS、mixed 入站、规则和业务组骨架，不含任何节点或个人路径。
+导入现有配置会保留其高级 DNS/TUN/规则，并允许复用已有节点；源文件始终只读。
+'@
+    if ($sourceChoice -eq 1) {
+        $sources = Get-MxhClientTemplatePaths -ProjectRoot $ProjectRoot
+        $clash = $sources.Clash
+        $sing = $sources.SingBox
+        $sourceMode = 'GenericTemplate'
+    }
+    else {
+        $clashDefault = Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $ClashAuthorityPath -Environment $env:MXH_VPS_CLASH_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.clash)
+        $singDefault = Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $SingBoxAuthorityPath -Environment $env:MXH_VPS_SINGBOX_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.sing_box)
+        $clash = Read-VpsText '现有 Clash YAML（只读源）' -Default $clashDefault -AllowBack -Validate { param($v) Test-Path $v.Trim('"') -PathType Leaf }
+        $sing = Read-VpsText '现有 sing-box JSON（只读源）' -Default $singDefault -AllowBack -Validate { param($v) Test-Path $v.Trim('"') -PathType Leaf }
+        $sourceMode = 'ExistingAuthority'
+    }
     $authoritySing = Get-Content -Raw -LiteralPath $sing.Trim('"') | ConvertFrom-Json -AsHashtable
     $fragmentSources = [Collections.Generic.List[object]]::new()
     $manualNodes = [Collections.Generic.List[object]]::new()
@@ -203,7 +392,9 @@ function Invoke-MxhClientAuthorityDesigner {
             if (-not $names.Count) { Write-VpsUi "$($selected.Plan.NodeName) 缺少 $role 客户端片段，已跳过。" Warning; continue }
             if (-not (Read-VpsYesNo "提取 $($selected.Plan.NodeName) 的 $(Get-MxhProtocolRoleLabel $role) 节点？" ([bool]$inventory[$role].Enabled) -AllowBack)) { continue }
             if ($role -eq 'ShadowsocksLanding') {
-                $transit = $regions[(Read-VpsMenu '该落地节点使用哪个地区入口组作为 transit/detour' $regions 1 -AllowBack)-1]
+                $preferred=@($names|ForEach-Object{if($layout.landing_transit_defaults.Contains($_)){[string]$layout.landing_transit_defaults[$_]}}|Where-Object{$_ -in $regions}|Select-Object -First 1)
+                $defaultIndex=if($preferred.Count){[Array]::IndexOf($regions,$preferred[0])+1}else{1}
+                $transit = $regions[(Read-VpsMenu '该落地节点使用哪个地区入口组作为 transit/detour' $regions $defaultIndex -AllowBack)-1]
                 $fragmentSources.Add([ordered]@{fragment_dir=$exports;role=$role;node_names=$names;region_group=$null;transit_group=$transit})
                 foreach ($name in $names) { $landingNames.Add($name) }
             }
@@ -215,7 +406,7 @@ function Invoke-MxhClientAuthorityDesigner {
         }
     }
     while (Read-VpsYesNo '是否手动添加一台未纳管 VPS 的节点？' $false -AllowBack) {
-        $node = New-MxhManualClientNode -RegionGroups $regions
+        $node = New-MxhManualClientNode -RegionGroups $regions -LandingTransitDefaults $layout.landing_transit_defaults
         $manualNodes.Add($node)
         if ($node.kind -eq 'entry') { $entryMembers[[string]$node.region_group].Add([string]$node.name) }
         else { $landingNames.Add([string]$node.name) }
@@ -238,6 +429,7 @@ function Invoke-MxhClientAuthorityDesigner {
                 $name = [string]$outbound.tag
                 if ([string]$outbound.type -eq 'shadowsocks') {
                     $suggested = [string]$outbound.detour
+                    if($layout.landing_transit_defaults.Contains($name)){$suggested=[string]$layout.landing_transit_defaults[$name]}
                     $default = [Array]::IndexOf($regions,$suggested) + 1
                     if ($default -lt 1) { $default = 1 }
                     $transit = $regions[(Read-VpsMenu "$name 使用哪个地区入口组作为 transit/detour" $regions $default -AllowBack) - 1]
@@ -262,21 +454,26 @@ function Invoke-MxhClientAuthorityDesigner {
     foreach ($region in $regions) {
         $allowed = @($entryMembers[$region] | Sort-Object -Unique)
         if (-not $allowed.Count) { Write-VpsUi "$region 没有节点，本次候选不创建该组。" Warning; continue }
-        $ordered = @(Read-MxhOrderedNames "$region 内节点顺序（第一项是首次默认）" -Allowed $allowed -Default $allowed)
+        $preferred=if($layout.region_member_defaults.Contains($region)){@($layout.region_member_defaults[$region]|Where-Object{$_ -in $allowed})}else{@()}
+        $defaultOrder=@($preferred)+@($allowed|Where-Object{$_ -notin $preferred})
+        $ordered = @(Read-MxhOrderedNames "$region 内节点顺序（第一项是首次默认）" -Allowed $allowed -Default $defaultOrder)
         $groups.Add([ordered]@{name=$region;members=$ordered}); $activeRegions.Add($region)
     }
     if (-not $activeRegions.Count) { throw '至少需要一个包含入口节点的地区入口组。' }
     $defaultExitName = [string]$layout.default_exit_group
     $directName = [string]$layout.direct_group
     $exitAllowed = @($activeRegions) + @($landingNames | Sort-Object -Unique) + @('DIRECT')
-    $exitMembers = @(Read-MxhOrderedNames "$defaultExitName 选项顺序（第一项是首次默认）" -Allowed $exitAllowed -Default $exitAllowed)
+    $preferredExit=@($layout.default_exit_members|Where-Object{$_ -in $exitAllowed})
+    $exitDefault=@($preferredExit)+@($exitAllowed|Where-Object{$_ -notin $preferredExit})
+    $exitMembers = @(Read-MxhOrderedNames "$defaultExitName 选项顺序（第一项是首次默认）" -Allowed $exitAllowed -Default $exitDefault)
     $groups.Add([ordered]@{name=$defaultExitName;members=$exitMembers})
     $groups.Add([ordered]@{name=$directName;members=@('DIRECT',$defaultExitName)})
     $businessAllowed = @($defaultExitName) + @($activeRegions) + @($landingNames | Sort-Object -Unique) + @($directName)
     $customBusiness = Read-VpsYesNo '是否逐个调整业务组的默认项和完整顺序？' $false -AllowBack
     foreach ($definition in $layout.business_groups) {
         $default = if ([string]$definition.default -in $businessAllowed) { [string]$definition.default } else { $businessAllowed[0] }
-        $members = @($default) + @($businessAllowed | Where-Object { $_ -ne $default })
+        $preferredOrder=if($definition.Contains('order')){@($definition.order|Where-Object{$_ -in $businessAllowed})}else{@()}
+        $members = @($default) + @($preferredOrder|Where-Object{$_ -ne $default}) + @($businessAllowed | Where-Object { $_ -ne $default -and $_ -notin $preferredOrder })
         if ($definition.Contains('include_block') -and [bool]$definition.include_block) { $members += 'BLOCK' }
         if ($customBusiness) {
             $members = @(Read-MxhOrderedNames "$($definition.name) 选项顺序（第一项是首次默认）" -Allowed $members -Default $members)
@@ -287,12 +484,35 @@ function Invoke-MxhClientAuthorityDesigner {
     foreach ($guard in $layout.guard_groups) { $groups.Add([ordered]@{name=[string]$guard.name;members=@($guard.members)}) }
     $groupOrder = @($activeRegions) + @($defaultExitName,$directName) + @($layout.business_groups.name) + @($layout.guard_groups.name)
 
-    $outputRoot = Read-VpsText '候选输出根目录' -Default ([string]$layout.authority_defaults.output_root) -AllowBack -Validate ${function:Test-VpsArchiveRoot}
-    $output = Join-Path $outputRoot (Get-Date -Format yyyyMMdd-HHmmss)
-    if ($DryRun) { Write-VpsUi "DryRun：将从 $($fragmentSources.Count) 个受管片段、$($manualNodes.Count) 个手动节点和 $($existingNodeRefs.Count) 个权威现有节点生成候选到 $output。" Success; return }
+    $outputMode=Read-VpsMenu '配置保存方式' @(
+        '覆盖指定的当前权威配置（验证、时间戳备份、原子替换）',
+        '生成一对新配置文件（不覆盖现有文件）'
+    ) 2 -AllowBack -HelpText @'
+覆盖权威配置：先在暂存目录生成并完成 Mihomo/sing-box 校验，再备份原文件并原子替换；拒绝写入 Clash Verge AppData。
+生成新配置：写入全新目录和文件名，任何目标文件已存在都会停止，不改当前权威配置。
+'@
+    $outputDefault=Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $ClientOutputRoot -Environment $env:MXH_VPS_CLIENT_OUTPUT_ROOT -LocalOrGeneric ([string]$layout.authority_defaults.output_root)
+    $outputRoot = Read-VpsText '暂存与报告输出根目录' -Default $outputDefault -AllowBack -Validate ${function:Test-VpsArchiveRoot}
+    $stamp=Get-Date -Format yyyyMMdd-HHmmss
+    $output = Join-Path $outputRoot ('staging-'+$stamp)
+    $targetClash=$null;$targetSing=$null
+    if($outputMode -eq 1){
+        $targetClashDefault=Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $ClashAuthorityPath -Environment $env:MXH_VPS_CLASH_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.clash)
+        $targetSingDefault=Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $SingBoxAuthorityPath -Environment $env:MXH_VPS_SINGBOX_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.sing_box)
+        $targetClash=Read-VpsText '要覆盖的 Clash 权威 YAML 完整路径' -Default $targetClashDefault -AllowBack -Validate{param($v)-not(Test-MxhForbiddenAuthorityPath $v.Trim('"'))}
+        $targetSing=Read-VpsText '要覆盖的 sing-box 权威 JSON 完整路径' -Default $targetSingDefault -AllowBack -Validate{param($v)-not(Test-MxhForbiddenAuthorityPath $v.Trim('"'))}
+        if(-not(Read-VpsYesNo '确认仅在全部校验通过后备份并覆盖这两份权威配置？' $false -AllowBack)){throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)}
+    }else{
+        $newDir=Read-VpsText '新配置保存目录' -Default (Join-Path $outputRoot ('generated-'+$stamp)) -AllowBack -Validate ${function:Test-VpsArchiveRoot}
+        $newClashName=Read-VpsText '新 Clash 文件名' -Default ([string]$layout.authority_defaults.new_clash_name) -AllowBack -Validate{param($v)$v -match '\.(yaml|yml)$' -and $v -notmatch '[\\/]'}
+        $newSingName=Read-VpsText '新 sing-box 文件名' -Default ([string]$layout.authority_defaults.new_sing_box_name) -AllowBack -Validate{param($v)$v -match '\.json$' -and $v -notmatch '[\\/]'}
+        $targetClash=Join-Path $newDir $newClashName;$targetSing=Join-Path $newDir $newSingName
+        if((Test-Path -LiteralPath $targetClash) -or (Test-Path -LiteralPath $targetSing)){throw '生成新配置模式不会覆盖现有文件；请更换目录或文件名。'}
+    }
+    if ($DryRun) { Write-VpsUi "DryRun：将从 $($fragmentSources.Count) 个受管片段、$($manualNodes.Count) 个手动节点和 $($existingNodeRefs.Count) 个现有节点生成、验证并写入 $targetClash 与 $targetSing。" Success; return }
     [IO.Directory]::CreateDirectory($output) | Out-Null
     $removeGroups = @($originalRegions | Where-Object { $_ -notin @($activeRegions) })
-    $spec = [ordered]@{schema_version=1;fragment_sources=@($fragmentSources);manual_nodes=@($manualNodes);existing_node_refs=@($existingNodeRefs);groups=@($groups);remove_groups=$removeGroups;group_order=$groupOrder}
+    $spec = [ordered]@{schema_version=1;source_mode=$sourceMode;output_mode=$(if($outputMode-eq 1){'OverwriteAuthority'}else{'GenerateNew'});fragment_sources=@($fragmentSources);manual_nodes=@($manualNodes);existing_node_refs=@($existingNodeRefs);groups=@($groups);remove_groups=$removeGroups;group_order=$groupOrder}
     $specPath = Join-Path $output 'client-layout-spec.private.json'; Save-VpsJson -Value $spec -Path $specPath -Private
     $python = Test-MxhClientBuilderRuntime -ProjectRoot $ProjectRoot
     $builder = Join-Path $ProjectRoot 'scripts\build_client_authority.py'
@@ -300,7 +520,7 @@ function Invoke-MxhClientAuthorityDesigner {
     if ($result.ExitCode -ne 0) { throw "客户端候选生成失败：$($result.StdErr.Trim())" }
     $candidate = Join-Path $output 'Clash_General.candidate.yaml'; $testData = Join-Path $output 'mihomo-test-data'; [IO.Directory]::CreateDirectory($testData)|Out-Null
     $tested = [Collections.Generic.List[string]]::new()
-    foreach ($core in @('D:\Program Files\Clash Verge\verge-mihomo.exe','D:\Program Files\Clash Verge\verge-mihomo-alpha.exe')) {
+    foreach ($core in @(Get-VpsMihomoCorePaths -ProjectRoot $ProjectRoot)) {
         if (-not (Test-Path -LiteralPath $core)) { continue }
         $test = Invoke-VpsProcess $core @('-t','-d',$testData,'-f',$candidate) -TimeoutSeconds 180
         if ($test.ExitCode -ne 0) { throw "候选未通过 $(Split-Path -Leaf $core)：$($test.StdErr.Trim())" }
@@ -310,17 +530,63 @@ function Invoke-MxhClientAuthorityDesigner {
     Get-Content -Raw $singCandidate | ConvertFrom-Json | Out-Null
     $singBytes = (Get-Item -LiteralPath $singCandidate).Length
     if ($singBytes -ge 4MB) { throw "sing-box 候选为 $singBytes 字节，超过桌面端 4 MiB 安全上限；请减少内联规则或节点。" }
-    $defaultsChanged = $customBusiness -or $customRegions -or
-        $clash.Trim('"') -ne [string]$layout.authority_defaults.clash -or
-        $sing.Trim('"') -ne [string]$layout.authority_defaults.sing_box -or
-        $outputRoot -ne [string]$layout.authority_defaults.output_root
-    if ($defaultsChanged -and (Read-VpsYesNo '将本次地区、业务默认项和路径保存为本机默认？' $false -AllowBack)) {
-        $layout.region_groups = @($regions)
-        $layout.authority_defaults.clash = $clash.Trim('"')
-        $layout.authority_defaults.sing_box = $sing.Trim('"')
-        $layout.authority_defaults.output_root = $outputRoot
-        Save-VpsJson -Value $layout -Path (Join-Path $ProjectRoot 'config\client-layout.local.json') -Private
+    $backupRoot=Join-Path $outputRoot ('backups\'+$stamp)
+    if($outputMode -eq 1){
+        $published=Publish-MxhAuthorityPair -CandidateClash $candidate -CandidateSingBox $singCandidate -TargetClash $targetClash.Trim('"') -TargetSingBox $targetSing.Trim('"') -BackupRoot $backupRoot
+    }else{
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $targetClash))|Out-Null
+        Copy-Item -LiteralPath $candidate -Destination $targetClash
+        Copy-Item -LiteralPath $singCandidate -Destination $targetSing
+        Copy-Item -LiteralPath (Join-Path $output 'candidate-manifest.json') -Destination (Join-Path (Split-Path -Parent $targetClash) 'generation-manifest.json')
+        Copy-Item -LiteralPath $specPath -Destination (Join-Path (Split-Path -Parent $targetClash) 'client-layout-spec.private.json')
     }
-    Write-VpsUi "候选已生成：$output" Success
-    Write-VpsUi "Mihomo 核心：$(if($tested.Count){$tested -join ', '}else{'未发现，已跳过'})；sing-box JSON 严格解析通过，体积 $singBytes 字节（低于 4 MiB）。权威文件和 AppData 未修改。" Info
+    $layout.region_groups=@($regions);$layout.default_exit_members=@($exitMembers);$layout.authority_defaults.source_mode=$sourceMode
+    if($sourceMode -eq 'ExistingAuthority'){$layout.authority_defaults.clash=$clash.Trim('"');$layout.authority_defaults.sing_box=$sing.Trim('"')}
+    if($outputMode -eq 1){$layout.authority_defaults.clash=$targetClash.Trim('"');$layout.authority_defaults.sing_box=$targetSing.Trim('"')}
+    $layout.authority_defaults.output_root=$outputRoot
+    if(Read-VpsYesNo '将本次来源、地区、组顺序和输出路径保存为本机默认？' $false -AllowBack){Save-VpsJson -Value $layout -Path (Join-Path $ProjectRoot 'config\client-layout.local.json') -Private}
+    Write-VpsUi "配置已写入：$targetClash；$targetSing" Success
+    Write-VpsUi "Mihomo 核心：$(if($tested.Count){$tested -join ', '}else{'未发现，已跳过'})；sing-box JSON 严格解析通过，体积 $singBytes 字节（低于 4 MiB）。$(if($outputMode -eq 1){'原文件备份：'+$backupRoot}else{'当前权威配置未修改。'})" Info
+}
+
+function Invoke-MxhClientAuthorityDesigner {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$InstanceRoot,
+        [string]$ClashAuthorityPath,
+        [string]$SingBoxAuthorityPath,
+        [string]$ClientOutputRoot,
+        [switch]$DryRun
+    )
+    while($true){
+        try{
+            $choice=Read-VpsMenu 'Clash/sing-box 客户端权威配置设计器' @(
+                '生成配置（通用模板或可选现有配置）',
+                '查看或修改本机布局默认值',
+                '查看可用节点数据源',
+                '校验一对现有 Clash/sing-box 配置'
+            ) 1 -AllowBack -HelpText @'
+生成配置：选择基础模板、节点来源、地区/落地关系和业务组，再选择覆盖权威配置或生成新文件。
+默认值：只维护被 Git 忽略的本机偏好，可恢复项目通用默认。
+数据源：只读扫描已纳管计划；未纳管节点可在生成流程中隐藏输入。
+校验配置：不改文件，执行可用 Mihomo 核心、严格 JSON 和 4 MiB 检查。
+'@
+            if($choice -eq 1){Invoke-MxhBuildClientAuthority -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot -ClashAuthorityPath $ClashAuthorityPath -SingBoxAuthorityPath $SingBoxAuthorityPath -ClientOutputRoot $ClientOutputRoot -DryRun:$DryRun;return}
+            elseif($choice -eq 2){Invoke-MxhEditClientLayoutDefaults -ProjectRoot $ProjectRoot}
+            elseif($choice -eq 3){
+                $plans=@(Get-MxhManagedClientPlans -InstanceRoot $InstanceRoot);Write-VpsUi "已扫描 $InstanceRoot，发现 $($plans.Count) 个可读取的受管计划。" Info
+                foreach($item in $plans){Write-Host ("  - {0} / {1} / {2}" -f $item.Plan.Provider,$item.Plan.Instance,$item.Plan.NodeName)}
+                Write-VpsUi '此外可在生成流程中手动添加未纳管 VLESS Reality、AnyTLS 或 Shadowsocks 节点；敏感输入不会显示。' Info
+            }else{
+                $layout=(Get-MxhClientLayoutTemplate -ProjectRoot $ProjectRoot).Value
+                $clashDefault=Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $ClashAuthorityPath -Environment $env:MXH_VPS_CLASH_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.clash)
+                $singDefault=Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $SingBoxAuthorityPath -Environment $env:MXH_VPS_SINGBOX_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.sing_box)
+                $clash=Read-VpsText 'Clash YAML' -Default $clashDefault -AllowBack -Validate{param($v)Test-Path $v.Trim('"') -PathType Leaf}
+                $sing=Read-VpsText 'sing-box JSON' -Default $singDefault -AllowBack -Validate{param($v)Test-Path $v.Trim('"') -PathType Leaf}
+                foreach($core in @(Get-VpsMihomoCorePaths -ProjectRoot $ProjectRoot)){$data=Join-Path ([IO.Path]::GetTempPath()) ('mxh-mihomo-'+[guid]::NewGuid().ToString('N'));[IO.Directory]::CreateDirectory($data)|Out-Null;try{$t=Invoke-VpsProcess $core @('-t','-d',$data,'-f',$clash.Trim('"')) -TimeoutSeconds 180;if($t.ExitCode-ne 0){throw "未通过 $(Split-Path -Leaf $core)：$($t.StdErr)"}}finally{Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue}}
+                Get-Content -Raw -LiteralPath $sing.Trim('"')|ConvertFrom-Json|Out-Null;$bytes=(Get-Item -LiteralPath $sing.Trim('"')).Length;if($bytes-ge 4MB){throw "sing-box 文件为 $bytes 字节，达到或超过 4 MiB。"};Write-VpsUi '两份配置已通过当前可用的本地语法/结构检查。' Success
+            }
+        }catch{if(Test-VpsWizardBackError $_){return};if(Test-VpsNavigationError $_){Write-VpsUi (Get-VpsNavigationMessage $_) Info;continue};throw}
+    }
 }

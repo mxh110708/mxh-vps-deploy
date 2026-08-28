@@ -283,6 +283,8 @@ def main() -> None:
         "groups": [str(group["name"]) for group in groups],
         "removed_groups": sorted(remove_groups),
         "authoritative_files_modified": False,
+        "source_mode": str(spec.get("source_mode", "unspecified")),
+        "requested_output_mode": str(spec.get("output_mode", "unspecified")),
         "source_clash": str(args.clash),
         "source_sing_box": str(args.sing_box),
     }

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "instance_root": "..\\VPS-Instances",
+  "mihomo": {
+    "stable_executable": "",
+    "alpha_executable": ""
+  },
+  "release_apis": {
+    "xray": "https://api.github.com/repos/XTLS/Xray-core/releases/latest",
+    "komari_controller": "https://api.github.com/repos/komari-monitor/komari/releases/latest",
+    "komari_agent": "https://api.github.com/repos/komari-monitor/komari-agent/releases/latest",
+    "sing_box": "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+  }
+}

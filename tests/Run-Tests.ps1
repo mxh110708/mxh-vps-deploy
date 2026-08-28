@@ -33,13 +33,33 @@ Assert-True ([string]$manifest.xray.version -match '^\d+\.\d+\.\d+$') 'Xray pinn
 Assert-True ([string]$manifest.xray.installer_commit -match '^[0-9a-f]{40}$') 'Xray installer commit'
 Assert-True ([string]$manifest.xray.installer_sha256 -match '^[0-9a-f]{64}$') 'Xray installer SHA-256'
 Assert-True ([string]$manifest.komari_agent.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'Komari amd64 SHA-256'
-Assert-True ([string]$manifest.komari_controller.version -eq '1.3.1') 'Komari controller pinned stable baseline'
+Assert-True ([string]$manifest.komari_controller.version -eq '1.4.3') 'Komari controller pinned latest stable baseline'
 Assert-True ([string]$manifest.komari_controller.assets.amd64.name -eq 'komari-linux-amd64') 'Komari controller amd64 asset name'
 Assert-True ([string]$manifest.komari_controller.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'Komari controller amd64 SHA-256'
 Assert-True ([string]$manifest.komari_controller.assets.arm64.sha256 -match '^[0-9a-f]{64}$') 'Komari controller arm64 SHA-256'
 Assert-True ([string]$manifest.sing_box.version -match '^\d+\.\d+\.\d+$') 'sing-box pinned version'
 Assert-True ([string]$manifest.sing_box.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box amd64 SHA-256'
 Assert-True ([string]$manifest.sing_box.assets.windows_amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box Windows SHA-256'
+$appDefaults=Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'config\app-defaults.json')|ConvertFrom-Json -AsHashtable
+$clientDefaults=Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'config\client-layout.default.json')|ConvertFrom-Json -AsHashtable
+Assert-True ([int]$clientDefaults.schema_version -eq 2) 'portable client layout schema'
+Assert-True ([string]::IsNullOrWhiteSpace([string]$clientDefaults.authority_defaults.clash) -and [string]::IsNullOrWhiteSpace([string]$clientDefaults.authority_defaults.sing_box)) 'generic client defaults contain no personal authority paths'
+Assert-True (-not((Get-Content -Raw (Join-Path $ProjectRoot 'config\client-layout.default.json')) -match '(?i)F:\\VPS|20041114\.xyz|lenovo')) 'generic client defaults contain no personal environment values'
+Assert-True (Test-Path (Join-Path $ProjectRoot 'templates\client\clash-general.template.yaml')) 'generic Clash authority template exists'
+Assert-True (Test-Path (Join-Path $ProjectRoot 'templates\client\sing-box-general.template.json')) 'generic sing-box authority template exists'
+Assert-True ([string]$appDefaults.instance_root -notmatch '^[A-Za-z]:') 'generic instance root is portable and relative'
+$runtimeFiles = @(
+    Get-Item -LiteralPath (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1')
+    Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'src') -Recurse -File
+    Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'modules') -Recurse -File
+    Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'scripts') -Recurse -File
+    Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'assets') -Recurse -File
+    Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'config') -File | Where-Object Name -NotLike '*.local.json'
+    Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'templates') -Recurse -File
+)
+$personalRuntimePattern = '(?i)F:\\VPS|D:\\Program Files|C:\\Users\\lenovo|20041114\.xyz|179\.(?:253|255)\.'
+$personalRuntimeHits = @($runtimeFiles | Select-String -Pattern $personalRuntimePattern)
+Assert-True ($personalRuntimeHits.Count -eq 0) 'runtime and versioned templates contain no personal paths, domains, or addresses'
 
 # ValidateProject invokes this script from inside the already imported core
 # module.  Forcing that same module to reload would tear down the caller's
@@ -65,6 +85,9 @@ Assert-True ('migration-preflight' -in $modules.Id) 'protocol migration prefligh
 Assert-True ('migration-arm-rollback' -in $modules.Id) 'protocol migration rollback timer module exists'
 Assert-True ('migration-commit' -in $modules.Id) 'protocol migration commit module exists'
 Assert-True ('migration-shadowsocks-probe' -in $modules.Id) 'trusted-entry Shadowsocks migration probe module exists'
+$legacyCompatibility=&$coreModule{param($plan)$copy=Copy-MxhHashtable $plan;$copy.Remove('NetworkTuning');ConvertTo-MxhCompatiblePlan $copy} (Get-Content -Raw (Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json')|ConvertFrom-Json -AsHashtable)
+Assert-True ($legacyCompatibility.Contains('NetworkTuning') -and [string]$legacyCompatibility.NetworkTuning.Mode -eq 'LegacyBaseline') 'legacy managed plans gain a non-invasive network tuning compatibility section'
+Assert-True ($null -eq $legacyCompatibility.NetworkTuning.BandwidthMbps) 'legacy plan compatibility never invents nominal bandwidth'
 $shadowsocksSelfTest = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\shadowsocks-self-test.sh')
 Assert-True ($shadowsocksSelfTest -match 'VPSDEPLOY_UDP_B64') 'Shadowsocks self-test reports functional UDP result'
 Assert-True ($shadowsocksSelfTest -match '"type": "direct"') 'Shadowsocks self-test creates a UDP tunnel inbound'
@@ -454,6 +477,8 @@ $clearCommandResult = & (Get-Module VpsDeploy.Core) {
 }
 Assert-True ($clearCommandResult.Clear -and $clearCommandResult.Cls) 'clear and cls are exact global clear commands'
 Assert-True (-not $clearCommandResult.BreadCloud -and -not $clearCommandResult.Clearwater) 'clear command never uses prefix matching'
+$helpCommandResult=&(Get-Module VpsDeploy.Core){[ordered]@{Help=Test-VpsHelpCommand ' help ';Short=Test-VpsHelpCommand 'H';Host=Test-VpsHelpCommand 'Hetzner'}}
+Assert-True ($helpCommandResult.Help -and $helpCommandResult.Short -and -not $helpCommandResult.Host) 'help and h are exact global help commands'
 $archiveRootValidation = & (Get-Module VpsDeploy.Core) {
     param($AbsolutePath, $DriveRoot)
     [ordered]@{
@@ -709,7 +734,7 @@ Assert-True ($branchQueue.Count -eq 0) 'branch-reset wizard consumed the expecte
 Assert-True (-not (Test-Path -LiteralPath $branchResetArchive)) 'in-memory branch-reset test writes no plan or archive'
 
 Write-Host '== Interactive navigation hierarchy ==' -ForegroundColor Cyan
-$hierarchyInput = (@('clear', '1', 'b', '2', 'b', 'cls', '0') -join [Environment]::NewLine) + [Environment]::NewLine
+$hierarchyInput = (@('clear', '1', 'b', '2', 'b', 'cls', '9') -join [Environment]::NewLine) + [Environment]::NewLine
 $hierarchyResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
 ) -InputText $hierarchyInput -TimeoutSeconds 60
@@ -719,7 +744,7 @@ Assert-True ($hierarchyResult.StdOut -match 'MXH VPS Deploy' -and `
 Assert-True ($hierarchyResult.StdOut -notmatch '__MXH_VPS_WIZARD_' -and $hierarchyResult.StdErr -notmatch '__MXH_VPS_WIZARD_') 'navigation markers never leak to the console'
 Assert-True ($hierarchyResult.StdOut -match '(?m)^clear\r?$' -and $hierarchyResult.StdOut -match '(?m)^cls\r?$') 'clear and cls are consumed by live menu navigation'
 
-$providerPrefixInput = (@('1', '', 'BreadCloud', 'b', 'b', 'b', '0') -join [Environment]::NewLine) + [Environment]::NewLine
+$providerPrefixInput = (@('1', '', 'BreadCloud', 'b', 'b', 'b', '9') -join [Environment]::NewLine) + [Environment]::NewLine
 $providerPrefixResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
 ) -InputText $providerPrefixInput -TimeoutSeconds 60
@@ -962,6 +987,25 @@ Assert-True ((@($designerJson.outbounds | Where-Object tag -eq 'Default Exit')[0
 Assert-True (-not @($designerJson.outbounds | Where-Object tag -eq 'Europe Entry').Count) 'disabled default region group is removed from the candidate'
 $designerYamlText = Get-Content -Raw (Join-Path $designerOutput 'Clash_General.candidate.yaml')
 Assert-True ($designerYamlText -match 'dialer-proxy:\s+US-West Entry') 'Clash landing node receives the matching dialer-proxy'
+$genericOutput=Join-Path $candidateRoot 'generic-template-output'
+$genericSpecPath=Join-Path $candidateRoot 'generic-template-spec.private.json'
+$genericLayout=Get-Content -Raw (Join-Path $ProjectRoot 'config\client-layout.default.json')|ConvertFrom-Json -AsHashtable
+$genericNode=[ordered]@{name='Portable-Entry';kind='entry';region_group='US-West Entry';transit_group=$null;clash=[ordered]@{name='Portable-Entry';type='vless';server='192.0.2.80';port=443;uuid='fixture';network='tcp';tls=$true;servername='target.example.invalid';flow='xtls-rprx-vision';'client-fingerprint'='chrome';'reality-opts'=[ordered]@{'public-key'='fixture';'short-id'='0123456789abcdef'}};sing_box=[ordered]@{type='vless';tag='Portable-Entry';server='192.0.2.80';server_port=443;uuid='fixture';flow='xtls-rprx-vision';tls=[ordered]@{enabled=$true;server_name='target.example.invalid';reality=[ordered]@{enabled=$true;public_key='fixture';short_id='0123456789abcdef'}}}}
+$genericGroups=[Collections.Generic.List[object]]::new();$genericGroups.Add([ordered]@{name='US-West Entry';members=@('Portable-Entry')});$genericGroups.Add([ordered]@{name='Default Exit';members=@('US-West Entry','DIRECT')});$genericGroups.Add([ordered]@{name='Direct Route';members=@('DIRECT','Default Exit')})
+foreach($definition in $genericLayout.business_groups){$genericGroups.Add([ordered]@{name=[string]$definition.name;members=@([string]$definition.default,'US-West Entry','Direct Route')|Select-Object -Unique})}
+foreach($guard in $genericLayout.guard_groups){$genericGroups.Add([ordered]@{name=[string]$guard.name;members=@($guard.members|Where-Object{$_ -notin @('Hong Kong Entry','Europe Entry')})})}
+$genericSpec=[ordered]@{schema_version=1;source_mode='GenericTemplate';output_mode='GenerateNew';fragment_sources=@();manual_nodes=@($genericNode);existing_node_refs=@();groups=@($genericGroups);remove_groups=@('Hong Kong Entry','Europe Entry');group_order=@('US-West Entry','Default Exit','Direct Route')+@($genericLayout.business_groups.name)+@($genericLayout.guard_groups.name)}
+Save-VpsJson -Value $genericSpec -Path $genericSpecPath -Private
+$genericBuild=Invoke-VpsProcess -FilePath $python -ArgumentList @((Join-Path $ProjectRoot 'scripts\build_client_authority.py'),'--clash',(Join-Path $ProjectRoot 'templates\client\clash-general.template.yaml'),'--sing-box',(Join-Path $ProjectRoot 'templates\client\sing-box-general.template.json'),'--spec',$genericSpecPath,'--output',$genericOutput) -TimeoutSeconds 60
+Assert-True ($genericBuild.ExitCode -eq 0) 'generic project templates build a complete candidate without personal authority files'
+$genericManifest=Get-Content -Raw (Join-Path $genericOutput 'candidate-manifest.json')|ConvertFrom-Json -AsHashtable
+Assert-True ([string]$genericManifest.source_mode -eq 'GenericTemplate' -and [string]$genericManifest.requested_output_mode -eq 'GenerateNew') 'candidate manifest records source and requested output modes'
+$publishRoot=Join-Path $candidateRoot 'atomic-publish';[IO.Directory]::CreateDirectory($publishRoot)|Out-Null
+$targetClash=Join-Path $publishRoot 'authority.yaml';$targetSing=Join-Path $publishRoot 'authority.json';[IO.File]::WriteAllText($targetClash,'old-clash');[IO.File]::WriteAllText($targetSing,'old-sing')
+$backupRoot=Join-Path $publishRoot 'backups\fixture'
+& $coreModule {param($cc,$cs,$tc,$ts,$br)Publish-MxhAuthorityPair -CandidateClash $cc -CandidateSingBox $cs -TargetClash $tc -TargetSingBox $ts -BackupRoot $br} (Join-Path $genericOutput 'Clash_General.candidate.yaml') (Join-Path $genericOutput 'sing-box-general.candidate.json') $targetClash $targetSing $backupRoot|Out-Null
+Assert-True ((Get-Content -Raw $targetClash)-match 'Portable-Entry' -and (Get-Content -Raw $targetSing)-match 'Portable-Entry') 'validated authority pair publishes to both selected targets'
+Assert-True ((Get-Content -Raw (Join-Path $backupRoot 'authority.yaml'))-eq'old-clash' -and (Get-Content -Raw (Join-Path $backupRoot 'authority.json'))-eq'old-sing') 'authority overwrite preserves timestamp-scoped rollback copies'
 $cycleSpec = Get-Content -Raw -LiteralPath $designerSpec | ConvertFrom-Json -AsHashtable
 $cycleSpec.groups = @([ordered]@{name='Cycle A';members=@('Cycle B')},[ordered]@{name='Cycle B';members=@('Cycle A')})
 $cyclePath = Join-Path $candidateRoot 'cycle-spec.private.json'; Save-VpsJson -Value $cycleSpec -Path $cyclePath -Private
@@ -974,14 +1018,13 @@ Assert-True ($cycle.ExitCode -ne 0 -and $cycle.StdErr -match 'cycle') 'client au
 $designerInstanceRoot = Join-Path $candidateRoot 'empty-instances'; [IO.Directory]::CreateDirectory($designerInstanceRoot)|Out-Null
 $designerDryOutput = Join-Path $candidateRoot 'dry-output-root'
 $designerDryInput = (@(
-    'n','US-West Entry',$authorityYaml,$authorityJson,
-    'n','1','1','','','n',$designerDryOutput
+    '1','n','US-West Entry','2',$authorityYaml,$authorityJson,'n','1','1','Existing-IPv4','US-West Entry,DIRECT','n','2',$designerDryOutput,$designerDryOutput,'Clash_General.yaml','sing-box-general.json'
 ) -join [Environment]::NewLine) + [Environment]::NewLine
 $designerDry = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile','-File',(Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),'-Mode','ClientConfig','-DryRun','-InstanceRoot',$designerInstanceRoot
 ) -InputText $designerDryInput -TimeoutSeconds 60
 Assert-True ($designerDry.ExitCode -eq 0) 'independent ClientConfig mode completes a no-write DryRun without any managed VPS'
-Assert-True ($designerDry.StdOut -match 'Existing-IPv4' -and $designerDry.StdOut -match 'DryRun') 'ClientConfig can reuse an existing authority node without re-entering credentials'
+Assert-True ($designerDry.StdOut -match 'Existing-IPv4' -and $designerDry.StdOut -match 'DryRun') 'ClientConfig can optionally reuse an existing authority node without re-entering credentials'
 Assert-True (-not(Test-Path -LiteralPath $designerDryOutput)) 'ClientConfig DryRun writes no candidate directory'
 }
 else {
@@ -1071,14 +1114,16 @@ Assert-True ($directBackResult.StdOut -notmatch '__MXH_VPS_WIZARD_' -and $direct
 
 $mainMenuExitResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
-) -InputText ("0" + [Environment]::NewLine) -TimeoutSeconds 60
-Assert-True ($mainMenuExitResult.ExitCode -eq 0) 'main menu exits cleanly with zero'
+) -InputText ("9" + [Environment]::NewLine) -TimeoutSeconds 60
+Assert-True ($mainMenuExitResult.ExitCode -eq 0) 'main menu exits cleanly with numbered option nine'
 $startVpsDeploySource = & $coreModule { (Get-Command Start-VpsDeploy).ScriptBlock.ToString() }
-Assert-True ($startVpsDeploySource -match "-AllowBack\s+-BackLabel\s+'退出'") 'main menu exposes zero as its canonical exit'
-Assert-True (([regex]::Matches($startVpsDeploySource, '退出')).Count -eq 1) 'main menu has no duplicate numbered exit'
+Assert-True ($startVpsDeploySource -match "'项目离线自检',\s*'退出'") 'main menu exposes one numbered exit after offline validation'
+Assert-True (([regex]::Matches($startVpsDeploySource, "'退出'")).Count -eq 1) 'main menu has no duplicate numbered exit option'
+$mainHelpResult=Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @('-NoProfile','-File',(Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),'-Mode','Interactive','-DryRun') -InputText ((@('help','9')-join[Environment]::NewLine)+[Environment]::NewLine) -TimeoutSeconds 60
+Assert-True ($mainHelpResult.ExitCode-eq 0 -and ([regex]::Matches($mainHelpResult.StdOut,'help / h')).Count-ge 2 -and $mainHelpResult.StdOut-match '(?m)^help\r?$') 'main menu help command explains current choices and returns to the menu'
 
 $resumeFixture = (Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json')
-$resumeNavigationInput = (@('2', ('"' + $resumeFixture + '"'), '0', 'b', '0') -join [Environment]::NewLine) + [Environment]::NewLine
+$resumeNavigationInput = (@('2', ('"' + $resumeFixture + '"'), '0', 'b', '9') -join [Environment]::NewLine) + [Environment]::NewLine
 $resumeNavigationResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
 ) -InputText $resumeNavigationInput -TimeoutSeconds 60
@@ -1088,7 +1133,7 @@ Assert-True ($resumeNavigationResult.StdOut -match 'ExampleInstance') 'resume pa
 $cancelInstanceRoot = Join-Path $ProjectRoot '.test-output\wizard-cancel-root'
 $cancelArchive = Join-Path $cancelInstanceRoot 'ExampleProvider\CancelAtSummary'
 $cancelInput = (@(
-    '1', '', 'ExampleProvider', 'CancelAtSummary', '', '192.0.2.62', '', '', '1', '4', '', 'n', 'n', '3', '0'
+    '1', '', 'ExampleProvider', 'CancelAtSummary', '', '192.0.2.62', '', '', '1', '4', '', 'n', 'n', '3', '9'
 ) -join [Environment]::NewLine) + [Environment]::NewLine
 $cancelResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),

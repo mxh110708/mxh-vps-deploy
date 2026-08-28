@@ -250,6 +250,18 @@ function Get-MxhMigrationModuleIds {
     return $ids.ToArray()
 }
 
+function ConvertTo-MxhCompatiblePlan {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][Collections.IDictionary]$Plan)
+    $result=Copy-MxhHashtable -Value $Plan
+    if(-not$result.Contains('NetworkTuning')){$result.NetworkTuning=[ordered]@{Mode='LegacyBaseline';BandwidthMbps=$null;ReferenceRttMs=$null}}
+    if(-not$result.Contains('Komari')){$result.Komari=[ordered]@{Enabled=$false;Endpoint=$null;AgentVersion=$null}}
+    if(-not$result.Contains('Firewall')){$result.Firewall=[ordered]@{Mode='PreserveExisting'}}
+    if(-not$result.Paths.Contains('InstanceDirectory')){$result.Paths.InstanceDirectory=[string]$result.Paths.Archive}
+    if(-not$result.Contains('Compatibility')){$result.Compatibility=[ordered]@{NormalizedBy='MXH-VPS-Deploy';OriginalSchema=if($result.Contains('SchemaVersion')){$result.SchemaVersion}else{$null};NormalizedAt=(Get-Date).ToString('o')}}
+    return $result
+}
+
 function Test-MxhProtocolMigrationSource {
     [CmdletBinding()]
     param(
@@ -385,7 +397,7 @@ function Read-MxhProtocolMigrationSource {
         }
         $candidatePath = (Resolve-Path -LiteralPath $candidatePath.Trim().Trim('"')).Path
         try {
-            $plan = Read-VpsJsonHashtable -Path $candidatePath
+            $plan = ConvertTo-MxhCompatiblePlan -Plan (Read-VpsJsonHashtable -Path $candidatePath)
             $archive = [string]$plan.Paths.Archive
             $state = Read-VpsJsonHashtable -Path (Join-Path $archive 'deployment-state.json')
             Test-MxhProtocolMigrationSource -PlanPath $candidatePath -Plan $plan -State $state | Out-Null
@@ -408,7 +420,13 @@ function Read-MxhProtocolMigrationSource {
                 '使用此实例',
                 '重新选择计划文件',
                 '取消并返回主菜单'
-            ) 1 -AllowBack
+            ) 1 -AllowBack -HelpText @'
+安装并切换：部署目标协议并切换 443；冲突协议保留但停用。
+安装为备用：完成配置和功能验证后恢复原启停状态。
+切换/启停：只改变已安装协议的服务状态。
+卸载：先备份再移除所选协议，其他协议、SSH 和 Komari 不受影响。
+备份管理：查看、恢复或按明确确认删除脚本生成的协议备份。
+'@
         }
         catch {
             if (-not (Test-VpsWizardBackError $_)) { throw }
@@ -1435,7 +1453,7 @@ function New-MxhReadonlyContextFromPlan {
         [Parameter(Mandatory)] [string]$PlanPath
     )
 
-    $plan = Read-VpsJsonHashtable -Path $PlanPath
+    $plan = ConvertTo-MxhCompatiblePlan -Plan (Read-VpsJsonHashtable -Path $PlanPath)
     $archive = [string]$plan.Paths.Archive
     $state = Read-VpsJsonHashtable -Path (Join-Path $archive 'deployment-state.json')
     $secrets = Read-VpsJsonHashtable -Path (Join-Path $archive 'deployment-secrets.private.json')

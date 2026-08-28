@@ -1,0 +1,73 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "local"
+      }
+    ],
+    "final": "local"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 2080
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "DIRECT"
+    },
+    {
+      "type": "block",
+      "tag": "BLOCK"
+    },
+    { "type": "selector", "tag": "US-West Entry", "outbounds": ["DIRECT"], "default": "DIRECT" },
+    { "type": "selector", "tag": "Hong Kong Entry", "outbounds": ["DIRECT"], "default": "DIRECT" },
+    { "type": "selector", "tag": "Europe Entry", "outbounds": ["DIRECT"], "default": "DIRECT" },
+    { "type": "selector", "tag": "Default Exit", "outbounds": ["DIRECT"], "default": "DIRECT" },
+    { "type": "selector", "tag": "Direct Route", "outbounds": ["DIRECT"], "default": "DIRECT" },
+    { "type": "selector", "tag": "AI Services", "outbounds": ["Default Exit", "DIRECT"], "default": "Default Exit" },
+    { "type": "selector", "tag": "Developer Tools", "outbounds": ["Default Exit", "DIRECT"], "default": "Default Exit" },
+    { "type": "selector", "tag": "Academic Research", "outbounds": ["Default Exit", "DIRECT"], "default": "Default Exit" },
+    { "type": "selector", "tag": "Microsoft Services", "outbounds": ["Direct Route", "Default Exit"], "default": "Direct Route" },
+    { "type": "selector", "tag": "Microsoft Global", "outbounds": ["Default Exit", "DIRECT"], "default": "Default Exit" },
+    { "type": "selector", "tag": "Apple Services", "outbounds": ["Direct Route", "Default Exit"], "default": "Direct Route" },
+    { "type": "selector", "tag": "Game Platforms", "outbounds": ["Default Exit", "DIRECT"], "default": "Default Exit" },
+    { "type": "selector", "tag": "Game Downloads", "outbounds": ["Direct Route", "Default Exit"], "default": "Direct Route" },
+    { "type": "selector", "tag": "Social & Messaging", "outbounds": ["Default Exit", "DIRECT"], "default": "Default Exit" },
+    { "type": "selector", "tag": "Streaming Media", "outbounds": ["Default Exit", "DIRECT"], "default": "Default Exit" },
+    { "type": "selector", "tag": "UDP Guard", "outbounds": ["Default Exit", "DIRECT", "BLOCK"], "default": "Default Exit" },
+    { "type": "selector", "tag": "Catch-All", "outbounds": ["Default Exit", "DIRECT"], "default": "Default Exit" },
+    { "type": "selector", "tag": "WebRTC Guard", "outbounds": ["BLOCK", "Default Exit", "DIRECT"], "default": "BLOCK" },
+    { "type": "selector", "tag": "QUIC Guard", "outbounds": ["BLOCK", "Default Exit", "DIRECT"], "default": "BLOCK" },
+    { "type": "selector", "tag": "Ad Block", "outbounds": ["BLOCK", "DIRECT", "Default Exit"], "default": "BLOCK" },
+    { "type": "selector", "tag": "Legacy Ports", "outbounds": ["BLOCK", "DIRECT", "Default Exit"], "default": "BLOCK" }
+  ],
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      { "port": [25, 3306], "outbound": "Legacy Ports" },
+      { "network": "udp", "port": 443, "outbound": "QUIC Guard" },
+      { "network": "udp", "port": [3478, 3479, 3480, 3481], "outbound": "WebRTC Guard" },
+      { "domain_suffix": ["openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "perplexity.ai"], "outbound": "AI Services" },
+      { "domain_suffix": ["github.com", "githubusercontent.com", "npmjs.org", "pypi.org", "docker.com", "docker.io"], "outbound": "Developer Tools" },
+      { "domain_suffix": ["arxiv.org", "ieee.org", "springer.com", "nature.com"], "outbound": "Academic Research" },
+      { "domain_suffix": ["microsoft.com", "office.com", "live.com"], "outbound": "Microsoft Services" },
+      { "domain_suffix": ["apple.com", "icloud.com"], "outbound": "Apple Services" },
+      { "domain_suffix": ["xbox.com", "xboxlive.com", "steampowered.com", "steamcommunity.com"], "outbound": "Game Platforms" },
+      { "domain_suffix": ["steamcontent.com"], "outbound": "Game Downloads" },
+      { "domain_suffix": ["telegram.org", "t.me", "twitter.com", "x.com"], "outbound": "Social & Messaging" },
+      { "domain_suffix": ["youtube.com", "netflix.com", "spotify.com"], "outbound": "Streaming Media" }
+    ],
+    "final": "Catch-All",
+    "auto_detect_interface": true
+  }
+}

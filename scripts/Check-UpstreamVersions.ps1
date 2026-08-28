@@ -5,10 +5,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $versions = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'config\versions.json') | ConvertFrom-Json
+$settings = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'config\app-defaults.json') | ConvertFrom-Json
 $headers = @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'mxh-vps-deploy-version-check' }
-$xray = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/XTLS/Xray-core/releases/latest'
-$komari = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/komari-monitor/komari-agent/releases/latest'
-$singBox = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/SagerNet/sing-box/releases/latest'
+$xray = Invoke-RestMethod -Headers $headers -Uri $settings.release_apis.xray
+$komariController = Invoke-RestMethod -Headers $headers -Uri $settings.release_apis.komari_controller
+$komariAgent = Invoke-RestMethod -Headers $headers -Uri $settings.release_apis.komari_agent
+$singBox = Invoke-RestMethod -Headers $headers -Uri $settings.release_apis.sing_box
+foreach($release in @($xray,$komariController,$komariAgent,$singBox)){if($release.draft -or $release.prerelease){throw "latest API 返回了非正式版本：$($release.tag_name)"}}
 
 [pscustomobject]@{
     Component = 'Xray-core'
@@ -19,8 +22,14 @@ $singBox = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repo
 [pscustomobject]@{
     Component = 'Komari Agent'
     Pinned = [string]$versions.komari_agent.version
-    Upstream = ([string]$komari.tag_name).TrimStart('v')
-    Same = ([string]$versions.komari_agent.version -eq ([string]$komari.tag_name).TrimStart('v'))
+    Upstream = ([string]$komariAgent.tag_name).TrimStart('v')
+    Same = ([string]$versions.komari_agent.version -eq ([string]$komariAgent.tag_name).TrimStart('v'))
+}
+[pscustomobject]@{
+    Component = 'Komari Controller'
+    Pinned = [string]$versions.komari_controller.version
+    Upstream = ([string]$komariController.tag_name).TrimStart('v')
+    Same = ([string]$versions.komari_controller.version -eq ([string]$komariController.tag_name).TrimStart('v'))
 }
 [pscustomobject]@{
     Component = 'sing-box'
