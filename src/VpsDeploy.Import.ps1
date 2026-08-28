@@ -218,9 +218,9 @@ function New-MxhExistingImportPlanInteractive {
         Write-Host "  将执行：$keyAction；$sshAction；只读识别现有协议和配置"
         Write-Host "  套餐标称带宽：$($plan.NetworkTuning.BandwidthMbps) Mbps（RTT 稍后可选）"
         Write-Host '  不会执行：重装协议、改端口、覆盖现有防火墙、修改客户端权威配置'
-        $choice = Read-VpsMenu '请核对纳管方案' @('确认并开始纳管', '返回修改', '取消') 1 -AllowBack
+        $choice = Read-VpsMenu '请核对纳管方案' @('确认并开始纳管', '取消本次纳管') 1 -AllowBack
         if ($choice -eq 1) { return $plan }
-        if ($choice -eq 3) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
+        if ($choice -eq 2) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         $index = $steps.Count - 1
     }
 }

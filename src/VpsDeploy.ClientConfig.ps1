@@ -172,12 +172,12 @@ function Read-MxhRegionGroups {
 function Read-MxhSecretText {
     param([Parameter(Mandatory)][string]$Prompt,[switch]$AllowBack)
     while ($true) {
-        $hint = if($AllowBack){'（隐藏输入；输入 b 返回）'}else{'（隐藏输入）'}
+        $hint = if($AllowBack){'（隐藏输入；输入 0 返回上一级）'}else{'（隐藏输入）'}
         $secure = Read-Host ($Prompt+$hint) -AsSecureString
         try { $value = ConvertFrom-VpsSecureString $secure }
         finally { $secure.Dispose() }
         if(Test-VpsClearCommand $value){Clear-VpsScreen;continue}
-        if($AllowBack -and $value.Trim().Equals('b',[StringComparison]::OrdinalIgnoreCase)){throw [InvalidOperationException]::new($script:VpsWizardBackMarker)}
+        if($AllowBack -and $value.Trim() -eq '0'){throw [InvalidOperationException]::new($script:VpsWizardBackMarker)}
         if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
         Write-VpsUi '该敏感项不能为空。' Warning
     }
@@ -572,6 +572,11 @@ function Invoke-MxhClientAuthorityDesigner {
 数据源：只读扫描已纳管计划；未纳管节点可在生成流程中隐藏输入。
 校验配置：不改文件，执行可用 Mihomo 核心、严格 JSON 和 4 MiB 检查。
 '@
+        }catch{
+            if(Test-VpsWizardBackError $_){throw}
+            throw
+        }
+        try{
             if($choice -eq 1){Invoke-MxhBuildClientAuthority -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot -ClashAuthorityPath $ClashAuthorityPath -SingBoxAuthorityPath $SingBoxAuthorityPath -ClientOutputRoot $ClientOutputRoot -DryRun:$DryRun;return}
             elseif($choice -eq 2){Invoke-MxhEditClientLayoutDefaults -ProjectRoot $ProjectRoot}
             elseif($choice -eq 3){
@@ -587,6 +592,6 @@ function Invoke-MxhClientAuthorityDesigner {
                 foreach($core in @(Get-VpsMihomoCorePaths -ProjectRoot $ProjectRoot)){$data=Join-Path ([IO.Path]::GetTempPath()) ('mxh-mihomo-'+[guid]::NewGuid().ToString('N'));[IO.Directory]::CreateDirectory($data)|Out-Null;try{$t=Invoke-VpsProcess $core @('-t','-d',$data,'-f',$clash.Trim('"')) -TimeoutSeconds 180;if($t.ExitCode-ne 0){throw "未通过 $(Split-Path -Leaf $core)：$($t.StdErr)"}}finally{Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue}}
                 Get-Content -Raw -LiteralPath $sing.Trim('"')|ConvertFrom-Json|Out-Null;$bytes=(Get-Item -LiteralPath $sing.Trim('"')).Length;if($bytes-ge 4MB){throw "sing-box 文件为 $bytes 字节，达到或超过 4 MiB。"};Write-VpsUi '两份配置已通过当前可用的本地语法/结构检查。' Success
             }
-        }catch{if(Test-VpsWizardBackError $_){return};if(Test-VpsNavigationError $_){Write-VpsUi (Get-VpsNavigationMessage $_) Info;continue};throw}
+        }catch{if(Test-VpsWizardBackError $_){Write-VpsUi '已返回客户端配置设计器。' Info;continue};if(Test-VpsNavigationError $_){Write-VpsUi (Get-VpsNavigationMessage $_) Info;continue};throw}
     }
 }

@@ -487,6 +487,11 @@ function Invoke-MxhMaintenanceCenter {
 健康审计与漂移检测只读。客户端配置设计器主要操作本地文件，不连接 VPS；只有选择覆盖权威配置时才会写入所选文件。
 完整退役是高风险操作，分级确认且保留 SSH；请先完成最终备份。
 '@
+        }catch{
+            if(Test-VpsWizardBackError $_){throw}
+            throw
+        }
+        try{
             switch($choice){
                 1{Invoke-MxhManualRestoreCenter $context}
                 2{Invoke-MxhHealthAuditInteractive $context}
@@ -500,6 +505,6 @@ function Invoke-MxhMaintenanceCenter {
                 10{$candidate=$null;continue}
             }
             if(Read-VpsYesNo '继续维护当前实例？' $true){$candidate=$source.PlanPath;continue};return
-        }catch{if(Test-VpsWizardBackError $_){return};throw}
+        }catch{if(Test-VpsWizardBackError $_){Write-VpsUi '已返回现有 VPS 运维中心。' Info;$candidate=$source.PlanPath;continue};throw}
     }
 }

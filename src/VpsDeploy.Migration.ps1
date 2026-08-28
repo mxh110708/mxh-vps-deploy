@@ -392,7 +392,7 @@ function Read-MxhProtocolMigrationSource {
                 param($v)
                 $candidate = $v.Trim().Trim('"')
                 Test-Path -LiteralPath $candidate -PathType Leaf
-            } -ValidationMessage '找不到该计划文件。可输入 b 返回主菜单。'
+            } -ValidationMessage '找不到该计划文件。可输入 0 返回主菜单。'
             $candidatePath = $inputPath.Trim().Trim('"')
         }
         $candidatePath = (Resolve-Path -LiteralPath $candidatePath.Trim().Trim('"')).Path
@@ -418,7 +418,6 @@ function Read-MxhProtocolMigrationSource {
         try {
             $choice = Read-VpsMenu '请选择实例操作' @(
                 '使用此实例',
-                '重新选择计划文件',
                 '取消并返回主菜单'
             ) 1 -AllowBack -HelpText @'
 安装并切换：部署目标协议并切换 443；冲突协议保留但停用。
@@ -430,12 +429,12 @@ function Read-MxhProtocolMigrationSource {
         }
         catch {
             if (-not (Test-VpsWizardBackError $_)) { throw }
-            $choice = 2
+            $choice = 0
         }
         if ($choice -eq 1) {
             return [pscustomobject]@{ PlanPath = $candidatePath; Plan = $plan; State = $state; Inventory = $inventory }
         }
-        if ($choice -eq 3) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
+        if ($choice -eq 2) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         $candidatePath = $null
     }
 }
@@ -786,8 +785,7 @@ function New-VpsNetworkTuningPlanInteractive {
     }
     Write-Host '  协议、端口和防火墙：不改变'
     Write-Host '  回滚：应用前备份 sysctl，并启用 20 分钟服务端恢复保护'
-    $confirm = Read-VpsMenu '请核对网络调优方案' @('确认并执行', '取消并返回') 1 -AllowBack
-    if ($confirm -ne 1) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
+    [void](Read-VpsMenu '请核对网络调优方案' @('确认并执行') 1 -AllowBack)
     return [pscustomobject]@{ Plan = $plan; Source = $source }
 }
 
@@ -1157,16 +1155,15 @@ function New-MxhProtocolMigrationDetails {
         try {
             $choice = Read-VpsMenu '请核对协议安装方案' @(
                 '确认并进入协议安装模块计划',
-                '返回修改上一项',
                 '取消并返回主菜单'
             ) 1 -AllowBack
         }
         catch {
             if (-not (Test-VpsWizardBackError $_)) { throw }
-            $choice = 2
+            $choice = 0
         }
         if ($choice -eq 1) { return [pscustomobject]@{ Plan = $plan; Source = $Source } }
-        if ($choice -eq 3) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
+        if ($choice -eq 2) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         for ($candidate = $steps.Count - 1; $candidate -ge 0; $candidate--) {
             if (& $steps[$candidate].ShouldRun) { $index = $candidate; break }
         }
@@ -1209,8 +1206,7 @@ function New-MxhProtocolStateDetails {
         Write-VpsUi '执行后不会有入口协议监听 TCP 443；SSH 与其他服务不受影响。' Warning
     }
     Show-MxhProtocolInventory -Inventory $plan.Migration.FinalInventory
-    $confirm = Read-VpsMenu '请核对状态变更' @('确认并执行', '返回上一级') 1 -AllowBack
-    if ($confirm -ne 1) { throw [InvalidOperationException]::new($script:VpsWizardBackMarker) }
+    [void](Read-VpsMenu '请核对状态变更' @('确认并执行') 1 -AllowBack)
     return [pscustomobject]@{ Plan = $plan; Source = $Source }
 }
 
@@ -1264,7 +1260,7 @@ function Invoke-MxhProtocolBackupCleanup {
         '仅 VPS 上的 protocol-lifecycle/protocol-migration 备份',
         '本地与 VPS 两者'
     ) 1 -AllowBack
-    $keep = [int](Read-VpsText '保留最近几份（0 表示全部删除）' -Default '3' -AllowBack -Validate {
+    $keep = [int](Read-VpsText '保留最近几份（0 表示全部删除）' -Default '3' -AllowBack -ZeroIsValue -Validate {
             param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 0 -and $n -le 100
         } -ValidationMessage '请输入 0–100 之间的整数。')
 
@@ -1333,32 +1329,52 @@ function New-VpsProtocolMigrationPlanInteractive {
     $candidatePath = $PlanPath
     while ($true) {
         $source = Read-MxhProtocolMigrationSource -ProjectRoot $ProjectRoot -PlanPath $candidatePath -DryRun:$DryRun
-        try {
-            $choice = Read-VpsMenu '现有 VPS 协议管理' @(
-                '安装新协议并切换使用（保留原协议但停用冲突项）',
-                '安装新协议作为备用（验证后恢复当前状态）',
-                '切换/启停已安装协议',
-                '卸载已停用协议',
-                '清理协议变更备份',
-                '重新选择实例'
-            ) 1 -AllowBack
-            switch ($choice) {
-                1 { return New-MxhProtocolMigrationDetails -Source $source -ProjectRoot $ProjectRoot -Operation InstallActivate }
-                2 { return New-MxhProtocolMigrationDetails -Source $source -ProjectRoot $ProjectRoot -Operation InstallStandby }
-                3 { return New-MxhProtocolStateDetails -Source $source }
-                4 { return New-MxhProtocolUninstallDetails -Source $source }
-                5 {
-                    Invoke-MxhProtocolBackupCleanup -Source $source -ProjectRoot $ProjectRoot -DryRun:$DryRun
-                    $candidatePath = $source.PlanPath
-                    continue
+        $returnToSource = $false
+        while ($true) {
+            try {
+                $choice = Read-VpsMenu '现有 VPS 协议管理' @(
+                    '安装新协议并切换使用（保留原协议但停用冲突项）',
+                    '安装新协议作为备用（验证后恢复当前状态）',
+                    '切换/启停已安装协议',
+                    '卸载已停用协议',
+                    '清理协议变更备份',
+                    '重新选择实例'
+                ) 1 -AllowBack
+            }
+            catch {
+                if (-not (Test-VpsWizardBackError $_)) { throw }
+                $candidatePath = $source.PlanPath
+                $returnToSource = $true
+                break
+            }
+            try {
+                switch ($choice) {
+                    1 { return New-MxhProtocolMigrationDetails -Source $source -ProjectRoot $ProjectRoot -Operation InstallActivate }
+                    2 { return New-MxhProtocolMigrationDetails -Source $source -ProjectRoot $ProjectRoot -Operation InstallStandby }
+                    3 { return New-MxhProtocolStateDetails -Source $source }
+                    4 { return New-MxhProtocolUninstallDetails -Source $source }
+                    5 {
+                        Invoke-MxhProtocolBackupCleanup -Source $source -ProjectRoot $ProjectRoot -DryRun:$DryRun
+                        continue
+                    }
+                    6 {
+                        $candidatePath = $null
+                        $returnToSource = $true
+                        break
+                    }
                 }
-                6 { $candidatePath = $null; continue }
+                if ($returnToSource) { break }
+            }
+            catch {
+                if (-not (Test-VpsWizardBackError $_)) { throw }
+                Write-VpsUi '已返回协议管理操作选择。' Info
+                continue
             }
         }
-        catch {
-            if (-not (Test-VpsWizardBackError $_)) { throw }
-            $candidatePath = $source.PlanPath
-            Write-VpsUi '已返回协议管理操作选择。' Info
+        if ($returnToSource) {
+            if ($candidatePath) { Write-VpsUi '已返回实例核对。' Info }
+            else { Write-VpsUi '请重新选择实例。' Info }
+            continue
         }
     }
 }

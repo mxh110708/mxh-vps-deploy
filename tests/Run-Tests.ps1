@@ -655,7 +655,7 @@ $wizardInputLines = @(
     '',                  # accept the visible archive-root default
     'ExampleProvider',
     'OriginalInstance',
-    'b',                 # return from node name to instance name
+    '0',                 # return from node name to instance name
     'RevisedInstance',
     '',                  # accept regenerated node name
     '192.0.2.60',
@@ -668,7 +668,7 @@ $wizardInputLines = @(
     '',                  # default admin user
     'n',                 # automatic high ports
     'n',                 # no Komari
-    '2',                 # summary: return to previous active item
+    '0',                 # summary: return to previous active item
     'n',
     '1'                  # confirm revised summary
 )
@@ -705,8 +705,8 @@ $branchDefaultRoot = Join-Path $ProjectRoot '.test-output\wizard-default-root'
 $branchResetArchive = Join-Path $branchResetRoot 'ExampleProvider\BranchReset'
 $branchInputs = @(
     $branchResetRoot, 'ExampleProvider', 'BranchReset', '', '192.0.2.61', '', '', '1', '1', '1', '', 'n',
-    '1', 'target.example.com', 'y', 'y', 'n', '1000', 'n', '2',
-    'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', # Komari -> role
+    '1', 'target.example.com', 'y', 'y', 'n', '1000', 'n', '0',
+    '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', # Komari -> role
     '4', '', 'n', 'n', '1'                   # switch to MonitorOnly and confirm
 )
 $branchQueue = [Collections.Generic.Queue[string]]::new()
@@ -734,22 +734,48 @@ Assert-True ($branchQueue.Count -eq 0) 'branch-reset wizard consumed the expecte
 Assert-True (-not (Test-Path -LiteralPath $branchResetArchive)) 'in-memory branch-reset test writes no plan or archive'
 
 Write-Host '== Interactive navigation hierarchy ==' -ForegroundColor Cyan
-$hierarchyInput = (@('clear', '1', 'b', '2', 'b', 'cls', '9') -join [Environment]::NewLine) + [Environment]::NewLine
+$hierarchyInput = (@('clear', '1', '0', '2', '0', 'cls', '9') -join [Environment]::NewLine) + [Environment]::NewLine
 $hierarchyResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
 ) -InputText $hierarchyInput -TimeoutSeconds 60
 Assert-True ($hierarchyResult.ExitCode -eq 0) 'first new-deployment field and resume path both return to the main menu'
 Assert-True ($hierarchyResult.StdOut -match 'MXH VPS Deploy' -and `
-    [regex]::Matches($hierarchyResult.StdOut, '(?m)^b\r?$').Count -eq 2) 'interactive hierarchy consumed back commands in both child workflows'
+    [regex]::Matches($hierarchyResult.StdOut, '(?m)^0\r?$').Count -eq 2) 'interactive hierarchy consumed the sole back command in both child workflows'
 Assert-True ($hierarchyResult.StdOut -notmatch '__MXH_VPS_WIZARD_' -and $hierarchyResult.StdErr -notmatch '__MXH_VPS_WIZARD_') 'navigation markers never leak to the console'
 Assert-True ($hierarchyResult.StdOut -match '(?m)^clear\r?$' -and $hierarchyResult.StdOut -match '(?m)^cls\r?$') 'clear and cls are consumed by live menu navigation'
 
-$providerPrefixInput = (@('1', '', 'BreadCloud', 'b', 'b', 'b', '9') -join [Environment]::NewLine) + [Environment]::NewLine
-$providerPrefixResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+$literalProviderB = & $coreModule {
+    function Read-Host { param([string]$Prompt); return 'b' }
+    try { Read-VpsText '服务商名称' -AllowBack }
+    finally { Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue }
+}
+Assert-True ($literalProviderB -eq 'b') 'literal b is ordinary provider text and never a navigation alias'
+
+$literalBackWord = & $coreModule {
+    function Read-Host { param([string]$Prompt); return 'back' }
+    try { Read-VpsText '普通文本' -AllowBack }
+    finally { Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue }
+}
+Assert-True ($literalBackWord -eq 'back') 'literal back is ordinary text and never a navigation alias'
+
+$subMenuNavigation = & $coreModule {
+    $script:NavigationQueue = [Collections.Generic.Queue[string]]::new()
+    @('9', 'b', '0') | ForEach-Object { $script:NavigationQueue.Enqueue($_) }
+    function Read-Host { param([string]$Prompt); return $script:NavigationQueue.Dequeue() }
+    try { Read-VpsMenu '导航规范测试' @('执行') 1 -AllowBack }
+    catch { return [pscustomobject]@{ Marker = $_.Exception.Message; Remaining = $script:NavigationQueue.Count } }
+    finally {
+        Remove-Item Function:\Read-Host -ErrorAction SilentlyContinue
+        Remove-Variable NavigationQueue -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+Assert-True ($subMenuNavigation.Marker -eq '__MXH_VPS_WIZARD_BACK__' -and $subMenuNavigation.Remaining -eq 0) 'submenus reject 9 and b, then use only 0 to return'
+
+$clientMenuReturnInput = (@('7', '0', '9') -join [Environment]::NewLine) + [Environment]::NewLine
+$clientMenuReturnResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
-) -InputText $providerPrefixInput -TimeoutSeconds 60
-Assert-True ($providerPrefixResult.ExitCode -eq 0) 'provider names beginning with b remain valid while exact b navigates back'
-Assert-True ($providerPrefixResult.StdOut -match '(?m)^BreadCloud\r?$') 'BreadCloud is accepted as a provider value, not parsed as a back command'
+) -InputText $clientMenuReturnInput -TimeoutSeconds 60
+Assert-True ($clientMenuReturnResult.ExitCode -eq 0 -and $clientMenuReturnResult.StdOut -match '(?m)^9\r?$') 'client designer 0 returns to the main menu and only the following 9 exits'
 
 $migrationDryRoot = Join-Path $ProjectRoot '.test-output\migration-dryrun-source'
 $migrationEntryRoot = Join-Path $ProjectRoot '.test-output\migration-validation-entry'
@@ -1039,7 +1065,7 @@ $backupCleanupPlan = New-TestMigrationSourceFixture -Template $realitySource -Ro
 $backupCleanupCandidate = Join-Path $backupCleanupRoot 'migration-backups\20260101-000000-Enable-RealityEntry'
 [IO.Directory]::CreateDirectory($backupCleanupCandidate) | Out-Null
 [IO.File]::WriteAllText((Join-Path $backupCleanupCandidate 'deployment-plan.json'), 'fixture')
-$backupCleanupInput = (@('1', '5', '1', '0', 'DELETE-BACKUPS', '3') -join [Environment]::NewLine) + [Environment]::NewLine
+$backupCleanupInput = (@('1', '5', '1', '0', 'DELETE-BACKUPS', '0', '2') -join [Environment]::NewLine) + [Environment]::NewLine
 $backupCleanupResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
     '-Mode', 'Migrate', '-DryRun', '-PlanPath', $backupCleanupPlan
@@ -1105,7 +1131,7 @@ Assert-True ($importResult.StdOut -match '1000 Mbps' -and $importResult.StdOut -
 Assert-True (-not (Test-Path -LiteralPath $importArchive)) 'existing VPS import DryRun creates no private archive or plan'
 [IO.File]::Delete($importKey)
 
-$directBackInput = 'b' + [Environment]::NewLine
+$directBackInput = '0' + [Environment]::NewLine
 $directBackResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'New', '-DryRun'
 ) -InputText $directBackInput -TimeoutSeconds 60
@@ -1116,6 +1142,10 @@ $mainMenuExitResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
 ) -InputText ("9" + [Environment]::NewLine) -TimeoutSeconds 60
 Assert-True ($mainMenuExitResult.ExitCode -eq 0) 'main menu exits cleanly with numbered option nine'
+$mainMenuReservedResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
+) -InputText ((@('0', 'b', '9') -join [Environment]::NewLine) + [Environment]::NewLine) -TimeoutSeconds 60
+Assert-True ($mainMenuReservedResult.ExitCode -eq 0 -and $mainMenuReservedResult.StdOut -match '(?m)^b\r?$' -and $mainMenuReservedResult.StdOut -match '(?m)^9\r?$') 'main menu rejects 0 and b and exits only with 9'
 $startVpsDeploySource = & $coreModule { (Get-Command Start-VpsDeploy).ScriptBlock.ToString() }
 Assert-True ($startVpsDeploySource -match "'项目离线自检',\s*'退出'") 'main menu exposes one numbered exit after offline validation'
 Assert-True (([regex]::Matches($startVpsDeploySource, "'退出'")).Count -eq 1) 'main menu has no duplicate numbered exit option'
@@ -1123,7 +1153,7 @@ $mainHelpResult=Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @('-NoProfil
 Assert-True ($mainHelpResult.ExitCode-eq 0 -and ([regex]::Matches($mainHelpResult.StdOut,'help / h')).Count-ge 2 -and $mainHelpResult.StdOut-match '(?m)^help\r?$') 'main menu help command explains current choices and returns to the menu'
 
 $resumeFixture = (Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json')
-$resumeNavigationInput = (@('2', ('"' + $resumeFixture + '"'), '0', 'b', '9') -join [Environment]::NewLine) + [Environment]::NewLine
+$resumeNavigationInput = (@('2', ('"' + $resumeFixture + '"'), '0', '0', '9') -join [Environment]::NewLine) + [Environment]::NewLine
 $resumeNavigationResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'), '-Mode', 'Interactive', '-DryRun'
 ) -InputText $resumeNavigationInput -TimeoutSeconds 60
@@ -1133,7 +1163,7 @@ Assert-True ($resumeNavigationResult.StdOut -match 'ExampleInstance') 'resume pa
 $cancelInstanceRoot = Join-Path $ProjectRoot '.test-output\wizard-cancel-root'
 $cancelArchive = Join-Path $cancelInstanceRoot 'ExampleProvider\CancelAtSummary'
 $cancelInput = (@(
-    '1', '', 'ExampleProvider', 'CancelAtSummary', '', '192.0.2.62', '', '', '1', '4', '', 'n', 'n', '3', '9'
+    '1', '', 'ExampleProvider', 'CancelAtSummary', '', '192.0.2.62', '', '', '1', '4', '', 'n', 'n', '2', '9'
 ) -join [Environment]::NewLine) + [Environment]::NewLine
 $cancelResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile', '-File', (Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),
@@ -1152,7 +1182,7 @@ $preExecutionContext = [pscustomobject]@{
 }
 $preExecutionBack = & $coreModule {
     param($Context)
-    function Read-Host { param([string]$Prompt); return 'b' }
+    function Read-Host { param([string]$Prompt); return '0' }
     try {
         Invoke-VpsModulePipeline -Context $Context -OnlyModule @('audit')
         return '<no-navigation-signal>'

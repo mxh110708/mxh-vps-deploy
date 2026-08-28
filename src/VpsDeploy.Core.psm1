@@ -56,7 +56,8 @@ function Show-VpsHelp {
     Write-Host ''
     Write-Host '帮助说明' -ForegroundColor Cyan
     if ([string]::IsNullOrWhiteSpace($Text)) {
-        Write-Host '  输入列表编号执行对应操作；0、b 或 back 返回上一级。'
+        Write-Host '  主菜单输入 9 退出；子菜单或向导输入 0 返回上一级。'
+        Write-Host '  b 和 back 始终作为普通文本，不再承担导航功能。'
         Write-Host '  输入 clear 或 cls 清屏；输入 help 或 h 再次显示帮助。'
     }
     else {
@@ -141,12 +142,16 @@ function Read-VpsText {
         [string]$ValidationMessage = '输入无效，请重新输入。',
         [switch]$AllowEmpty,
         [switch]$AllowBack,
+        [switch]$ZeroIsValue,
         [string]$HelpText
     )
 
     while ($true) {
         $suffix = if ($Default) { " [$Default]" } else { '' }
-        $backHint = if ($AllowBack) { '（b/back 返回；字面值 b 输入 \\b）' } else { '' }
+        $backHint = if ($AllowBack) {
+            if ($ZeroIsValue) { '（本字段的 0 是有效数值；返回请在上一层菜单操作）' }
+            else { '（输入 0 返回上一级）' }
+        } else { '' }
         $value = Read-Host ($Prompt + $suffix + $backHint)
         if ($null -eq $value) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         if (Test-VpsClearCommand $value) {
@@ -154,13 +159,16 @@ function Read-VpsText {
             continue
         }
         if (Test-VpsHelpCommand $value) {
-            Show-VpsHelp $(if ($HelpText) { $HelpText } else { "请按提示输入此字段；clear/cls 清屏$(if($AllowBack){'；b/back 返回；\\b 表示字面值 b'})。" })
+            $navigationHelp = if ($AllowBack) {
+                if ($ZeroIsValue) { '；本字段的 0 是有效数值，返回请在上一层菜单操作' }
+                else { '；输入 0 返回上一级' }
+            } else { '' }
+            Show-VpsHelp $(if ($HelpText) { $HelpText } else { "请按提示输入此字段；clear/cls 清屏$navigationHelp。" })
             continue
         }
-        if ($AllowBack -and $value.Trim().ToLowerInvariant() -in @('b','back')) {
+        if ($AllowBack -and -not $ZeroIsValue -and $value.Trim() -eq '0') {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
         }
-        if ($AllowBack -and $value -eq '\b') { $value = 'b' }
         if ([string]::IsNullOrWhiteSpace($value)) {
             $value = $Default
         }
@@ -185,9 +193,11 @@ function Read-VpsYesNo {
     )
 
     $hint = if ($Default) { '[Y/n]' } else { '[y/N]' }
-    if ($AllowBack) { $hint += ' [b=返回]' }
+    if ($AllowBack) { $hint += ' [0=返回]' }
     while ($true) {
-        $answer = (Read-Host "$Prompt $hint").Trim().ToLowerInvariant()
+        $rawAnswer = Read-Host "$Prompt $hint"
+        if ($null -eq $rawAnswer) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
+        $answer = $rawAnswer.Trim().ToLowerInvariant()
         if (Test-VpsClearCommand $answer) {
             Clear-VpsScreen
             continue
@@ -196,12 +206,12 @@ function Read-VpsYesNo {
             Show-VpsHelp '输入 y/yes/是 表示确认；输入 n/no/否 表示拒绝；留空采用方括号中的默认值。'
             continue
         }
-        if ($AllowBack -and $answer -in @('b','back')) {
+        if ($AllowBack -and $answer -eq '0') {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
         }
         if (-not $answer) { return $Default }
         if ($answer -in @('y', 'yes', '是', '好', '1')) { return $true }
-        if ($answer -in @('n', 'no', '否', '不', '0')) { return $false }
+        if ($answer -in @('n', 'no', '否', '不')) { return $false }
         Write-VpsUi '请输入 y 或 n。' Warning
     }
 }
@@ -213,7 +223,7 @@ function Read-VpsMenu {
         [Parameter(Mandatory)] [string[]]$Options,
         [int]$Default = 1,
         [switch]$AllowBack,
-        [string]$BackLabel = '返回上一步',
+        [string]$BackLabel = '返回上一级',
         [string]$HelpText
     )
 
@@ -230,6 +240,7 @@ function Read-VpsMenu {
     & $showMenu
     while ($true) {
         $raw = Read-Host "请选择 [$Default]"
+        if ($null -eq $raw) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         if (Test-VpsClearCommand $raw) {
             Clear-VpsScreen
             & $showMenu
@@ -240,7 +251,7 @@ function Read-VpsMenu {
             & $showMenu
             continue
         }
-        if ($AllowBack -and $raw.Trim().ToLowerInvariant() -in @('0','b','back')) {
+        if ($AllowBack -and $raw.Trim() -eq '0') {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
         }
         if (-not $raw) { return $Default }
@@ -614,7 +625,7 @@ function New-VpsInteractivePlan {
     Write-Host ''
     Write-Host 'MXH VPS Deploy - 新部署向导' -ForegroundColor White
     Write-Host '支持初始密码或服务商现有私钥；现有 OpenSSH 私钥默认复用，也可明确选择生成新的管理密钥。' -ForegroundColor DarkGray
-    Write-Host '普通文本和是/否输入 b 可返回；编号菜单输入 0 或 b 可返回。第一项返回主菜单。' -ForegroundColor DarkGray
+    Write-Host '所有可返回的文本、是/否和编号输入统一使用 0；b/back 均按普通内容处理。第一项输入 0 返回主菜单。' -ForegroundColor DarkGray
 
     $defaultInstanceRoot = [IO.Path]::GetFullPath($InstanceRoot.Trim().Trim('"')).TrimEnd('\', '/')
 
@@ -756,7 +767,7 @@ function New-VpsInteractivePlan {
                     $candidatePlan = Get-VpsExistingPlanPath -InstanceDirectory $candidateInstance
                     if (-not $candidatePlan) { break }
                     Write-VpsUi "该实例已有部署计划：$candidatePlan" Warning
-                    Write-VpsUi '请换一个实例名称，或输入 b 返回主菜单后选择【继续未完成部署】。' Info
+                    Write-VpsUi '请换一个实例名称，或逐项输入 0 返回主菜单后选择【继续未完成部署】。' Info
                     $old = $value
                 }
                 if ($old -and $old -ne $value) {
@@ -1263,16 +1274,15 @@ function New-VpsInteractivePlan {
         try {
             $reviewChoice = Read-VpsMenu '请核对部署摘要' @(
                 '确认方案并继续',
-                '返回修改上一项',
                 '取消本次向导（不写入任何部署计划）'
             ) 1 -AllowBack
         }
         catch {
             if (-not (Test-VpsWizardBackError $_)) { throw }
-            $reviewChoice = 2
+            $reviewChoice = 0
         }
         if ($reviewChoice -eq 1) { return $plan }
-        if ($reviewChoice -eq 3) {
+        if ($reviewChoice -eq 2) {
             throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)
         }
 
@@ -2439,8 +2449,17 @@ function Test-VpsProject {
     param([Parameter(Mandatory)] [string]$ProjectRoot)
 
     $testScript = Join-Path $ProjectRoot 'tests\Run-Tests.ps1'
-    & $testScript -ProjectRoot $ProjectRoot
-    if ($LASTEXITCODE -ne 0) { throw '项目自检失败。' }
+    $pwsh = Get-VpsCommandPath -Name 'pwsh'
+    $safeScript = $testScript.Replace("'", "''")
+    $safeRoot = $ProjectRoot.Replace("'", "''")
+    $command = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(`$false); & '$safeScript' -ProjectRoot '$safeRoot'"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $result = Invoke-VpsProcess -FilePath $pwsh -ArgumentList @(
+        '-NoProfile', '-OutputFormat', 'Text', '-EncodedCommand', $encoded
+    ) -TimeoutSeconds 900
+    if ($result.StdOut) { Write-Host $result.StdOut -NoNewline }
+    if ($result.StdErr) { Write-Host $result.StdErr -ForegroundColor Red -NoNewline }
+    if ($result.ExitCode -ne 0) { throw "项目自检失败（退出码 $($result.ExitCode)）。" }
 }
 
 function Show-VpsPlanSummary {
@@ -2528,7 +2547,7 @@ function Read-VpsResumePlan {
                 param($v)
                 $candidate = $v.Trim().Trim('"')
                 Test-Path -LiteralPath $candidate -PathType Leaf
-            } -ValidationMessage '找不到该计划文件。可输入 b 返回主菜单。'
+            } -ValidationMessage '找不到该计划文件。可输入 0 返回主菜单。'
             $candidatePath = $inputPath.Trim().Trim('"')
         }
         else {
@@ -2566,16 +2585,15 @@ function Read-VpsResumePlan {
         try {
             $choice = Read-VpsMenu '继续部署前请核对计划' @(
                 '使用此计划继续',
-                '重新选择 deployment-plan.json',
                 '取消并返回主菜单'
             ) 1 -AllowBack
         }
         catch {
             if (-not (Test-VpsWizardBackError $_)) { throw }
-            $choice = 2
+            $choice = 0
         }
         if ($choice -eq 1) { return $plan }
-        if ($choice -eq 3) {
+        if ($choice -eq 2) {
             throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)
         }
         $candidatePath = $null
@@ -2709,7 +2727,9 @@ function Start-VpsDeploy {
                     -OnlyModule $OnlyModule -InstanceRoot $InstanceRoot -ClashAuthorityPath $ClashAuthorityPath `
                     -SingBoxAuthorityPath $SingBoxAuthorityPath -ClientOutputRoot $ClientOutputRoot `
                     -DryRun:$DryRun -NonInteractive:$NonInteractive
-                return
+                Write-VpsUi '当前功能已结束，已返回主菜单。' Info
+                $PlanPath = $null
+                continue
             }
             catch {
                 if (-not (Test-VpsNavigationError $_)) { throw }

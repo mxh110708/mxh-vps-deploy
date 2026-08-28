@@ -1,4 +1,27 @@
-# 模块开发
+# MXH VPS Deploy 模块与内部结构
+
+本文面向维护脚本的人。普通使用者应先阅读 [中文完整使用手册](USER-GUIDE.zh-CN.md)。
+
+## 结构总览
+
+```text
+Start-VPSDeploy.ps1
+  └─ src/VpsDeploy.Core.psm1          主入口、向导、上下文、模块流水线
+       ├─ src/VpsDeploy.Import.ps1     既有 VPS 纳管
+       ├─ src/VpsDeploy.Migration.ps1  协议生命周期与独立网络调优
+       ├─ src/VpsDeploy.Operations.ps1 运维中心
+       └─ src/VpsDeploy.ClientConfig.ps1 客户端权威配置设计器
+
+modules/*.ps1                         可排序的新部署/生命周期模块
+assets/remote/*.sh                    通过 stdin 参数执行的远端脚本
+templates/client/*                    无个人数据的客户端基础模板
+config/*.json                         通用默认与固定版本目录
+tests/Run-Tests.ps1                   跨模块回归、交互和秘密扫描
+```
+
+主菜单导航属于核心而不是业务模块：主菜单 `9` 才退出；子层 `0` 才返回；`b/back` 永远作为普通输入。新增交互入口必须复用 `Read-VpsText`、`Read-VpsYesNo` 和 `Read-VpsMenu`，不能自行发明另一套返回别名。
+
+## 模块定义
 
 `modules/*.ps1` 每个文件返回一个模块定义 Hashtable：
 
@@ -86,7 +109,7 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 
 运维远端脚本统一使用 `maintenance-*.sh`。健康审计不得输出配置正文；备份/恢复路径必须解析后严格位于 `/root/vps-deploy-backups`；退役脚本永远不删除 SSH 或操作系统。
 
-## 约定
+## 开发约定
 
 - 远端 Bash 放在 `assets/remote`，必须通过 `bash -n`；
 - 远端脚本从 `VPS_PARAM_*` 环境变量读取参数，不从 argv 读取秘密；
@@ -97,6 +120,25 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 - 需要特殊供应商脚本的功能，应做成显式模块，不能塞进通用基础模块。
 - `-OnlyModule` 不会自动补跑依赖；维护可信 TLS 时必须按证书、服务、客户端导出和最终验收的实际依赖顺序显式执行。
 
-## 状态
+- 通用源码、模板和文档不得硬编码个人盘符、用户名、实例 IP、权威客户端配置或归档目录；个人默认只能进入被 Git 忽略的 `.local.json`；
+- 新写入应进入 `Paths.Archive` 指向的实例 `MXH-VPS-Deploy` 子目录，不得把运行产物散落到项目源码；
+- 新菜单必须有明确子入口和帮助文本。退出只属于主菜单，子菜单的 9 可以是普通编号，不能被全局解释为退出；
+- 修改远端状态的独立功能必须使用事务/回滚或说明为何无法恢复；只读功能不得混入隐式写入。
+
+## 状态与兼容
 
 每完成一个模块，核心更新实例私有目录中的 `deployment-state.json`。继续模式默认跳过已成功模块。维护模式可用 `-OnlyModule` 显式重跑，但会显示风险确认。
+
+新计划使用受管子目录布局；旧计划按照其 `Paths` 原值继续读取。代码不能只靠目录是否存在推断协议状态，应同时核对计划、状态和远端 inventory。没有计划的既有 VPS 必须走 Import，而不是伪造一个最小 `deployment-plan.json`。
+
+## 验证要求
+
+提交前至少运行：
+
+```powershell
+pwsh -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
+```
+
+该入口在隔离的 PowerShell 子进程中运行测试，避免导入模块的脚本级变量污染当前交互会话，并统一使用 UTF-8 文本输出。CI 同时覆盖 Windows PowerShell 环境和 Unix shell/Bash 语法。
+
+新增远端功能还应在可牺牲测试 VPS 上完成：预检、备份、实际变更、真实协议测试、提交以及失败回滚。一次成功 DryRun、配置语法或服务监听均不能代替端到端测试。

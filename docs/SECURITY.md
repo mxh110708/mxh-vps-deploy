@@ -1,14 +1,18 @@
-# 安全模型
+# MXH VPS Deploy 安全模型
+
+本文说明工具“可以信任什么、修改什么、如何恢复以及明确不处理什么”。面向普通使用者的操作步骤见 [中文完整使用手册](USER-GUIDE.zh-CN.md)；本文不包含任何真实实例参数。
 
 ## 1. 信任边界
 
 源码仓库只包含通用逻辑和占位符。真实 IP、端口、UUID、short-id、Reality PrivateKey、AnyTLS 密码、TLS 私钥、ECH 服务端密钥、客户端密钥、SSH 私钥、密码、Cloudflare/Komari Token 与完整客户端配置都属于实例私有数据。
 
-默认私有归档：
+通用私有归档布局：
 
 ```text
-F:\VPS\VPS-Instances\<Provider>\<Instance>\MXH-VPS-Deploy
+<实例归档根目录>\<服务商>\<实例>\MXH-VPS-Deploy
 ```
+
+归档根目录来自命令行、本机环境变量或被 Git 忽略的本机默认文件，不在通用源码中硬编码盘符、用户名或个人路径。
 
 私有文件会尝试关闭继承 ACL，只授予当前 Windows 用户和 SYSTEM。个人电脑默认采用“尽力收紧”：ACL 操作失败会明确警告，但不会让部署流程失去可用性；设置环境变量 `MXH_VPS_STRICT_LOCAL_ACL=1` 后才把 ACL 失败视为硬错误。无论何种模式，秘密扫描、Git 忽略和禁止控制台输出秘密仍是强制边界。
 
@@ -119,3 +123,15 @@ Certbot 通过 DNS-01 签发和续期证书，不要求开放 80。工具停用�
 ## 12. Git 防泄漏
 
 `.gitignore` 排除运行数据；`scripts/Test-NoSecrets.ps1` 在本地与 CI 中检查私钥块、ECH 服务端 key、UUID、典型 Token 和常见实例凭据文件名。它是最后一道保护，不替代人工检查。
+
+本机可保存 `config/app-defaults.local.json` 和 `config/client-layout.local.json` 作为个人偏好，两者默认被 Git 忽略；通用默认文件、客户端模板和文档不得含个人节点、权威配置路径或秘密。
+
+## 13. 用户仍需承担的边界
+
+- 保持服务商控制台/VNC/救援入口可用；
+- 在 VPS 内规则验证后同步维护服务商网页安全组；
+- 对证书续期、Cloudflare Token IP 白名单和域名有效期做长期检查；
+- 对客户端真实握手、出口 IP、UDP 和晚高峰线路质量做最终验收；
+- 在删除远端恢复点、退役实例或撤销 Token 前确认本地备份可读。
+
+任何“脚本执行成功”都不等于服务商网络、第三方 target、DNS、证书机构或客户端运行时永远不会变化。
