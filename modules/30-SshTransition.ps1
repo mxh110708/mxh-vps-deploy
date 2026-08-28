@@ -1,13 +1,17 @@
 @{
     Id        = 'ssh-transition'
-    Name      = '过渡到初始 + 主/救援双高位 SSH'
+    Name      = '过渡到主/救援双 SSH 入口'
     Order     = 30
     Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('base-system')
     IsEnabled = { param($Context) $true }
     Invoke    = {
         param($Context)
-        Write-VpsUi "请确认服务商安全组已放行 TCP $($Context.Plan.Ports.SshPrimary) 和 $($Context.Plan.Ports.SshRescue)。" Warning
+        $sshPorts = @([int]$Context.Plan.Ports.SshPrimary, [int]$Context.Plan.Ports.SshRescue) | Sort-Object -Unique
+        $newPorts = @($sshPorts | Where-Object { $_ -ne [int]$Context.Plan.Server.BootstrapSshPort })
+        if ($newPorts.Count -gt 0) {
+            Write-VpsUi "请确认服务商安全组已放行新增 SSH TCP 端口：$($newPorts -join ', ')。" Warning
+        }
         if ($Context.Plan.Role -eq 'ShadowsocksLanding') {
             Write-VpsUi "同时应只对可信入口 IP 放行 TCP+UDP $($Context.Plan.Ports.LandingShadowsocks)，不要对全网开放。" Warning
         }
@@ -25,7 +29,7 @@
         if (-not $Context.State.Contains('BackupDirectories')) { $Context.State.BackupDirectories = @{} }
         $Context.State.BackupDirectories.SshTransition = $backup
 
-        foreach ($port in @([int]$Context.Plan.Ports.SshPrimary, [int]$Context.Plan.Ports.SshRescue)) {
+        foreach ($port in $sshPorts) {
             if (-not (Test-VpsSshConnection -Context $Context -User 'root' -Port $port)) {
                 throw "root 无法通过新端口 $port 建立全新公钥连接。"
             }
@@ -38,6 +42,11 @@
         }
         $Context.State.CurrentManagementPort = [int]$Context.Plan.Ports.SshPrimary
         Save-VpsContext -Context $Context
-        Write-VpsUi '两个高位端口均通过 root/admin/sudo 验证；初始端口仍保留。' Success
+        if (Test-VpsBootstrapSshPortRetained -Plan $Context.Plan) {
+            Write-VpsUi '复用的服务商主端口与新增救援端口均通过 root/admin/sudo 验证。' Success
+        }
+        else {
+            Write-VpsUi '两个新高位端口均通过 root/admin/sudo 验证；初始端口暂时保留。' Success
+        }
     }
 }

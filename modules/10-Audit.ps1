@@ -27,8 +27,8 @@
         Write-VpsUi "系统：$($audit.OsId) $($audit.OsVersion)，架构：$($audit.Architecture)，内核：$($audit.Kernel)" Info
         Write-VpsUi ("资源：内存约 {0:N0} MiB，根磁盘约 {1:N1} GiB" -f ($audit.MemoryKiB / 1024), ($audit.DiskKiB / 1MB)) Info
 
-        if ($audit.OsId -notin @('debian', 'ubuntu')) {
-            throw "当前首版只支持 Debian/Ubuntu，检测到：$($audit.OsId)"
+        if (-not (Test-VpsSupportedOsRelease -Id $audit.OsId -VersionId $audit.OsVersion)) {
+            throw "当前已验证系统仅为 Debian 12/13 或 Ubuntu 22.04/24.04，检测到：$($audit.OsId) $($audit.OsVersion)"
         }
         if ($audit.Architecture -notin @('x86_64', 'amd64', 'aarch64', 'arm64')) {
             throw "当前架构尚未支持：$($audit.Architecture)"

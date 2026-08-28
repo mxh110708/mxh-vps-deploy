@@ -323,6 +323,63 @@ function Get-VpsRandomPort {
     throw '无法生成不冲突的高位端口。'
 }
 
+function Test-VpsReusableBootstrapSshPort {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [int]$Port)
+
+    # Provider-assigned non-privileged SSH ports can remain the managed primary
+    # entry.  Keep protocol-reserved ports out of this path because those ports
+    # must coexist with SSH during the staged deployment.
+    return $Port -ge 1024 -and $Port -le 65535 -and $Port -notin @(8443)
+}
+
+function New-VpsSshPortSelection {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [int]$BootstrapPort)
+
+    if ($BootstrapPort -lt 1 -or $BootstrapPort -gt 65535) {
+        throw '服务商当前 SSH 端口必须在 1–65535。'
+    }
+    $reserved = @($BootstrapPort, 443, 8443)
+    $reuseBootstrap = Test-VpsReusableBootstrapSshPort -Port $BootstrapPort
+    $primary = if ($reuseBootstrap) {
+        $BootstrapPort
+    }
+    else {
+        Get-VpsRandomPort -Exclude $reserved
+    }
+    $rescue = Get-VpsRandomPort -Exclude ($reserved + @($primary))
+    return [ordered]@{
+        ReuseBootstrap = $reuseBootstrap
+        Primary = [int]$primary
+        Rescue = [int]$rescue
+    }
+}
+
+function Test-VpsBootstrapSshPortRetained {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [Collections.IDictionary]$Plan)
+
+    $bootstrap = [int]$Plan.Server.BootstrapSshPort
+    return $bootstrap -in @([int]$Plan.Ports.SshPrimary, [int]$Plan.Ports.SshRescue)
+}
+
+function Test-VpsSupportedOsRelease {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Id,
+        [Parameter(Mandatory)] [string]$VersionId
+    )
+
+    $normalizedId = $Id.Trim().ToLowerInvariant()
+    $normalizedVersion = $VersionId.Trim().Trim('"')
+    switch ($normalizedId) {
+        'debian' { return $normalizedVersion -match '^(12|13)(?:\.|$)' }
+        'ubuntu' { return $normalizedVersion -match '^(22\.04|24\.04)(?:\.|$)' }
+        default { return $false }
+    }
+}
+
 function Get-MxhAnyTlsOfficialPaddingScheme {
     return @(
         'stop=8',
@@ -683,25 +740,30 @@ function New-VpsInteractivePlan {
     $getArchivePath = { Join-Path (& $getInstancePath) $script:VpsManagedDirectoryName }
     $ensureAutoPorts = {
         $basis = [string]$wizard.BootstrapPort
-        if ($wizard.PortBasis -ne $basis -or -not $wizard.AutoSshPrimary) {
-            $usedPorts = @([int]$wizard.BootstrapPort, 443)
-            $wizard.AutoSshPrimary = Get-VpsRandomPort -Exclude $usedPorts
+        $regenerated = $wizard.PortBasis -ne $basis -or -not $wizard.AutoSshPrimary
+        if ($regenerated) {
+            $sshSelection = New-VpsSshPortSelection -BootstrapPort ([int]$wizard.BootstrapPort)
+            $usedPorts = @([int]$wizard.BootstrapPort, 443, 8443)
+            $wizard.AutoSshPrimary = [int]$sshSelection.Primary
             $usedPorts += [int]$wizard.AutoSshPrimary
-            $wizard.AutoSshRescue = Get-VpsRandomPort -Exclude $usedPorts
+            $wizard.AutoSshRescue = [int]$sshSelection.Rescue
             $usedPorts += [int]$wizard.AutoSshRescue
             $wizard.AutoXrayBackup = Get-VpsRandomPort -Exclude $usedPorts
             $usedPorts += [int]$wizard.AutoXrayBackup
             $wizard.AutoLandingPort = Get-VpsRandomPort -Exclude $usedPorts
             $wizard.PortBasis = $basis
         }
-        if (-not $wizard.ManualPorts) {
+        if (-not $wizard.ManualPorts -or $regenerated) {
             $wizard.SshPrimary = $wizard.AutoSshPrimary
             $wizard.SshRescue = $wizard.AutoSshRescue
             $wizard.XrayBackup = $wizard.AutoXrayBackup
             $wizard.LandingPort = $wizard.AutoLandingPort
         }
         else {
-            if (-not $wizard.SshPrimary) { $wizard.SshPrimary = $wizard.AutoSshPrimary }
+            if (Test-VpsReusableBootstrapSshPort -Port ([int]$wizard.BootstrapPort)) {
+                $wizard.SshPrimary = [int]$wizard.BootstrapPort
+            }
+            elseif (-not $wizard.SshPrimary) { $wizard.SshPrimary = $wizard.AutoSshPrimary }
             if (-not $wizard.SshRescue) { $wizard.SshRescue = $wizard.AutoSshRescue }
             if (-not $wizard.XrayBackup) { $wizard.XrayBackup = $wizard.AutoXrayBackup }
             if (-not $wizard.LandingPort) { $wizard.LandingPort = $wizard.AutoLandingPort }
@@ -891,12 +953,14 @@ function New-VpsInteractivePlan {
         [pscustomobject]@{
             Id = 'manual-ports'; ShouldRun = { $true }; Run = {
                 & $ensureAutoPorts
-                $wizard.ManualPorts = Read-VpsYesNo '是否手动指定高位端口？' ([bool]$wizard.ManualPorts) -AllowBack
+                $wizard.ManualPorts = Read-VpsYesNo '是否手动指定需要新增的高位端口？' ([bool]$wizard.ManualPorts) -AllowBack
                 if (-not $wizard.ManualPorts) { & $ensureAutoPorts }
             }
         },
         [pscustomobject]@{
-            Id = 'ssh-primary'; ShouldRun = { [bool]$wizard.ManualPorts }; Run = {
+            Id = 'ssh-primary'; ShouldRun = {
+                [bool]$wizard.ManualPorts -and -not (Test-VpsReusableBootstrapSshPort -Port ([int]$wizard.BootstrapPort))
+            }; Run = {
                 $wizard.SshPrimary = [int](Read-VpsText 'SSH 主端口' -Default ([string]$wizard.SshPrimary) -AllowBack -Validate {
                     param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -ne [int]$wizard.BootstrapPort
                 } -ValidationMessage '请输入 20000–59999 内且不与初始 SSH 端口冲突的端口。')
@@ -906,7 +970,7 @@ function New-VpsInteractivePlan {
             Id = 'ssh-rescue'; ShouldRun = { [bool]$wizard.ManualPorts }; Run = {
                 $wizard.SshRescue = [int](Read-VpsText 'SSH 救援端口' -Default ([string]$wizard.SshRescue) -AllowBack -Validate {
                     param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 20000 -and $n -le 59999 -and $n -notin @([int]$wizard.BootstrapPort, [int]$wizard.SshPrimary)
-                } -ValidationMessage '请输入未与初始 SSH/主 SSH 冲突的 20000–59999 端口。')
+                } -ValidationMessage '请输入未与主 SSH 冲突的 20000–59999 救援端口。')
             }
         },
         [pscustomobject]@{
@@ -2523,7 +2587,15 @@ function Show-VpsPlanSummary {
         $keyLabel = if ([string]$Plan.SshKey.Mode -eq 'ReuseExisting') { '复用现有密钥（不轮换公钥）' } else { '生成实例管理密钥' }
         Write-Host "  管理密钥：$keyLabel"
     }
-    Write-Host "  SSH：$($Plan.Server.BootstrapSshPort) -> $($Plan.Ports.SshPrimary) + $($Plan.Ports.SshRescue)"
+    if ([int]$Plan.Ports.SshPrimary -eq [int]$Plan.Ports.SshRescue) {
+        Write-Host "  SSH：保留单一现有端口 $($Plan.Ports.SshPrimary)（尚无独立救援入口）"
+    }
+    elseif (Test-VpsBootstrapSshPortRetained -Plan $Plan) {
+        Write-Host "  SSH：复用服务商端口 $($Plan.Ports.SshPrimary) 作为主端口 + 新增救援端口 $($Plan.Ports.SshRescue)"
+    }
+    else {
+        Write-Host "  SSH：$($Plan.Server.BootstrapSshPort) -> $($Plan.Ports.SshPrimary) + $($Plan.Ports.SshRescue)"
+    }
     $realityInstalled = Test-MxhProtocolInstalled -Plan $Plan -Role 'RealityEntry'
     $anyTlsInstalled = Test-MxhProtocolInstalled -Plan $Plan -Role 'AnyTlsEntry'
     $shadowsocksInstalled = Test-MxhProtocolInstalled -Plan $Plan -Role 'ShadowsocksLanding'
@@ -2563,20 +2635,26 @@ function Show-VpsPlanSummary {
         Write-Host "  自动回滚：$($Plan.Migration.RollbackTimeoutMinutes) 分钟"
     }
     $showedPortWarning = $false
+    $sshFirewallText = if (Test-VpsBootstrapSshPortRetained -Plan $Plan) {
+        '一个新增的 SSH 救援高位端口（服务商主端口继续保留）'
+    }
+    else {
+        '两个新的 SSH 高位端口'
+    }
     if ($realityInstalled) {
-        Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口、443 和 Xray 救援端口。' Warning
+        Write-VpsUi "请先在服务商安全组放行${sshFirewallText}、443 和 Xray 救援端口。" Warning
         $showedPortWarning = $true
     }
     if ($anyTlsInstalled) {
-        Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口和 TCP 443；AnyTLS 与 Xray 必须互斥。' Warning
+        Write-VpsUi "请先在服务商安全组放行${sshFirewallText}和 TCP 443；AnyTLS 与 Xray 必须互斥。" Warning
         $showedPortWarning = $true
     }
     if ($shadowsocksInstalled) {
-        Write-VpsUi '请放行两个 SSH 高位端口；Shadowsocks TCP+UDP 端口必须只允许上面填写的可信入口 IP。' Warning
+        Write-VpsUi "请放行${sshFirewallText}；Shadowsocks TCP+UDP 端口必须只允许上面填写的可信入口 IP。" Warning
         $showedPortWarning = $true
     }
     if (-not $showedPortWarning) {
-        Write-VpsUi '请先在服务商安全组临时放行两个 SSH 高位端口。' Warning
+        Write-VpsUi "请先在服务商安全组放行${sshFirewallText}。" Warning
     }
 }
 
@@ -2811,6 +2889,8 @@ Export-ModuleMember -Function @(
     'Invoke-VpsScpDownload', 'Invoke-VpsScpUpload', 'Initialize-VpsBootstrapAccess', 'Test-VpsSshConnection',
     'Save-VpsContext', 'Save-VpsJson', 'Protect-VpsPrivateFile', 'Get-VpsSshKeyPath',
     'Invoke-VpsProcess', 'Get-VpsCommandPath', 'Get-VpsModules', 'Get-VpsRandomPort',
+    'Test-VpsReusableBootstrapSshPort', 'New-VpsSshPortSelection', 'Test-VpsBootstrapSshPortRetained',
+    'Test-VpsSupportedOsRelease',
     'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',
     'Read-VpsNetworkTuningSettings', 'Get-VpsConservativeNetworkPlan',
     'Get-MxhRealityTargetSettings', 'Set-MxhRealityExternalTarget',

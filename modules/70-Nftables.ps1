@@ -1,6 +1,6 @@
 @{
     Id        = 'nftables-transition'
-    Name      = '应用保留旧 SSH 的过渡 nftables'
+    Name      = '应用包含全部计划 SSH 入口的过渡 nftables'
     Order     = 70
     Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('ssh-transition')

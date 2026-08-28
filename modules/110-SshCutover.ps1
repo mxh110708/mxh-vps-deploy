@@ -1,19 +1,35 @@
 @{
     Id        = 'ssh-cutover'
-    Name      = '最终关闭服务商初始 SSH 端口'
+    Name      = '最终确认 SSH 主/救援入口'
     Order     = 110
     Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('final-validation')
     IsEnabled = { param($Context) $true }
     Invoke    = {
         param($Context)
+        $primary = [int]$Context.Plan.Ports.SshPrimary
+        $rescue = [int]$Context.Plan.Ports.SshRescue
+        if (Test-VpsBootstrapSshPortRetained -Plan $Context.Plan) {
+            foreach ($port in @($primary, $rescue) | Sort-Object -Unique) {
+                if (-not (Test-VpsSshConnection -Context $Context -User 'root' -Port $port)) {
+                    throw "保留服务商端口时 root SSH $port 复验失败。"
+                }
+                if (-not (Test-VpsSshConnection -Context $Context -User $Context.Plan.AdminUser -Port $port -TestSudo)) {
+                    throw "保留服务商端口时 admin sudo SSH $port 复验失败。"
+                }
+            }
+            $Context.State.BootstrapSshRemoved = $false
+            $Context.State.BootstrapSshReused = $true
+            $Context.State.CurrentManagementPort = $primary
+            Save-VpsContext -Context $Context
+            Write-VpsUi '服务商提供的高位 SSH 已作为主端口保留；未创建第三个 SSH 端口。' Success
+            return
+        }
         Write-VpsUi "即将从 sshd 和本机 nftables 移除初始端口 $($Context.Plan.Server.BootstrapSshPort)。" Warning
         Write-VpsUi '远端已准备 5 分钟自动回滚：若新连接验证失败，会恢复三端口配置。' Info
         if (-not $Context.NonInteractive -and -not (Read-VpsYesNo '确认执行最终收口？' $true)) {
             throw '用户取消最终 SSH 收口。'
         }
-        $primary = [int]$Context.Plan.Ports.SshPrimary
-        $rescue = [int]$Context.Plan.Ports.SshRescue
         $params = @{ SSH_PRIMARY = [string]$primary; SSH_RESCUE = [string]$rescue }
         $pending = Invoke-VpsRemoteScript -Context $Context -Asset 'ssh-cutover.sh' -Parameters $params -Port $primary
         if ($pending.StdOut -notmatch 'VPSDEPLOY_CUTOVER_PENDING') { throw 'SSH 收口未进入待确认状态。' }
@@ -53,6 +69,7 @@
         $backup = Get-VpsMarkerValue $nft.StdOut BACKUP_DIR -Required
         $Context.State.BackupDirectories.NftablesFinal = $backup
         $Context.State.BootstrapSshRemoved = $true
+        $Context.State.BootstrapSshReused = $false
         $Context.State.CurrentManagementPort = $primary
         Save-VpsContext -Context $Context
 

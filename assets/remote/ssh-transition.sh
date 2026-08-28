@@ -11,6 +11,13 @@ for port in "$VPS_PARAM_BOOTSTRAP_PORT" "$VPS_PARAM_SSH_PRIMARY" "$VPS_PARAM_SSH
     exit 1
   }
 done
+[[ "$VPS_PARAM_SSH_PRIMARY" != "$VPS_PARAM_SSH_RESCUE" ]] || {
+  echo 'Primary and rescue SSH ports must be different.' >&2
+  exit 1
+}
+mapfile -t ssh_ports < <(printf '%s\n' \
+  "$VPS_PARAM_BOOTSTRAP_PORT" "$VPS_PARAM_SSH_PRIMARY" "$VPS_PARAM_SSH_RESCUE" | sort -n -u)
+(( ${#ssh_ports[@]} >= 2 )) || { echo 'At least two unique SSH ports are required.' >&2; exit 1; }
 
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 backup_dir="/root/vps-deploy-backups/${stamp}/ssh"
@@ -41,21 +48,23 @@ while IFS= read -r file; do
   fi
 done < <(find /etc/ssh -maxdepth 2 -type f \( -path '/etc/ssh/sshd_config' -o -path '/etc/ssh/sshd_config.d/*.conf' \) -print)
 
-cat > "$managed" <<EOF
-Port ${VPS_PARAM_BOOTSTRAP_PORT}
-Port ${VPS_PARAM_SSH_PRIMARY}
-Port ${VPS_PARAM_SSH_RESCUE}
+{
+  for port in "${ssh_ports[@]}"; do
+    printf 'Port %s\n' "$port"
+  done
+  cat <<'EOF'
 
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
 EOF
+} > "$managed"
 chmod 0644 "$managed"
 
 sshd -t
 effective="$(sshd -T)"
-for port in "$VPS_PARAM_BOOTSTRAP_PORT" "$VPS_PARAM_SSH_PRIMARY" "$VPS_PARAM_SSH_RESCUE"; do
+for port in "${ssh_ports[@]}"; do
   grep -qx "port $port" <<<"$effective" || { echo "Effective SSH port missing: $port" >&2; exit 1; }
 done
 grep -qx 'pubkeyauthentication yes' <<<"$effective"
@@ -71,7 +80,7 @@ else
   systemctl reload ssh.service 2>/dev/null || systemctl reload sshd.service
 fi
 sleep 1
-for port in "$VPS_PARAM_BOOTSTRAP_PORT" "$VPS_PARAM_SSH_PRIMARY" "$VPS_PARAM_SSH_RESCUE"; do
+for port in "${ssh_ports[@]}"; do
   ss -H -lntp "sport = :$port" | grep -q sshd || { echo "sshd is not listening on $port" >&2; exit 1; }
 done
 

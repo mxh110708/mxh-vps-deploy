@@ -145,6 +145,38 @@ $importSsh = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remot
 Assert-True ($importSsh -match 'PasswordAuthentication no' -and $importSsh -match 'PubkeyAuthentication yes') 'optional existing-VPS key-only hardening remains available'
 Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Import.ps1')) -match 'EnforceKeyOnlySsh') 'existing VPS import explicitly records whether SSH authentication is preserved or hardened'
 
+Write-Host '== Supported operating systems and SSH port strategy ==' -ForegroundColor Cyan
+Assert-True (Test-VpsSupportedOsRelease -Id debian -VersionId 12) 'Debian 12 is an explicitly supported release'
+Assert-True (Test-VpsSupportedOsRelease -Id Debian -VersionId '13.1') 'Debian 13 point releases remain supported'
+Assert-True (Test-VpsSupportedOsRelease -Id ubuntu -VersionId 22.04) 'Ubuntu 22.04 is supported'
+Assert-True (Test-VpsSupportedOsRelease -Id ubuntu -VersionId 24.04) 'Ubuntu 24.04 is supported'
+Assert-True (-not (Test-VpsSupportedOsRelease -Id debian -VersionId 11)) 'Debian 11 is outside the verified contract'
+Assert-True (-not (Test-VpsSupportedOsRelease -Id ubuntu -VersionId 20.04)) 'Ubuntu 20.04 is outside the verified contract'
+
+$port22Selection = New-VpsSshPortSelection -BootstrapPort 22
+Assert-True (-not [bool]$port22Selection.ReuseBootstrap) 'port 22 follows the replacement path'
+Assert-True ([int]$port22Selection.Primary -ge 20000 -and [int]$port22Selection.Primary -le 59999) 'port 22 gets a high primary port'
+Assert-True ([int]$port22Selection.Rescue -ge 20000 -and [int]$port22Selection.Rescue -le 59999) 'port 22 gets a high rescue port'
+Assert-True ([int]$port22Selection.Primary -ne [int]$port22Selection.Rescue) 'generated primary and rescue ports differ'
+
+$providerHighSelection = New-VpsSshPortSelection -BootstrapPort 45222
+Assert-True ([bool]$providerHighSelection.ReuseBootstrap) 'provider high SSH port is reusable'
+Assert-True ([int]$providerHighSelection.Primary -eq 45222) 'provider high SSH port becomes the primary'
+Assert-True ([int]$providerHighSelection.Rescue -ne 45222) 'provider high SSH path adds only a distinct rescue port'
+Assert-True (-not (Test-VpsReusableBootstrapSshPort -Port 8443)) 'loopback HTTPS target port is not reused for SSH'
+$retainedPortPlan = [ordered]@{
+    Server = [ordered]@{ BootstrapSshPort = 45222 }
+    Ports = [ordered]@{ SshPrimary = 45222; SshRescue = [int]$providerHighSelection.Rescue }
+}
+Assert-True (Test-VpsBootstrapSshPortRetained -Plan $retainedPortPlan) 'plan records provider high port as a final SSH entry'
+$sshTransition = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\ssh-transition.sh')
+Assert-True ($sshTransition -match 'sort -n -u' -and $sshTransition -match 'ssh_ports') 'remote SSH transition de-duplicates a reused bootstrap port'
+Assert-True ($sshTransition -match 'Primary and rescue SSH ports must be different') 'remote SSH transition rejects a duplicate rescue port'
+$sshCutoverModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\110-SshCutover.ps1')
+Assert-True ($sshCutoverModule -match 'BootstrapSshReused' -and $sshCutoverModule -match '未创建第三个 SSH 端口') 'final SSH module preserves a reused provider port without creating a third entry'
+$ciText = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot '.github\workflows\ci.yml')
+Assert-True ($ciText -match 'debian:12-slim') 'CI includes a Debian 12 package and OpenSSH contract job'
+
 Write-Host '== Bootstrap authentication arguments ==' -ForegroundColor Cyan
 $sshArgumentContext = [pscustomobject]@{
     Plan = [ordered]@{

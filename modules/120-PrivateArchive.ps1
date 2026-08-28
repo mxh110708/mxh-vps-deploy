@@ -168,6 +168,7 @@ Bootstrap Existing Key Path: $bootstrapKeyPath
 SSH Primary Port: $($Context.Plan.Ports.SshPrimary)
 SSH Rescue Port: $($Context.Plan.Ports.SshRescue)
 Bootstrap SSH Port Removed: $($Context.State.BootstrapSshRemoved)
+Bootstrap SSH Port Reused: $(if ($Context.State.Contains('BootstrapSshReused')) { $Context.State.BootstrapSshReused } else { $false })
 Admin sudo password: $($Context.Secrets.AdminPassword)
 SSH private key: $(Get-VpsSshKeyPath $Context)
 
