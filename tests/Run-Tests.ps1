@@ -1193,6 +1193,29 @@ $preExecutionBack = & $coreModule {
 Assert-True ($preExecutionBack -eq '__MXH_VPS_WIZARD_BACK__') 'final pre-execution confirmation can return before any remote module starts'
 Assert-True ($preExecutionContext.State.Modules.Count -eq 0) 'pre-execution back leaves every module untouched'
 
+Write-Host '== Final private archive checksum timing ==' -ForegroundColor Cyan
+$checksumFixture = Join-Path $ProjectRoot '.test-output\private-archive-checksum'
+[IO.Directory]::CreateDirectory($checksumFixture) | Out-Null
+$checksumStatePath = Join-Path $checksumFixture 'deployment-state.json'
+$checksumConfigPath = Join-Path $checksumFixture 'server-configs\fixture.json'
+[IO.Directory]::CreateDirectory((Split-Path -Parent $checksumConfigPath)) | Out-Null
+[IO.File]::WriteAllText($checksumStatePath, '{"Modules":{"private-archive":{"Status":"Success"}}}', [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($checksumConfigPath, '{"fixture":true}', [Text.UTF8Encoding]::new($false))
+$checksumContext = [pscustomobject]@{ ArchivePath = $checksumFixture; DryRun = $false }
+& $coreModule { param($Context) Update-VpsPrivateArchiveChecksums -Context $Context } $checksumContext
+$checksumLines = @(Get-Content -LiteralPath (Join-Path $checksumFixture 'SHA256SUMS-private.txt'))
+$checksumEntries = [ordered]@{}
+foreach ($line in $checksumLines) {
+    if ($line -match '^([0-9a-f]{64})  (.+)$') { $checksumEntries[$Matches[2]] = $Matches[1] }
+}
+Assert-True ($checksumEntries.Contains('deployment-state.json')) 'final checksum includes deployment state'
+Assert-True ($checksumEntries['deployment-state.json'] -eq (Get-FileHash -LiteralPath $checksumStatePath -Algorithm SHA256).Hash.ToLowerInvariant()) 'final checksum matches persisted success state'
+$pipelineSource = & $coreModule { (Get-Command Invoke-VpsModulePipeline).ScriptBlock.ToString() }
+$successStateIndex = $pipelineSource.IndexOf("Set-VpsModuleState -Context `$Context -Id `$module.Id -Status Success")
+$finalChecksumIndex = $pipelineSource.IndexOf('Update-VpsPrivateArchiveChecksums -Context $Context')
+Assert-True ($successStateIndex -ge 0 -and $finalChecksumIndex -gt $successStateIndex) 'pipeline refreshes archive checksums after success state persistence'
+[IO.Directory]::Delete($checksumFixture, $true)
+
 $testOutputRoot = Join-Path $ProjectRoot '.test-output'
 if (Test-Path -LiteralPath $testOutputRoot) {
     $remainingTestOutput = @(Get-ChildItem -LiteralPath $testOutputRoot -Force)

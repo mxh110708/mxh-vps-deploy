@@ -1492,6 +1492,30 @@ function Set-VpsModuleState {
     Save-VpsContext -Context $Context
 }
 
+function Update-VpsPrivateArchiveChecksums {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Context)
+
+    if ($Context.DryRun) { return }
+    $archive = [IO.Path]::GetFullPath([string]$Context.ArchivePath).TrimEnd('\', '/')
+    if (-not (Test-Path -LiteralPath $archive -PathType Container)) {
+        throw '实例私有归档目录不存在，无法生成校验和。'
+    }
+    $checksumPath = Join-Path $archive 'SHA256SUMS-private.txt'
+    $files = Get-ChildItem -LiteralPath $archive -File -Recurse |
+        Where-Object { -not $_.FullName.Equals($checksumPath, [StringComparison]::OrdinalIgnoreCase) }
+    $lines = foreach ($file in $files) {
+        $relative = [IO.Path]::GetRelativePath($archive, $file.FullName).Replace('\', '/')
+        try {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant()
+            "$hash  $relative"
+        }
+        catch { "# UNREADABLE-SKIPPED  $relative" }
+    }
+    [IO.File]::WriteAllText($checksumPath, (($lines | Sort-Object) -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+    Protect-VpsPrivateFile $checksumPath
+}
+
 function Invoke-VpsProcess {
     [CmdletBinding()]
     param(
@@ -2425,6 +2449,12 @@ function Invoke-VpsModulePipeline {
         try {
             & $module.Invoke $Context
             Set-VpsModuleState -Context $Context -Id $module.Id -Status Success -Message 'Completed'
+            if ($module.Id -eq 'private-archive') {
+                # private-archive writes deployment-state.json while the module
+                # is still Running. Refresh checksums only after the final
+                # Success state is persisted so the archive verifies cleanly.
+                Update-VpsPrivateArchiveChecksums -Context $Context
+            }
             Write-VpsUi "$($module.Name) 已完成。" Success
         }
         catch {
