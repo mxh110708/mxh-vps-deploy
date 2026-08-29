@@ -16,8 +16,14 @@ cleanup() {
   if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
   rm -rf "$work"
 }
+report_failure() {
+  local exit_status
+  exit_status="$1"
+  printf 'VPSDEPLOY_SELFTEST_FAILURE_PHASE=%s\n' "$phase" >&2
+  exit "$exit_status"
+}
 trap cleanup EXIT INT TERM
-trap 'status=$?; printf "VPSDEPLOY_SELFTEST_FAILURE_PHASE=%s\n" "$phase" >&2; exit "$status"' ERR
+trap 'report_failure "$?"' ERR
 
 mixed_port="$(python3 - <<'PY'
 import socket
