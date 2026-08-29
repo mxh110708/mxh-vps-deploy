@@ -11,11 +11,13 @@ sing_box_bin="${VPS_PARAM_SING_BOX_BIN:-/usr/local/bin/sing-box}"
 
 work="$(mktemp -d)"
 pid=''
+phase='prepare'
 cleanup() {
   if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
   rm -rf "$work"
 }
 trap cleanup EXIT INT TERM
+trap 'status=$?; printf "VPSDEPLOY_SELFTEST_FAILURE_PHASE=%s\n" "$phase" >&2; exit "$status"' ERR
 
 mixed_port="$(python3 - <<'PY'
 import socket
@@ -78,15 +80,19 @@ with open(output, "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
 chmod 0600 "$work/client.json"
+phase='config-check'
 "$sing_box_bin" check -c "$work/client.json"
+phase='client-start'
 "$sing_box_bin" run -c "$work/client.json" >"$work/stdout.log" 2>"$work/stderr.log" &
 pid="$!"
 sleep 1
 kill -0 "$pid"
+phase='https'
 egress="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 25 \
   --proxy "http://127.0.0.1:${mixed_port}" "$check_url")"
 [[ -n "$egress" ]] || { echo 'Empty Shadowsocks egress result.' >&2; exit 1; }
 
+phase='udp'
 python3 - "$udp_port" "$udp_query_type" <<'PY'
 import os
 import socket
@@ -109,5 +115,6 @@ if response_id != query_id or not flags & 0x8000 or flags & 0x000F:
     raise SystemExit("Invalid UDP DNS response through Shadowsocks.")
 PY
 
+phase='complete'
 printf 'VPSDEPLOY_EGRESS_B64=%s\n' "$(printf '%s' "$egress" | base64 | tr -d '\n')"
 printf 'VPSDEPLOY_UDP_B64=%s\n' "$(printf '%s' 'yes' | base64 | tr -d '\n')"

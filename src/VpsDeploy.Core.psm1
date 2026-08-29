@@ -2347,7 +2347,6 @@ function New-MxhShadowsocksServerConfig {
         route = [ordered]@{
             rules = $rules
             final = 'direct-ipv4'
-            auto_detect_interface = $true
         }
     }
 }

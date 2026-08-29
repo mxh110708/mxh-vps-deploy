@@ -92,6 +92,11 @@ $shadowsocksSelfTest = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'as
 Assert-True ($shadowsocksSelfTest -match 'VPSDEPLOY_UDP_B64') 'Shadowsocks self-test reports functional UDP result'
 Assert-True ($shadowsocksSelfTest -match '"type": "direct"') 'Shadowsocks self-test creates a UDP tunnel inbound'
 Assert-True ($shadowsocksSelfTest -match 'override_address') 'Shadowsocks UDP self-test uses an explicit DNS destination'
+Assert-True ($shadowsocksSelfTest -match 'VPSDEPLOY_SELFTEST_FAILURE_PHASE' -and $shadowsocksSelfTest -match "phase='https'" -and $shadowsocksSelfTest -match "phase='udp'") 'Shadowsocks self-test reports only a sanitized failing phase'
+$shadowsocksModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\55-SingBoxShadowsocks.ps1')
+Assert-True ($shadowsocksModule -match 'SensitiveOutput -AllowFailure' -and $shadowsocksModule -match '未分类远端错误（敏感详情已隐藏') 'Shadowsocks self-test reports a sanitized failure phase without exposing credentials'
+$migrationCommitModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\115-ProtocolMigrationCommit.ps1')
+Assert-True ($migrationCommitModule -match "targetRole -eq 'ShadowsocksLanding'" -and $migrationCommitModule -match '现有 Reality/AnyTLS 入口保持原状态') 'Shadowsocks lifecycle commit message preserves concurrent entry protocol state'
 $externalProbe = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\shadowsocks-external-probe.sh')
 Assert-True ($externalProbe -match 'sha256sum --check --status') 'external Shadowsocks probe verifies pinned core checksum'
 Assert-True ($externalProbe -match 'VPS_PARAM_SELF_TEST_SCRIPT') 'external probe reuses the canonical TCP/UDP self-test'

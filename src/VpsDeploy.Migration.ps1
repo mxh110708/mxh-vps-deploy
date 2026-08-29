@@ -1151,7 +1151,16 @@ function New-MxhProtocolMigrationDetails {
         Write-Host "  实例：$($plan.Provider) / $($plan.Instance)"
         Write-Host "  当前主角色：$(Get-MxhProtocolRoleLabel -Role $sourceRole)"
         Write-Host "  新安装协议：$(Get-MxhProtocolRoleLabel -Role ([string]$plan.Role))"
-        Write-Host "  安装后状态：$(if ($Operation -eq 'InstallActivate') { '启用新协议；冲突的 TCP 443 协议保留但停用' } else { '新协议保留为已安装但停用；恢复当前运行状态' })"
+        $installStateText = if ($Operation -eq 'InstallStandby') {
+            '新协议保留为已安装但停用；恢复当前运行状态'
+        }
+        elseif ([string]$plan.Role -eq 'ShadowsocksLanding') {
+            '启用新的落地协议；现有 Reality/AnyTLS 入口状态保持不变'
+        }
+        else {
+            '启用新入口协议；冲突的 TCP 443 入口保留安装文件但停用'
+        }
+        Write-Host "  安装后状态：$installStateText"
         Write-Host '  网络调优：保持现状；如需调整请从主菜单进入“独立网络调优”'
         Write-Host "  SSH：保留 $($plan.Ports.SshPrimary) + $($plan.Ports.SshRescue)"
         Write-Host "  自动回滚：切换后 20 分钟内未完成验收则恢复源服务和旧 nftables"

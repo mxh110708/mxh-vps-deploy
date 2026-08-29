@@ -9,6 +9,9 @@
 - 复用服务商 RSA PEM/OpenSSH 私钥时，bootstrap 公钥验证现在接受 `ssh-rsa` 和标准 ECDSA 类型，不再错误地只允许 Ed25519。
 - 协议管理和 Shadowsocks 外部入口验收改为读取计划中的受管 SSH 密钥文件名，复用服务商密钥的实例不再被硬编码的 `id_ed25519` 路径拒绝。
 - 修复协议启停向导和备份清理在只有一个候选对象时因 PowerShell 管道自动解包而读取不到 `.Count` 的问题。
+- Shadowsocks 安装自测失败时现在区分 IPv4/IPv6 用户并输出脱敏原因分类，不显示密码或远端原始敏感输出；安装摘要也不再误称并行 Shadowsocks 会停用 TCP 443 入口。
+- Shadowsocks 远端自测增加不含配置或凭据的阶段标记，可区分临时配置、客户端启动、HTTPS 出口和 UDP DNS，便于在继续模式下定位失败而不关闭敏感输出保护。
+- 修复低权限 Shadowsocks 服务启用 `auto_detect_interface` 后 UDP direct 出站尝试绑定临时端口时报 `operation not permitted`；默认改为系统路由，仅在明确填写接口绑定时授予并恢复 `CAP_NET_RAW`。
 - 新部署现在识别服务商提供的非特权高位初始 SSH：直接复用为最终主端口，只新增一个不同的随机/手动救援端口；SSH 过渡配置去重，最终模块复验后保留主端口，不再创建第三个入口或误提示删除。
 - 将支持系统收紧为明确验证的 Debian 12/13 与 Ubuntu 22.04/24.04，并新增 Debian 12 官方容器的包名、OpenSSH 配置和全部远端 Bash 语法 CI 契约。
 - 新增独立 Cloudflare/Certbot 中文操作手册：逐项说明 AnyTLS SNI、ECH public name、Reality 本机 target 的 DNS-only 记录、最小权限长期 Token、客户端 IP 白名单、Token 文件格式、续期验证、迁移和退役清理。

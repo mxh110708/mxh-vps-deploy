@@ -37,6 +37,9 @@ try {
     }
     $serverPath = Join-Path $work 'server.json'
     $serverConfig = New-MxhShadowsocksServerConfig -Context $context
+    if ($serverConfig.route.Contains('auto_detect_interface')) {
+        throw 'Shadowsocks server must not require interface auto-detection under the default capability-free service account.'
+    }
     [IO.File]::WriteAllText($serverPath, ($serverConfig | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
 
     $clientPath = Join-Path $work 'client.json'

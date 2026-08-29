@@ -341,7 +341,7 @@ function Invoke-MxhControlledUpgrade {
         }elseif($role -in @('AnyTlsEntry','ShadowsocksLanding')){
             $asset=$Context.Versions.sing_box.assets.$arch; $script=if($role -eq 'AnyTlsEntry'){'sing-box-anytls-install.sh'}else{'sing-box-install.sh'}
             $params=@{VERSION=[string]$Context.Versions.sing_box.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256}
-            if($role -eq 'ShadowsocksLanding'){$params.NEED_BIND_INTERFACE=([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled).ToString().ToLowerInvariant()}
+            if($role -eq 'ShadowsocksLanding'){$params.NEED_BIND_INTERFACE=([bool]$Context.Plan.Shadowsocks.SecondaryBindInterface).ToString().ToLowerInvariant()}
             Invoke-VpsRemoteScript $Context $script $params -TimeoutSeconds 1200|Out-Null
         }elseif($role -eq 'KomariAgent'){
             $asset=$Context.Versions.komari_agent.assets.$arch

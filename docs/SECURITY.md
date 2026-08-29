@@ -102,7 +102,7 @@ Certbot 通过 DNS-01 签发和续期证书，不要求开放 80。工具停用�
 
 可选 IPv6 用户通过 `auth_user` 路由到绑定指定 IPv6 地址的 direct 出站。新机部署模块会在服务器回环地址上实际完成 SS2022 认证和出口测试；现有 VPS 新安装 Shadowsocks 时还强制从另一台白名单入口执行公网链式探测。权威客户端配置合并后仍需人工复验长期使用路径。
 
-默认 sing-box 服务不保留 Linux capabilities。只有明确填写 `SecondaryBindInterface` 时，才通过 systemd drop-in 授予 `CAP_NET_RAW`，用于 Linux 的接口绑定；仅填写 IPv6 源地址时不会增加该能力。
+默认 sing-box 服务不保留 Linux capabilities，也不启用 `auto_detect_interface`；普通 direct 出站直接使用系统路由。只有明确填写 `SecondaryBindInterface` 时，才通过 systemd drop-in 授予 `CAP_NET_RAW`，用于 Linux 的接口绑定；仅填写 IPv6 源地址时不会增加该能力。
 
 ## 10. 网络调优边界
 

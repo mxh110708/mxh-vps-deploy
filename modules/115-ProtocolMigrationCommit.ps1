@@ -129,7 +129,14 @@
         Save-VpsContext -Context $Context
 
         $message = switch ($operation) {
-            'InstallActivate' { '新协议已安装并启用；原协议仍安装在磁盘上，冲突项已停用。' }
+            'InstallActivate' {
+                if ($targetRole -eq 'ShadowsocksLanding') {
+                    'Shadowsocks 已安装并启用；现有 Reality/AnyTLS 入口保持原状态。'
+                }
+                else {
+                    '新入口协议已安装并启用；原入口协议仍安装在磁盘上，冲突项已停用。'
+                }
+            }
             'InstallStandby' { '新协议已完成真实验证并保留为停用备用；原运行状态已恢复。' }
             'Enable' { '协议启用状态已切换并完成验收。' }
             'Disable' { '协议已停用但仍保留完整安装与私有配置。' }
