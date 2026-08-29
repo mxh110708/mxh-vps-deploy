@@ -98,7 +98,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/certbot renew --quiet --deploy-hook /usr/local/libexec/mxh-certbot-deploy
+ExecStart=/usr/bin/certbot renew --quiet --no-random-sleep-on-renew --deploy-hook /usr/local/libexec/mxh-certbot-deploy
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
@@ -139,7 +139,7 @@ issue_certificate() {
     "${domain_args[@]}" >/dev/null
   RENEWED_LINEAGE="/etc/letsencrypt/live/$cert_name" \
     RENEWED_DOMAINS="$domains_csv" /usr/local/libexec/mxh-certbot-deploy
-  certbot renew --cert-name "$cert_name" --dry-run --quiet >/dev/null
+  certbot renew --cert-name "$cert_name" --dry-run --quiet --no-random-sleep-on-renew >/dev/null
 }
 
 if [[ "$anytls_enabled" == 'true' ]]; then

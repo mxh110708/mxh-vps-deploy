@@ -74,7 +74,7 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 
 `New-MxhAnyTlsPaddingScheme` 在创建计划时生成 `PerInstanceConservativeV1`：保持协议默认方案的前八包结构，但在受控范围内改变各段长度，单段 TLS plaintext 上限不超过 1100 字节。结果写入部署计划并在继续运行时保持不变。服务端通过 AnyTLS 协议下发 padding scheme，客户端配置不需要也不应复制该数组；缺少字段的旧计划由 `Get-MxhAnyTlsPaddingScheme` 回退到官方默认值。
 
-`anytls-self-test.sh` 会以真实 AnyTLS+ECH 客户端完成 HTTPS 204、出口 IP 和 UDP DNS 往返。语法通过、443 可达或证书可读都不能替代这组功能测试。现场验收还应从另一台主机执行同样的外部探测。
+`anytls-self-test.sh` 会以真实 AnyTLS+ECH 客户端完成 HTTPS 204、出口 IP 和 UDP DNS 往返。最终验收中的隔离 Mihomo 进程还会通过其 SOCKS5 UDP ASSOCIATE 对每个 Reality/AnyTLS 实测入口执行独立 DNS 往返，不修改桌面客户端、TUN 或系统代理。语法通过、443 可达或证书可读都不能替代这组功能测试。现场验收还应从另一台主机执行同样的外部探测。
 
 协议生命周期管理不是重新运行新机向导。为兼容旧计划仍使用 `Migration` 字段，但 schema 2 另外记录 `Operation`、`InitialInventory`、`ValidationInventory`、`FinalInventory` 和 `FinalRole`。其中 inventory 将 installed 与 enabled/active 分开；Reality/AnyTLS 只允许一个 enabled，Shadowsocks 可独立并行。
 

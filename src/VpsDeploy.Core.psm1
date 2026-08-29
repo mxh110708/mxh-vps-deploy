@@ -92,7 +92,8 @@ function Get-VpsAppDefaults {
 function Resolve-VpsPortablePath {
     param([Parameter(Mandatory)][string]$ProjectRoot,[AllowEmptyString()][string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
-    $expanded = [Environment]::ExpandEnvironmentVariables($Path.Trim().Trim('"'))
+    $normalized = ConvertTo-VpsInputPath -Value $Path
+    $expanded = [Environment]::ExpandEnvironmentVariables($normalized)
     if ([IO.Path]::IsPathRooted($expanded)) { return [IO.Path]::GetFullPath($expanded) }
     return [IO.Path]::GetFullPath((Join-Path $ProjectRoot $expanded))
 }
@@ -585,11 +586,60 @@ function Test-VpsSafePathSegment {
         $Value -notmatch '[\\/]' -and $Value -notin @('.', '..')
 }
 
+function Test-VpsPathSeparatorStyle {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()] [string]$Value,
+        [switch]$AllowEmpty
+    )
+
+    $candidate = $Value.Trim().Trim('"')
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return [bool]$AllowEmpty }
+    return -not ($candidate.Contains('/') -and $candidate.Contains('\'))
+}
+
+function ConvertTo-VpsInputPath {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()] [string]$Value,
+        [switch]$AllowEmpty
+    )
+
+    $candidate = $Value.Trim().Trim('"')
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        if ($AllowEmpty) { return '' }
+        throw '路径不能为空。'
+    }
+    if (-not (Test-VpsPathSeparatorStyle -Value $candidate)) {
+        throw '同一路径不能混用 / 和 \ 作为路径分隔符；请统一使用其中一种。'
+    }
+
+    $nativeSeparator = [IO.Path]::DirectorySeparatorChar
+    if ($candidate.Contains('/')) { return $candidate.Replace([char]'/', $nativeSeparator) }
+    if ($candidate.Contains('\')) { return $candidate.Replace([char]'\', $nativeSeparator) }
+    return $candidate
+}
+
+function Test-VpsExistingInputPath {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()] [string]$Value,
+        [ValidateSet('Any', 'Leaf', 'Container')] [string]$PathType = 'Any',
+        [switch]$AllowEmpty
+    )
+
+    try { $candidate = ConvertTo-VpsInputPath -Value $Value -AllowEmpty:$AllowEmpty }
+    catch { return $false }
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return [bool]$AllowEmpty }
+    if ($PathType -eq 'Any') { return Test-Path -LiteralPath $candidate }
+    return Test-Path -LiteralPath $candidate -PathType $PathType
+}
+
 function Test-VpsArchiveRoot {
     param([string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
     try {
-        $candidate = $Value.Trim().Trim('"')
+        $candidate = ConvertTo-VpsInputPath -Value $Value
         if (-not [IO.Path]::IsPathFullyQualified($candidate)) { return $false }
         $rawFullPath = [IO.Path]::GetFullPath($candidate)
         $fullPath = $rawFullPath.TrimEnd('\', '/')
@@ -803,8 +853,8 @@ function New-VpsInteractivePlan {
             Id = 'archive-root'; ShouldRun = { $true }; Run = {
                 $value = Read-VpsText 'VPS 私有归档根目录（不会立即创建）' `
                     -Default ([string]$wizard.InstanceRoot) -AllowBack -Validate ${function:Test-VpsArchiveRoot} `
-                    -ValidationMessage '请输入不是磁盘根目录的完整绝对路径，例如某个私有数据目录下的 VPS-Instances。'
-                $wizard.InstanceRoot = [IO.Path]::GetFullPath($value.Trim().Trim('"')).TrimEnd('\', '/')
+                    -ValidationMessage '请输入不是磁盘根目录的完整绝对路径；可全用 / 或全用 \，但不能混用。'
+                $wizard.InstanceRoot = [IO.Path]::GetFullPath((ConvertTo-VpsInputPath -Value $value)).TrimEnd('\', '/')
             }
         },
         [pscustomobject]@{
@@ -894,10 +944,9 @@ function New-VpsInteractivePlan {
             Id = 'bootstrap-key'; ShouldRun = { $wizard.BootstrapAuth -eq 'ExistingKey' }; Run = {
                 $inputPath = Read-VpsText '现有服务商私钥文件的完整路径' -Default ([string]$wizard.BootstrapKeyPath) -AllowBack -Validate {
                     param($v)
-                    $candidate = $v.Trim().Trim('"')
-                    Test-Path -LiteralPath $candidate -PathType Leaf
-                } -ValidationMessage '找不到该私钥文件，请输入文件本身而不是目录。'
-                $wizard.BootstrapKeyPath = (Resolve-Path -LiteralPath $inputPath.Trim().Trim('"')).Path
+                    Test-VpsExistingInputPath -Value $v -PathType Leaf
+                } -ValidationMessage '找不到该私钥文件；路径可全用 / 或全用 \，但不能混用。'
+                $wizard.BootstrapKeyPath = (Resolve-Path -LiteralPath (ConvertTo-VpsInputPath -Value $inputPath)).Path
                 Write-VpsUi '该私钥默认会复制到实例受管子目录并使用规范文件名；原文件与服务商面板记录不会改变。' Info
             }
         },
@@ -1084,9 +1133,9 @@ function New-VpsInteractivePlan {
                     [string]$wizard.CloudflareTokenFile
                 } else { Join-Path (& $getInstancePath) 'cloudflare-certbot-token.private.txt' }
                 $value = Read-VpsText 'Cloudflare Certbot Token 本地私有文件' -Default $defaultPath -AllowBack `
-                    -Validate { param($v) Test-Path -LiteralPath $v -PathType Leaf } `
-                    -ValidationMessage '找不到 Token 文件；请先保存到实例私有归档。'
-                $wizard.CloudflareTokenFile = (Resolve-Path -LiteralPath $value).Path
+                    -Validate { param($v) Test-VpsExistingInputPath -Value $v -PathType Leaf } `
+                    -ValidationMessage '找不到 Token 文件；路径可全用 / 或全用 \，但不能混用。'
+                $wizard.CloudflareTokenFile = (Resolve-Path -LiteralPath (ConvertTo-VpsInputPath -Value $value)).Path
                 Write-VpsUi 'Token 只会通过 SSH 标准输入传到服务器 root-only 凭据文件，不写入计划、日志或 Git。' Info
             }
         },
@@ -1702,6 +1751,16 @@ function ConvertTo-VpsShellSingleQuote {
     return "'$Value'"
 }
 
+function Test-VpsSupportedSshPublicKey {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string]$PublicKey)
+
+    return [regex]::IsMatch(
+        $PublicKey.Trim(),
+        '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+[A-Za-z0-9+/=]+(?:\s+.*)?$'
+    )
+}
+
 function Initialize-VpsSshKey {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Context)
@@ -1766,7 +1825,7 @@ function Initialize-VpsBootstrapAccess {
     Initialize-VpsSshKey -Context $Context
     $keyPath = Get-VpsSshKeyPath $Context
     $publicKey = (Get-Content -Raw -LiteralPath ($keyPath + '.pub')).Trim()
-    if (-not $publicKey.StartsWith('ssh-ed25519 ')) { throw '生成的 SSH 公钥格式异常。' }
+    if (-not (Test-VpsSupportedSshPublicKey -PublicKey $publicKey)) { throw '生成的 SSH 公钥格式异常。' }
 
     $rootPort = [int]$Context.Plan.Server.BootstrapSshPort
     $existing = Invoke-VpsSshCommand -Context $Context -User 'root' -Port $rootPort `
@@ -2407,6 +2466,111 @@ function New-MxhLandingMihomoProfileText {
     return ($lines -join "`n") + "`n"
 }
 
+function Read-MxhExactNetworkBytes {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [IO.Stream]$Stream,
+        [Parameter(Mandatory)] [int]$Count
+    )
+
+    $buffer = [byte[]]::new($Count)
+    $offset = 0
+    while ($offset -lt $Count) {
+        $read = $Stream.Read($buffer, $offset, $Count - $offset)
+        if ($read -le 0) { throw 'SOCKS5 控制连接提前关闭。' }
+        $offset += $read
+    }
+    return $buffer
+}
+
+function Invoke-MxhSocks5UdpDnsTest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [int]$SocksPort,
+        [string]$Label = 'proxy'
+    )
+
+    $tcp = [Net.Sockets.TcpClient]::new()
+    $udp = $null
+    try {
+        $connect = $tcp.ConnectAsync([Net.IPAddress]::Loopback, $SocksPort)
+        if (-not $connect.Wait([TimeSpan]::FromSeconds(10))) { throw "SOCKS5 连接超时：$Label" }
+        $stream = $tcp.GetStream()
+        $stream.ReadTimeout = 20000
+        $stream.WriteTimeout = 20000
+
+        $greeting = [byte[]](5, 1, 0)
+        $stream.Write($greeting, 0, $greeting.Length)
+        $greetingReply = Read-MxhExactNetworkBytes -Stream $stream -Count 2
+        if ($greetingReply[0] -ne 5 -or $greetingReply[1] -ne 0) { throw "SOCKS5 无认证协商失败：$Label" }
+
+        $associate = [byte[]](5, 3, 0, 1, 0, 0, 0, 0, 0, 0)
+        $stream.Write($associate, 0, $associate.Length)
+        $reply = Read-MxhExactNetworkBytes -Stream $stream -Count 4
+        if ($reply[0] -ne 5 -or $reply[1] -ne 0) { throw "SOCKS5 UDP ASSOCIATE 失败：$Label / REP=$($reply[1])" }
+
+        $relayAddress = switch ($reply[3]) {
+            1 { [Net.IPAddress]::new((Read-MxhExactNetworkBytes -Stream $stream -Count 4)) }
+            3 {
+                $length = (Read-MxhExactNetworkBytes -Stream $stream -Count 1)[0]
+                $name = [Text.Encoding]::ASCII.GetString((Read-MxhExactNetworkBytes -Stream $stream -Count $length))
+                @([Net.Dns]::GetHostAddresses($name) | Where-Object AddressFamily -eq InterNetwork)[0]
+            }
+            4 { [Net.IPAddress]::new((Read-MxhExactNetworkBytes -Stream $stream -Count 16)) }
+            default { throw "SOCKS5 UDP relay 返回未知地址类型：$($reply[3])" }
+        }
+        $portBytes = Read-MxhExactNetworkBytes -Stream $stream -Count 2
+        $relayPort = ([int]$portBytes[0] -shl 8) -bor [int]$portBytes[1]
+        if ($relayPort -lt 1) { throw "SOCKS5 UDP relay 未返回有效端口：$Label" }
+        if ($relayAddress.Equals([Net.IPAddress]::Any) -or $relayAddress.Equals([Net.IPAddress]::IPv6Any)) {
+            $relayAddress = [Net.IPAddress]::Loopback
+        }
+
+        $transactionId = [Security.Cryptography.RandomNumberGenerator]::GetBytes(2)
+        $dnsQuery = [Collections.Generic.List[byte]]::new()
+        $dnsQuery.AddRange([byte[]]($transactionId[0], $transactionId[1], 1, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+        foreach ($labelPart in @('one', 'one', 'one', 'one')) {
+            $labelBytes = [Text.Encoding]::ASCII.GetBytes($labelPart)
+            $dnsQuery.Add([byte]$labelBytes.Length)
+            $dnsQuery.AddRange($labelBytes)
+        }
+        $dnsQuery.AddRange([byte[]](0, 0, 1, 0, 1))
+
+        $packet = [Collections.Generic.List[byte]]::new()
+        $packet.AddRange([byte[]](0, 0, 0, 1, 1, 1, 1, 1, 0, 53))
+        $packet.AddRange($dnsQuery.ToArray())
+        $udp = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+        $udp.Client.ReceiveTimeout = 20000
+        $udp.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, 0))
+        [void]$udp.Send($packet.ToArray(), $packet.Count, [Net.IPEndPoint]::new($relayAddress, $relayPort))
+
+        $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
+        $response = $udp.Receive([ref]$remote)
+        if ($response.Length -lt 10 -or $response[0] -ne 0 -or $response[1] -ne 0 -or $response[2] -ne 0) {
+            throw "SOCKS5 UDP relay 响应头无效：$Label"
+        }
+        $payloadOffset = switch ($response[3]) {
+            1 { 10 }
+            3 { 7 + [int]$response[4] }
+            4 { 22 }
+            default { throw "SOCKS5 UDP 响应含未知地址类型：$($response[3])" }
+        }
+        if ($response.Length -lt ($payloadOffset + 12)) { throw "UDP DNS 响应过短：$Label" }
+        if ($response[$payloadOffset] -ne $transactionId[0] -or $response[$payloadOffset + 1] -ne $transactionId[1] -or
+            ($response[$payloadOffset + 2] -band 0x80) -eq 0) {
+            throw "UDP DNS 事务校验失败：$Label"
+        }
+        return $true
+    }
+    catch [Net.Sockets.SocketException] {
+        throw "UDP DNS 往返失败：$Label / $($_.Exception.Message)"
+    }
+    finally {
+        if ($udp) { $udp.Dispose() }
+        $tcp.Dispose()
+    }
+}
+
 function Invoke-MxhMihomoEgressTest {
     [CmdletBinding()]
     param(
@@ -2439,6 +2603,7 @@ function Invoke-MxhMihomoEgressTest {
         $response = Invoke-WebRequest -Uri 'https://www.gstatic.com/generate_204' -Proxy $proxy -TimeoutSec 25
         if ($response.StatusCode -ne 204) { throw "HTTP 204 验证失败：$Label" }
         $egress = (Invoke-RestMethod -Uri 'https://api.ipify.org' -Proxy $proxy -TimeoutSec 25).Trim()
+        Invoke-MxhSocks5UdpDnsTest -SocksPort $MixedPort -Label $Label | Out-Null
         return $egress
     }
     finally {
@@ -2670,13 +2835,18 @@ function Read-VpsResumePlan {
         if (-not $candidatePath) {
             $inputPath = Read-VpsText 'deployment-plan.json 完整路径' -AllowBack -Validate {
                 param($v)
-                $candidate = $v.Trim().Trim('"')
-                Test-Path -LiteralPath $candidate -PathType Leaf
-            } -ValidationMessage '找不到该计划文件。可输入 0 返回主菜单。'
-            $candidatePath = $inputPath.Trim().Trim('"')
+                Test-VpsExistingInputPath -Value $v -PathType Leaf
+            } -ValidationMessage '找不到该计划文件，或路径混用了 / 与 \。可输入 0 返回主菜单。'
+            $candidatePath = ConvertTo-VpsInputPath -Value $inputPath
         }
         else {
-            $candidatePath = $candidatePath.Trim().Trim('"')
+            try { $candidatePath = ConvertTo-VpsInputPath -Value $candidatePath }
+            catch {
+                if ($NonInteractive) { throw }
+                Write-VpsUi $_.Exception.Message Warning
+                $candidatePath = $null
+                continue
+            }
         }
 
         if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
@@ -2807,6 +2977,11 @@ function Start-VpsDeploy {
         $configuredRoot = if ($env:MXH_VPS_INSTANCE_ROOT) { $env:MXH_VPS_INSTANCE_ROOT } else { [string]$settings.instance_root }
         $InstanceRoot = Resolve-VpsPortablePath -ProjectRoot $ProjectRoot -Path $configuredRoot
     }
+    else { $InstanceRoot = ConvertTo-VpsInputPath -Value $InstanceRoot }
+    if (-not [string]::IsNullOrWhiteSpace($PlanPath)) { $PlanPath = ConvertTo-VpsInputPath -Value $PlanPath }
+    if (-not [string]::IsNullOrWhiteSpace($ClashAuthorityPath)) { $ClashAuthorityPath = ConvertTo-VpsInputPath -Value $ClashAuthorityPath }
+    if (-not [string]::IsNullOrWhiteSpace($SingBoxAuthorityPath)) { $SingBoxAuthorityPath = ConvertTo-VpsInputPath -Value $SingBoxAuthorityPath }
+    if (-not [string]::IsNullOrWhiteSpace($ClientOutputRoot)) { $ClientOutputRoot = ConvertTo-VpsInputPath -Value $ClientOutputRoot }
     if ($Mode -eq 'ValidateProject') {
         Test-VpsProject -ProjectRoot $ProjectRoot
         return

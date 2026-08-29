@@ -58,9 +58,10 @@ chmod 0644 /var/www/mxh-reality-target/index.html
 
 cat > /etc/nginx/sites-available/mxh-reality-target <<EOF
 server {
-    listen 127.0.0.1:${VPS_PARAM_PORT} ssl;
-    listen [::1]:${VPS_PARAM_PORT} ssl;
-    http2 on;
+    # Debian 12 ships nginx 1.22, which requires the legacy listen-parameter
+    # form. This remains valid on newer nginx releases as well.
+    listen 127.0.0.1:${VPS_PARAM_PORT} ssl http2;
+    listen [::1]:${VPS_PARAM_PORT} ssl http2;
     server_name ${VPS_PARAM_DOMAIN};
 
     ssl_certificate ${cert_dir}/fullchain.pem;

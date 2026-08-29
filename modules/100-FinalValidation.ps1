@@ -71,9 +71,10 @@
                     Status = 'Passed'
                     PrimaryEgress = $primaryEgress
                     BackupEgress = $backupEgress
+                    UdpDns = 'Passed'
                     TestedAt = (Get-Date).ToString('o')
                 }
-                Write-VpsUi $(if ($backupEgress) { '主端口和救援端口均完成 Reality Authentication、HTTP 204 与出口测试。' } else { 'Reality 主端口已完成 Authentication、HTTP 204 与出口测试；该导入实例没有救援入口。' }) Success
+                Write-VpsUi $(if ($backupEgress) { '主端口和救援端口均完成 Reality Authentication、HTTP 204、出口 IP 与 UDP DNS 往返测试。' } else { 'Reality 主端口已完成 Authentication、HTTP 204、出口 IP 与 UDP DNS 往返测试；该导入实例没有救援入口。' }) Success
             }
             else {
                 $Context.State.RealityEgressTest = [ordered]@{ Status = 'NotRun'; Reason = 'Mihomo core not found' }
@@ -90,9 +91,10 @@
                 $Context.State.AnyTlsEgressTest = [ordered]@{
                     Status = 'Passed'
                     Egress = $egress
+                    UdpDns = 'Passed'
                     TestedAt = (Get-Date).ToString('o')
                 }
-                Write-VpsUi 'AnyTLS 已完成受信证书、ECH、HTTP 204 与真实出口测试。' Success
+                Write-VpsUi 'AnyTLS 已完成受信证书、ECH、HTTP 204、出口 IP 与 UDP DNS 往返测试。' Success
             }
             else {
                 $Context.State.AnyTlsEgressTest = [ordered]@{ Status = 'NotRun'; Reason = 'Mihomo core not found' }

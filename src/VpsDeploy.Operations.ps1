@@ -407,8 +407,8 @@ Controller 升级会先下载一份完整本地备份，再进入事务；失败
             $r=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerBackup'} -TimeoutSeconds 600;$remote=Get-VpsMarkerValue $r.StdOut KOMARI_BACKUP -Required
             $dir=Join-Path $Context.ArchivePath 'komari-backups';[IO.Directory]::CreateDirectory($dir)|Out-Null;$local=Join-Path $dir (Split-Path -Leaf $remote);Invoke-VpsScpDownload $Context $remote $local;Write-VpsUi "Controller 备份已下载：$local" Success;return
         }elseif($choice -eq 6){
-            $file=Read-VpsText 'Controller 备份 tar.gz 完整路径' -AllowBack -Validate{param($v)Test-Path $v.Trim('"')};$activate=Read-VpsYesNo '恢复后启用 Controller？（同机验证可选否）' $false -AllowBack
-            $remote='/root/'+(Split-Path -Leaf $file.Trim('"'));Invoke-VpsScpUpload $Context $file.Trim('"') $remote
+            $file=Read-VpsText 'Controller 备份 tar.gz 完整路径' -AllowBack -Validate{param($v)Test-VpsExistingInputPath -Value $v -PathType Leaf} -ValidationMessage '找不到备份文件，或路径混用了 / 与 \。';$activate=Read-VpsYesNo '恢复后启用 Controller？（同机验证可选否）' $false -AllowBack
+            $file=ConvertTo-VpsInputPath -Value $file;$remote='/root/'+(Split-Path -Leaf $file);Invoke-VpsScpUpload $Context $file $remote
             Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerRestore';BACKUP_FILE=$remote;FINAL_ACTIVE=$activate.ToString().ToLowerInvariant()} -TimeoutSeconds 600|Out-Null;Write-VpsUi 'Controller 数据已恢复并在回环地址完成启动验证；最终启停状态按选择应用，Tunnel 未自动启动。' Success;return
         }elseif($choice -eq 7){
             $secure=Read-Host 'Cloudflare Tunnel Token（不显示）' -AsSecureString;$token=ConvertFrom-VpsSecureString $secure

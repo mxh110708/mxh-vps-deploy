@@ -301,7 +301,7 @@ function Test-MxhProtocolMigrationSource {
     if ($managementPort -notin @([int]$Plan.Ports.SshPrimary, [int]$Plan.Ports.SshRescue)) {
         throw '当前管理端口不是计划中的 SSH 主/救援端口，拒绝自动协议管理。'
     }
-    $keyPath = Join-Path ([string]$Plan.Paths.KeyDirectory) 'id_ed25519'
+    $keyPath = Get-VpsSshKeyPath -Context ([pscustomobject]@{ Plan = $Plan })
     if (-not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
         throw '实例专用 SSH 私钥不存在，无法安全管理协议。'
     }
@@ -345,7 +345,7 @@ function Test-MxhMigrationValidationEntryPlan {
     }
     $statePath = Join-Path $archive 'deployment-state.json'
     $secretsPath = Join-Path $archive 'deployment-secrets.private.json'
-    $keyPath = Join-Path ([string]$plan.Paths.KeyDirectory) 'id_ed25519'
+    $keyPath = Get-VpsSshKeyPath -Context ([pscustomobject]@{ Plan = $plan })
     foreach ($path in @($statePath, $secretsPath, $keyPath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "验证入口归档缺少文件：$path" }
     }
@@ -390,12 +390,16 @@ function Read-MxhProtocolMigrationSource {
         if (-not $candidatePath) {
             $inputPath = Read-VpsText '现有 VPS 的 deployment-plan.json 完整路径' -AllowBack -Validate {
                 param($v)
-                $candidate = $v.Trim().Trim('"')
-                Test-Path -LiteralPath $candidate -PathType Leaf
-            } -ValidationMessage '找不到该计划文件。可输入 0 返回主菜单。'
-            $candidatePath = $inputPath.Trim().Trim('"')
+                Test-VpsExistingInputPath -Value $v -PathType Leaf
+            } -ValidationMessage '找不到该计划文件，或路径混用了 / 与 \。可输入 0 返回主菜单。'
+            $candidatePath = ConvertTo-VpsInputPath -Value $inputPath
         }
-        $candidatePath = (Resolve-Path -LiteralPath $candidatePath.Trim().Trim('"')).Path
+        try { $candidatePath = (Resolve-Path -LiteralPath (ConvertTo-VpsInputPath -Value $candidatePath)).Path }
+        catch {
+            Write-VpsUi $_.Exception.Message Warning
+            $candidatePath = $null
+            continue
+        }
         try {
             $plan = ConvertTo-MxhCompatiblePlan -Plan (Read-VpsJsonHashtable -Path $candidatePath)
             $archive = [string]$plan.Paths.Archive
@@ -988,9 +992,9 @@ function New-MxhProtocolMigrationDetails {
                     Join-Path $tokenRoot 'cloudflare-certbot-token.private.txt'
                 }
                 $value = Read-VpsText 'Cloudflare Certbot Token 本地私有文件' -Default $default -AllowBack `
-                    -Validate { param($v) Test-Path -LiteralPath $v -PathType Leaf } `
-                    -ValidationMessage '找不到 Token 文件。'
-                $wizard.CloudflareTokenFile = (Resolve-Path -LiteralPath $value).Path
+                    -Validate { param($v) Test-VpsExistingInputPath -Value $v -PathType Leaf } `
+                    -ValidationMessage '找不到 Token 文件，或路径混用了 / 与 \。'
+                $wizard.CloudflareTokenFile = (Resolve-Path -LiteralPath (ConvertTo-VpsInputPath -Value $value)).Path
             }
         },
         [pscustomobject]@{
@@ -1032,9 +1036,9 @@ function New-MxhProtocolMigrationDetails {
                     try {
                         $value = Read-VpsText '用于链式实测的入口 VPS deployment-plan.json' `
                             -Default ([string]$wizard.ValidationEntryPlanPath) -AllowBack -Validate {
-                                param($v) Test-Path -LiteralPath $v.Trim().Trim('"') -PathType Leaf
-                            } -ValidationMessage '找不到该入口计划文件。'
-                        $resolved = (Resolve-Path -LiteralPath $value.Trim().Trim('"')).Path
+                                param($v) Test-VpsExistingInputPath -Value $v -PathType Leaf
+                            } -ValidationMessage '找不到该入口计划文件，或路径混用了 / 与 \。'
+                        $resolved = (Resolve-Path -LiteralPath (ConvertTo-VpsInputPath -Value $value)).Path
                         Test-MxhMigrationValidationEntryPlan -PlanPath $resolved `
                             -LandingServerIpv4 ([string]$sourcePlan.Server.IPv4) `
                             -AllowedEntryIpv4s @($wizard.TrustedEntryIps.IPv4) | Out-Null
@@ -1180,11 +1184,11 @@ function New-MxhProtocolStateDetails {
         '停用一个当前已启用协议'
     ) 1 -AllowBack
     $operation = if ($actionChoice -eq 1) { 'Enable' } else { 'Disable' }
-    $candidates = if ($operation -eq 'Enable') {
-        @(Get-MxhManagedProtocolRoles | Where-Object { $inventory[$_].Installed -and -not $inventory[$_].Enabled })
-    } else {
-        @(Get-MxhManagedProtocolRoles | Where-Object { $inventory[$_].Installed -and $inventory[$_].Enabled })
-    }
+    $candidates = @(if ($operation -eq 'Enable') {
+            Get-MxhManagedProtocolRoles | Where-Object { $inventory[$_].Installed -and -not $inventory[$_].Enabled }
+        } else {
+            Get-MxhManagedProtocolRoles | Where-Object { $inventory[$_].Installed -and $inventory[$_].Enabled }
+        })
     if ($candidates.Count -eq 0) {
         Write-VpsUi "没有可执行“$operation”的协议。" Warning
         throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
@@ -1271,12 +1275,12 @@ function Invoke-MxhProtocolBackupCleanup {
         (Split-Path -Leaf $localRoot) -ne 'migration-backups') {
         throw '本地备份根目录校验失败，拒绝清理。'
     }
-    $localCandidates = if (Test-Path -LiteralPath $localRoot -PathType Container) {
-        @(Get-ChildItem -LiteralPath $localRoot -Directory -Force | Where-Object {
+    $localCandidates = @(if (Test-Path -LiteralPath $localRoot -PathType Container) {
+        Get-ChildItem -LiteralPath $localRoot -Directory -Force | Where-Object {
                 -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
                 $_.Name -match '^\d{8}-\d{6}-(?:(?:RealityEntry|AnyTlsEntry|ShadowsocksLanding)-to-(?:RealityEntry|AnyTlsEntry|ShadowsocksLanding)|(?:InstallActivate|InstallStandby|Enable|Disable|Uninstall|Convert)-(?:RealityEntry|AnyTlsEntry|ShadowsocksLanding))$'
-            } | Sort-Object LastWriteTimeUtc -Descending)
-    } else { @() }
+            } | Sort-Object LastWriteTimeUtc -Descending
+    })
     $localRemove = @($localCandidates | Select-Object -Skip $keep)
 
     Write-Host ''

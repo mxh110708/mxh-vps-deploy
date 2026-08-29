@@ -106,6 +106,7 @@ $certbotSetup = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\re
 Assert-True ($certbotSetup -match 'dns-cloudflare') 'Certbot uses Cloudflare DNS-01 plugin'
 Assert-True ($certbotSetup -match 'mxh-certbot-renew\.timer') 'Certbot renewal timer is installed'
 Assert-True ($certbotSetup -match 'disable --now certbot\.timer') 'distribution Certbot timer is disabled to avoid duplicate renewal owners'
+Assert-True (([regex]::Matches($certbotSetup, '--no-random-sleep-on-renew')).Count -eq 2) 'Certbot deploy validation and timer rely on the systemd schedule instead of hidden random sleeps'
 Assert-True ($certbotSetup -notmatch 'echo\s+.*CLOUDFLARE_TOKEN') 'Certbot setup never prints the Cloudflare token'
 $anyTlsApply = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\anytls-apply-config.sh')
 Assert-True ($anyTlsApply -match "rollback_needed='yes'") 'AnyTLS cutover arms automatic rollback'
@@ -123,6 +124,11 @@ Assert-True ($backupPrune -match 'mxh-protocol-migration-rollback\.timer' -and $
 $localHttpsSetup = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\local-https-target.sh')
 Assert-True ($localHttpsSetup -match 'mask nginx\.service') 'nginx is masked while the package default site could start'
 Assert-True ($localHttpsSetup -match 'unmask nginx\.service') 'nginx is unmasked only after package installation checks'
+Assert-True ($localHttpsSetup -match 'listen 127\.0\.0\.1:\$\{VPS_PARAM_PORT\} ssl http2;' -and $localHttpsSetup -notmatch '(?m)^\s*http2 on;') 'local HTTPS target uses the nginx 1.22-compatible HTTP/2 syntax required by Debian 12'
+$coreSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Core.psm1')
+$finalValidationSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\100-FinalValidation.ps1')
+Assert-True ($coreSource -match 'Invoke-MxhSocks5UdpDnsTest' -and $coreSource -match '\[byte\[\]\]\(5, 3, 0, 1' -and $coreSource -match 'UDP DNS 事务校验失败') 'isolated Mihomo validation performs a real SOCKS5 UDP ASSOCIATE DNS round trip'
+Assert-True ($finalValidationSource -match "UdpDns = 'Passed'" -and $finalValidationSource -match 'UDP DNS 往返测试') 'Reality and AnyTLS final state records successful UDP validation'
 $targetAuditModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\40-TargetAudit.ps1')
 Assert-True ($targetAuditModule -match 'ACCEPT-TARGET-RISK' -and $targetAuditModule -match 'manual_override') 'failed target audits support an explicit recorded manual override'
 Assert-True ($targetAuditModule -match 'NonInteractive.*禁止人工覆写') 'noninteractive target audit cannot silently bypass automatic requirements'
@@ -214,6 +220,23 @@ Assert-True (Test-Path -LiteralPath $managedKey -PathType Leaf) 'existing provid
 Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $managedKey).Hash -eq $sourceHash) 'managed key copy preserves the provider private key instead of rotating it'
 Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $sourceKey).Hash -eq $sourceHash) 'provider key source is never renamed or modified'
 Assert-True ((Get-Content -Raw -LiteralPath ($managedKey + '.pub')).Trim() -match '^ssh-ed25519\s+') 'public key is derived from the reused private key'
+
+$rsaSourceKey = Join-Path $keyReuseRoot 'provider-rsa-pem-key'
+$rsaKeygenResult = Invoke-VpsProcess -FilePath (Get-Command ssh-keygen.exe -ErrorAction Stop).Source `
+    -ArgumentList @('-t','rsa','-b','2048','-m','PEM','-N','','-C','provider-rsa-fixture','-f',$rsaSourceKey) -TimeoutSeconds 60
+Assert-True ($rsaKeygenResult.ExitCode -eq 0) 'fixture RSA PEM provider key generated'
+$rsaManagedDirectory = Join-Path $keyReuseRoot 'MXH-VPS-Deploy-RSA\ssh'
+$rsaReuseContext = [pscustomobject]@{ Plan = [ordered]@{
+        NodeName='Example-Reused-RSA-Key';Server=[ordered]@{BootstrapKeyPath=$rsaSourceKey}
+        SshKey=[ordered]@{Mode='ReuseExisting';SourcePrivateKeyPath=$rsaSourceKey;ManagedFileName='id_vps_management';PreserveSource=$true}
+        Paths=[ordered]@{KeyDirectory=$rsaManagedDirectory}
+    } }
+& $coreModule { param($Context) Initialize-VpsSshKey -Context $Context } $rsaReuseContext 6>$null
+$rsaManagedKey = Join-Path $rsaManagedDirectory 'id_vps_management'
+$rsaPublicKey = (Get-Content -Raw -LiteralPath ($rsaManagedKey + '.pub')).Trim()
+Assert-True ($rsaPublicKey -match '^ssh-rsa\s+') 'RSA PEM provider key is normalized without rotating it'
+Assert-True (& $coreModule { param($PublicKey) Test-VpsSupportedSshPublicKey -PublicKey $PublicKey } $rsaPublicKey) 'bootstrap accepts a supported RSA SSH public key'
+Assert-True (-not (& $coreModule { Test-VpsSupportedSshPublicKey -PublicKey 'not-an-ssh-key' })) 'bootstrap rejects malformed SSH public key text'
 [IO.Directory]::Delete($keyReuseRoot, $true)
 
 $oldLatest = [Environment]::GetEnvironmentVariable('MXH_VPS_TEST_XRAY_LATEST')
@@ -522,15 +545,37 @@ $archiveRootValidation = & (Get-Module VpsDeploy.Core) {
 Assert-True ($archiveRootValidation.Absolute) 'archive root accepts a fully qualified non-root path'
 Assert-True (-not $archiveRootValidation.Relative -and -not $archiveRootValidation.DriveRoot) 'archive root rejects relative paths and a bare drive root'
 
+$backslashProjectRoot = $ProjectRoot.Replace('/', '\')
+$forwardSlashProjectRoot = $ProjectRoot.Replace('\', '/')
+$mixedProjectRoot = $backslashProjectRoot.Substring(0, 3) + $backslashProjectRoot.Substring(3).Replace('\', '/')
+$pathSeparatorValidation = & (Get-Module VpsDeploy.Core) {
+    param($BackslashPath, $ForwardSlashPath, $MixedPath)
+    [pscustomobject]@{
+        BackslashAccepted = Test-VpsPathSeparatorStyle -Value $BackslashPath
+        ForwardSlashAccepted = Test-VpsPathSeparatorStyle -Value $ForwardSlashPath
+        MixedRejected = -not (Test-VpsPathSeparatorStyle -Value $MixedPath)
+        ForwardArchiveAccepted = Test-VpsArchiveRoot $ForwardSlashPath
+        NormalizedForward = ConvertTo-VpsInputPath -Value $ForwardSlashPath
+        ExistingForward = Test-VpsExistingInputPath -Value ($ForwardSlashPath.TrimEnd('/') + '/README.md') -PathType Leaf
+        ExistingMixed = Test-VpsExistingInputPath -Value ($MixedPath.TrimEnd('/') + '/README.md') -PathType Leaf
+    }
+} $backslashProjectRoot $forwardSlashProjectRoot $mixedProjectRoot
+Assert-True ($pathSeparatorValidation.BackslashAccepted -and $pathSeparatorValidation.ForwardSlashAccepted) 'path input accepts either slash style when used consistently'
+Assert-True $pathSeparatorValidation.MixedRejected 'path input rejects mixed slash styles'
+Assert-True $pathSeparatorValidation.ForwardArchiveAccepted 'archive root accepts a consistently forward-slashed absolute path'
+Assert-True ($pathSeparatorValidation.NormalizedForward -eq [IO.Path]::GetFullPath($ProjectRoot)) 'forward-slash path input normalizes to the native platform separator'
+Assert-True ($pathSeparatorValidation.ExistingForward -and -not $pathSeparatorValidation.ExistingMixed) 'existing-file validation accepts one separator style and rejects a mixed path'
+
 $migrationFixtureRoot = Join-Path $ProjectRoot '.test-output\migration-context'
 if (Test-Path -LiteralPath $migrationFixtureRoot) { [IO.Directory]::Delete($migrationFixtureRoot, $true) }
 [IO.Directory]::CreateDirectory($migrationFixtureRoot) | Out-Null
 $migrationSourcePlan = ($realitySource | ConvertTo-Json -Depth 40) | ConvertFrom-Json -AsHashtable
 $migrationSourcePlan.Paths.Archive = $migrationFixtureRoot
-$migrationSourcePlan.Paths.KeyDirectory = Join-Path $migrationFixtureRoot 'fixture-id_ed25519'
+$migrationSourcePlan.Paths.KeyDirectory = Join-Path $migrationFixtureRoot 'fixture-managed-key'
+$migrationSourcePlan.SshKey = [ordered]@{ ManagedFileName = 'id_vps_management'; Mode = 'ReuseExisting' }
 [IO.Directory]::CreateDirectory([string]$migrationSourcePlan.Paths.KeyDirectory) | Out-Null
-[IO.File]::WriteAllText((Join-Path $migrationSourcePlan.Paths.KeyDirectory 'id_ed25519'), 'fixture-key')
-[IO.File]::WriteAllText((Join-Path $migrationSourcePlan.Paths.KeyDirectory 'id_ed25519.pub'), 'fixture-public-key')
+[IO.File]::WriteAllText((Join-Path $migrationSourcePlan.Paths.KeyDirectory 'id_vps_management'), 'fixture-key')
+[IO.File]::WriteAllText((Join-Path $migrationSourcePlan.Paths.KeyDirectory 'id_vps_management.pub'), 'fixture-public-key')
 $migrationSourcePlanPath = Join-Path $migrationFixtureRoot 'deployment-plan.json'
 $successState = { [ordered]@{ Status = 'Success'; UpdatedAt = '2026-01-01T00:00:00Z'; Message = 'fixture' } }
 $migrationSourceState = [ordered]@{
@@ -840,10 +885,11 @@ Save-VpsJson -Value $migrationSourceSecrets -Path (Join-Path $migrationDryRoot '
 $migrationEntryPlan = ($realitySource | ConvertTo-Json -Depth 40) | ConvertFrom-Json -AsHashtable
 $migrationEntryPlan.Server.IPv4 = '192.0.2.70'
 $migrationEntryPlan.Paths.Archive = $migrationEntryRoot
-$migrationEntryPlan.Paths.KeyDirectory = Join-Path $migrationEntryRoot 'fixture-id_ed25519'
+$migrationEntryPlan.Paths.KeyDirectory = Join-Path $migrationEntryRoot 'fixture-managed-key'
+$migrationEntryPlan.SshKey = [ordered]@{ ManagedFileName = 'id_vps_management'; Mode = 'ReuseExisting' }
 [IO.Directory]::CreateDirectory([string]$migrationEntryPlan.Paths.KeyDirectory) | Out-Null
-[IO.File]::WriteAllText((Join-Path $migrationEntryPlan.Paths.KeyDirectory 'id_ed25519'), 'fixture-key')
-[IO.File]::WriteAllText((Join-Path $migrationEntryPlan.Paths.KeyDirectory 'id_ed25519.pub'), 'fixture-public-key')
+[IO.File]::WriteAllText((Join-Path $migrationEntryPlan.Paths.KeyDirectory 'id_vps_management'), 'fixture-key')
+[IO.File]::WriteAllText((Join-Path $migrationEntryPlan.Paths.KeyDirectory 'id_vps_management.pub'), 'fixture-public-key')
 $migrationEntryPlanPath = Join-Path $migrationEntryRoot 'deployment-plan.json'
 $migrationEntryState = [ordered]@{
     SchemaVersion = 1

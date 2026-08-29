@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- 所有交互式本地路径与对应命令行参数现在接受统一的 `/` 或统一的 `\` 写法，输入阶段拒绝同一路径混用两种分隔符，并在使用前规范化为本机格式。
+- Reality/AnyTLS 最终验收补充真实 SOCKS5 UDP DNS 往返，和客户端握手、HTTPS 204、出口 IP 一起成为必过项；测试使用隔离 Mihomo 进程，不修改桌面客户端代理状态。
+- 修复 Debian 12 Nginx 1.22 不支持独立 `http2 on;` 导致 Reality 本机 HTTPS target 部署失败；改用向前兼容的 `listen ... ssl http2`。
+- Certbot 首次模拟续期和专用 systemd 服务禁用内部随机睡眠，由已有 `RandomizedDelaySec` 统一负责日常错峰，避免部署验收无输出等待数分钟。
+- 复用服务商 RSA PEM/OpenSSH 私钥时，bootstrap 公钥验证现在接受 `ssh-rsa` 和标准 ECDSA 类型，不再错误地只允许 Ed25519。
+- 协议管理和 Shadowsocks 外部入口验收改为读取计划中的受管 SSH 密钥文件名，复用服务商密钥的实例不再被硬编码的 `id_ed25519` 路径拒绝。
+- 修复协议启停向导和备份清理在只有一个候选对象时因 PowerShell 管道自动解包而读取不到 `.Count` 的问题。
 - 新部署现在识别服务商提供的非特权高位初始 SSH：直接复用为最终主端口，只新增一个不同的随机/手动救援端口；SSH 过渡配置去重，最终模块复验后保留主端口，不再创建第三个入口或误提示删除。
 - 将支持系统收紧为明确验证的 Debian 12/13 与 Ubuntu 22.04/24.04，并新增 Debian 12 官方容器的包名、OpenSSH 配置和全部远端 Bash 语法 CI 契约。
 - 新增独立 Cloudflare/Certbot 中文操作手册：逐项说明 AnyTLS SNI、ECH public name、Reality 本机 target 的 DNS-only 记录、最小权限长期 Token、客户端 IP 白名单、Token 文件格式、续期验证、迁移和退役清理。

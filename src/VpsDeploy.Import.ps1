@@ -7,7 +7,7 @@ function New-MxhExistingImportPlanInteractive {
 
     $versions = Get-VpsVersions -ProjectRoot $ProjectRoot
     $wizard = [ordered]@{
-        InstanceRoot = [IO.Path]::GetFullPath($InstanceRoot.Trim().Trim('"')).TrimEnd('\', '/')
+        InstanceRoot = [IO.Path]::GetFullPath((ConvertTo-VpsInputPath -Value $InstanceRoot)).TrimEnd('\', '/')
         Provider = $null
         Instance = $null
         NodeName = $null
@@ -26,8 +26,8 @@ function New-MxhExistingImportPlanInteractive {
         [pscustomobject]@{
             Id = 'archive-root'; ShouldRun = { $true }; Run = {
                 $value = Read-VpsText '现有 VPS 私有归档根目录（不会立即创建）' -Default $wizard.InstanceRoot -AllowBack `
-                    -Validate ${function:Test-VpsArchiveRoot} -ValidationMessage '请输入完整绝对路径，不能使用相对路径或磁盘根目录。'
-                $wizard.InstanceRoot = [IO.Path]::GetFullPath($value.Trim().Trim('"')).TrimEnd('\', '/')
+                    -Validate ${function:Test-VpsArchiveRoot} -ValidationMessage '请输入完整绝对路径；可全用 / 或全用 \，但不能混用，也不能是磁盘根目录。'
+                $wizard.InstanceRoot = [IO.Path]::GetFullPath((ConvertTo-VpsInputPath -Value $value)).TrimEnd('\', '/')
             }
         },
         [pscustomobject]@{
@@ -82,9 +82,9 @@ function New-MxhExistingImportPlanInteractive {
         [pscustomobject]@{
             Id = 'ssh-key'; ShouldRun = { $wizard.BootstrapAuth -eq 'ExistingKey' }; Run = {
                 $value = Read-VpsText '当前 root OpenSSH 私钥完整路径' -Default $wizard.BootstrapKeyPath -AllowBack `
-                    -Validate { param($v) Test-Path -LiteralPath $v.Trim().Trim('"') -PathType Leaf } `
-                    -ValidationMessage '找不到该私钥。'
-                $wizard.BootstrapKeyPath = (Resolve-Path -LiteralPath $value.Trim().Trim('"')).Path
+                    -Validate { param($v) Test-VpsExistingInputPath -Value $v -PathType Leaf } `
+                    -ValidationMessage '找不到该私钥，或路径混用了 / 与 \。'
+                $wizard.BootstrapKeyPath = (Resolve-Path -LiteralPath (ConvertTo-VpsInputPath -Value $value)).Path
             }
         },
         [pscustomobject]@{

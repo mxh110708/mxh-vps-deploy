@@ -114,10 +114,13 @@ function Invoke-MxhEditClientLayoutDefaults {
                 $mode=Read-VpsMenu '默认基础来源' @('项目通用模板','导入现有 Clash/sing-box 配置') $(if([string]$layout.authority_defaults.source_mode -eq 'ExistingAuthority'){2}else{1}) -AllowBack
                 $layout.authority_defaults.source_mode=if($mode -eq 2){'ExistingAuthority'}else{'GenericTemplate'}
                 if($mode -eq 2){
-                    $layout.authority_defaults.clash=Read-VpsText '默认 Clash 配置路径（可留空，运行时再填）' -Default ([string]$layout.authority_defaults.clash) -AllowEmpty -AllowBack
-                    $layout.authority_defaults.sing_box=Read-VpsText '默认 sing-box 配置路径（可留空，运行时再填）' -Default ([string]$layout.authority_defaults.sing_box) -AllowEmpty -AllowBack
+                    $value=Read-VpsText '默认 Clash 配置路径（可留空，运行时再填）' -Default ([string]$layout.authority_defaults.clash) -AllowEmpty -AllowBack -Validate{param($v)Test-VpsPathSeparatorStyle -Value $v -AllowEmpty} -ValidationMessage '路径可全用 / 或全用 \，但不能混用。'
+                    $layout.authority_defaults.clash=ConvertTo-VpsInputPath -Value $value -AllowEmpty
+                    $value=Read-VpsText '默认 sing-box 配置路径（可留空，运行时再填）' -Default ([string]$layout.authority_defaults.sing_box) -AllowEmpty -AllowBack -Validate{param($v)Test-VpsPathSeparatorStyle -Value $v -AllowEmpty} -ValidationMessage '路径可全用 / 或全用 \，但不能混用。'
+                    $layout.authority_defaults.sing_box=ConvertTo-VpsInputPath -Value $value -AllowEmpty
                 }
-                $layout.authority_defaults.output_root=Read-VpsText '默认输出目录（可用相对项目路径）' -Default ([string]$layout.authority_defaults.output_root) -AllowBack
+                $value=Read-VpsText '默认输出目录（可用相对项目路径）' -Default ([string]$layout.authority_defaults.output_root) -AllowBack -Validate ${function:Test-VpsPathSeparatorStyle} -ValidationMessage '路径可全用 / 或全用 \，但不能混用。'
+                $layout.authority_defaults.output_root=ConvertTo-VpsInputPath -Value $value
             }
             else {
                 if(-not(Read-VpsYesNo '恢复项目通用默认值？当前个人默认会改名保留。' $false -AllowBack)){continue}
@@ -371,8 +374,10 @@ function Invoke-MxhBuildClientAuthority {
     else {
         $clashDefault = Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $ClashAuthorityPath -Environment $env:MXH_VPS_CLASH_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.clash)
         $singDefault = Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $SingBoxAuthorityPath -Environment $env:MXH_VPS_SINGBOX_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.sing_box)
-        $clash = Read-VpsText '现有 Clash YAML（只读源）' -Default $clashDefault -AllowBack -Validate { param($v) Test-Path $v.Trim('"') -PathType Leaf }
-        $sing = Read-VpsText '现有 sing-box JSON（只读源）' -Default $singDefault -AllowBack -Validate { param($v) Test-Path $v.Trim('"') -PathType Leaf }
+        $clash = Read-VpsText '现有 Clash YAML（只读源）' -Default $clashDefault -AllowBack -Validate { param($v) Test-VpsExistingInputPath -Value $v -PathType Leaf } -ValidationMessage '找不到文件，或路径混用了 / 与 \。'
+        $sing = Read-VpsText '现有 sing-box JSON（只读源）' -Default $singDefault -AllowBack -Validate { param($v) Test-VpsExistingInputPath -Value $v -PathType Leaf } -ValidationMessage '找不到文件，或路径混用了 / 与 \。'
+        $clash = ConvertTo-VpsInputPath -Value $clash
+        $sing = ConvertTo-VpsInputPath -Value $sing
         $sourceMode = 'ExistingAuthority'
     }
     $authoritySing = Get-Content -Raw -LiteralPath $sing.Trim('"') | ConvertFrom-Json -AsHashtable
@@ -492,18 +497,21 @@ function Invoke-MxhBuildClientAuthority {
 生成新配置：写入全新目录和文件名，任何目标文件已存在都会停止，不改当前权威配置。
 '@
     $outputDefault=Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $ClientOutputRoot -Environment $env:MXH_VPS_CLIENT_OUTPUT_ROOT -LocalOrGeneric ([string]$layout.authority_defaults.output_root)
-    $outputRoot = Read-VpsText '暂存与报告输出根目录' -Default $outputDefault -AllowBack -Validate ${function:Test-VpsArchiveRoot}
+    $outputRoot = Read-VpsText '暂存与报告输出根目录' -Default $outputDefault -AllowBack -Validate ${function:Test-VpsArchiveRoot} -ValidationMessage '请输入完整绝对路径；可全用 / 或全用 \，但不能混用。'
+    $outputRoot = ConvertTo-VpsInputPath -Value $outputRoot
     $stamp=Get-Date -Format yyyyMMdd-HHmmss
     $output = Join-Path $outputRoot ('staging-'+$stamp)
     $targetClash=$null;$targetSing=$null
     if($outputMode -eq 1){
         $targetClashDefault=Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $ClashAuthorityPath -Environment $env:MXH_VPS_CLASH_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.clash)
         $targetSingDefault=Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $SingBoxAuthorityPath -Environment $env:MXH_VPS_SINGBOX_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.sing_box)
-        $targetClash=Read-VpsText '要覆盖的 Clash 权威 YAML 完整路径' -Default $targetClashDefault -AllowBack -Validate{param($v)-not(Test-MxhForbiddenAuthorityPath $v.Trim('"'))}
-        $targetSing=Read-VpsText '要覆盖的 sing-box 权威 JSON 完整路径' -Default $targetSingDefault -AllowBack -Validate{param($v)-not(Test-MxhForbiddenAuthorityPath $v.Trim('"'))}
+        $targetClash=Read-VpsText '要覆盖的 Clash 权威 YAML 完整路径' -Default $targetClashDefault -AllowBack -Validate{param($v)(Test-VpsPathSeparatorStyle -Value $v) -and -not(Test-MxhForbiddenAuthorityPath (ConvertTo-VpsInputPath -Value $v))} -ValidationMessage '路径可全用 / 或全用 \，但不能混用；且不能指向 Clash Verge AppData。'
+        $targetSing=Read-VpsText '要覆盖的 sing-box 权威 JSON 完整路径' -Default $targetSingDefault -AllowBack -Validate{param($v)(Test-VpsPathSeparatorStyle -Value $v) -and -not(Test-MxhForbiddenAuthorityPath (ConvertTo-VpsInputPath -Value $v))} -ValidationMessage '路径可全用 / 或全用 \，但不能混用；且不能指向 Clash Verge AppData。'
+        $targetClash=ConvertTo-VpsInputPath -Value $targetClash;$targetSing=ConvertTo-VpsInputPath -Value $targetSing
         if(-not(Read-VpsYesNo '确认仅在全部校验通过后备份并覆盖这两份权威配置？' $false -AllowBack)){throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)}
     }else{
-        $newDir=Read-VpsText '新配置保存目录' -Default (Join-Path $outputRoot ('generated-'+$stamp)) -AllowBack -Validate ${function:Test-VpsArchiveRoot}
+        $newDir=Read-VpsText '新配置保存目录' -Default (Join-Path $outputRoot ('generated-'+$stamp)) -AllowBack -Validate ${function:Test-VpsArchiveRoot} -ValidationMessage '请输入完整绝对路径；可全用 / 或全用 \，但不能混用。'
+        $newDir=ConvertTo-VpsInputPath -Value $newDir
         $newClashName=Read-VpsText '新 Clash 文件名' -Default ([string]$layout.authority_defaults.new_clash_name) -AllowBack -Validate{param($v)$v -match '\.(yaml|yml)$' -and $v -notmatch '[\\/]'}
         $newSingName=Read-VpsText '新 sing-box 文件名' -Default ([string]$layout.authority_defaults.new_sing_box_name) -AllowBack -Validate{param($v)$v -match '\.json$' -and $v -notmatch '[\\/]'}
         $targetClash=Join-Path $newDir $newClashName;$targetSing=Join-Path $newDir $newSingName
@@ -587,8 +595,9 @@ function Invoke-MxhClientAuthorityDesigner {
                 $layout=(Get-MxhClientLayoutTemplate -ProjectRoot $ProjectRoot).Value
                 $clashDefault=Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $ClashAuthorityPath -Environment $env:MXH_VPS_CLASH_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.clash)
                 $singDefault=Get-MxhClientDefaultPath -ProjectRoot $ProjectRoot -CommandLine $SingBoxAuthorityPath -Environment $env:MXH_VPS_SINGBOX_AUTHORITY -LocalOrGeneric ([string]$layout.authority_defaults.sing_box)
-                $clash=Read-VpsText 'Clash YAML' -Default $clashDefault -AllowBack -Validate{param($v)Test-Path $v.Trim('"') -PathType Leaf}
-                $sing=Read-VpsText 'sing-box JSON' -Default $singDefault -AllowBack -Validate{param($v)Test-Path $v.Trim('"') -PathType Leaf}
+                $clash=Read-VpsText 'Clash YAML' -Default $clashDefault -AllowBack -Validate{param($v)Test-VpsExistingInputPath -Value $v -PathType Leaf} -ValidationMessage '找不到文件，或路径混用了 / 与 \。'
+                $sing=Read-VpsText 'sing-box JSON' -Default $singDefault -AllowBack -Validate{param($v)Test-VpsExistingInputPath -Value $v -PathType Leaf} -ValidationMessage '找不到文件，或路径混用了 / 与 \。'
+                $clash=ConvertTo-VpsInputPath -Value $clash;$sing=ConvertTo-VpsInputPath -Value $sing
                 foreach($core in @(Get-VpsMihomoCorePaths -ProjectRoot $ProjectRoot)){$data=Join-Path ([IO.Path]::GetTempPath()) ('mxh-mihomo-'+[guid]::NewGuid().ToString('N'));[IO.Directory]::CreateDirectory($data)|Out-Null;try{$t=Invoke-VpsProcess $core @('-t','-d',$data,'-f',$clash.Trim('"')) -TimeoutSeconds 180;if($t.ExitCode-ne 0){throw "未通过 $(Split-Path -Leaf $core)：$($t.StdErr)"}}finally{Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue}}
                 Get-Content -Raw -LiteralPath $sing.Trim('"')|ConvertFrom-Json|Out-Null;$bytes=(Get-Item -LiteralPath $sing.Trim('"')).Length;if($bytes-ge 4MB){throw "sing-box 文件为 $bytes 字节，达到或超过 4 MiB。"};Write-VpsUi '两份配置已通过当前可用的本地语法/结构检查。' Success
             }

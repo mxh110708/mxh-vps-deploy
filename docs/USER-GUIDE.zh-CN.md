@@ -308,6 +308,8 @@ Controller/Agent 的固定版本以 `config/versions.json` 为准。不要把说
 
 你可以在向导第一项修改。输入 `0` 返回主菜单。
 
+本项目的本地路径输入同时接受全 `/` 和全 `\` 写法，例如 `D:/Private-VPS-Archive` 与 `D:\Private-VPS-Archive` 等价。为避免复制、拼接造成歧义，同一条输入不能混用两种分隔符；工具会先拒绝混用，再把合法输入规范化为当前系统的分隔符。该规则同样适用于计划、私钥、Cloudflare Token、客户端权威文件、输出目录和 Controller 备份路径。
+
 ### 7.2 服务商和实例名称
 
 最终实例目录是：

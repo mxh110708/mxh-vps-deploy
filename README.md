@@ -149,6 +149,8 @@ pwsh -File .\Start-VPSDeploy.ps1
 3. 被 Git 忽略的 `config/app-defaults.local.json`；
 4. 项目内的通用相对默认值。
 
+所有要求填写本地路径的向导项和命令行参数都接受 `/` 或 `\` 作为分隔符；同一条路径必须统一使用一种写法，混用会在访问文件前明确拒绝。接受后会规范化为当前系统的本机分隔符。
+
 项目源码和 Git 仓库不得保存真实 IP、端口、UUID、私钥、密码、Token 或完整个人客户端配置。
 
 ## 客户端设计器依赖
@@ -171,6 +173,9 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New
 
 # 使用指定归档根目录
 pwsh -File .\Start-VPSDeploy.ps1 -Mode New -InstanceRoot 'D:\Private-VPS-Archive'
+
+# 等价的正斜杠写法（同一路径不要混用两种分隔符）
+pwsh -File .\Start-VPSDeploy.ps1 -Mode New -InstanceRoot 'D:/Private-VPS-Archive'
 
 # 继续计划
 pwsh -File .\Start-VPSDeploy.ps1 -Mode Resume `
