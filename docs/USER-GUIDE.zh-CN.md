@@ -12,7 +12,7 @@
 
 ## 0. 十分钟快速上手
 
-1. 确认 Windows 已安装 PowerShell 7 和 OpenSSH Client。
+1. 确认 Windows 已安装 PowerShell 7.4 或更高版本和 OpenSSH Client。
 2. 确认 VPS 有可用的 root 密码或 OpenSSH 私钥，并准备服务商网页控制台/VNC 作为救援入口。
 3. 在项目目录运行：
 
@@ -157,13 +157,13 @@ Reality 与 AnyTLS 的二进制、配置、凭据和客户端片段可以同时�
 
 ## 5. Windows 端准备
 
-### 5.1 检查 PowerShell 7
+### 5.1 检查 PowerShell 7.4+
 
 ```powershell
 pwsh --version
 ```
 
-不要用 Windows PowerShell 5.1 运行。
+不要用 Windows PowerShell 5.1 或低于 7.4 的 `pwsh` 运行。
 
 ### 5.2 检查 OpenSSH
 
@@ -177,7 +177,7 @@ Get-Command ssh-keygen.exe
 
 ### 5.3 客户端设计器依赖
 
-部署单台 VPS 不需要 Python。只有主菜单 7 需要 Python 3 和固定的 YAML 依赖：
+部署单台 VPS 不需要 Python。只有主菜单 7 需要 Python 3.9 或更高版本和固定的 YAML 依赖：
 
 ```powershell
 python -m pip install -r .\requirements-client-merge.txt
@@ -197,6 +197,7 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
 
 提前准备：
 
+- Debian 12 或 Debian 13 amd64 VPS；Windows 是唯一正式控制端，Debian 只运行远端模块；
 - 公网 IPv4，存在时再填 IPv6；
 - 初始 root SSH 端口；
 - root 密码或服务商私钥完整路径；
@@ -617,7 +618,9 @@ SSH 维护使用独立的 10 分钟回滚 timer。新密钥/端口在 root、adm
 
 Reality 可选择保持计划版本、切换固定验证版，或解析官方最新稳定版。sing-box 与 Komari 使用已写入版本目录的精确资产。
 
-升级先备份，再校验下载、配置、服务和真实协议功能；不要把“二进制版本号改变”当成升级成功。
+选择“官方最新稳定版”后，界面会同时显示通道和当前解析到的具体版本；它即使暂时与固定验证版同号，也仍记录为 `LatestStable`。固定安装脚本的提交与 SHA-256 不等于把 Xray 核心版本固定。
+
+升级先备份，再校验下载、配置、服务，并重新生成逐地址族测试配置，复用完整真实协议验收；不要把“二进制版本号改变”当成升级成功。
 
 ### 11.7 客户端权威配置候选
 
@@ -671,7 +674,7 @@ Controller 操作会验证服务、回环监听、HTTP 和 Tunnel 状态。浏�
 
 ```text
 业务组
-  └─ 地区入口组或 Default Exit
+  └─ 地区入口组、具体链式落地出口或 Default Exit
        ├─ 入口节点
        └─ 落地节点（节点自身指定 dialer-proxy/detour 到某个地区入口组）
 ```
@@ -681,7 +684,7 @@ Controller 操作会验证服务、回环监听、HTTP 和 Tunnel 状态。浏�
 - 地区入口组：选择“客户端先连哪一台线路机”；
 - 落地节点：决定最终公网出口 IP；
 - `dialer-proxy`/`detour`：落地节点通过哪个地区入口组拨号；
-- 业务组：只选择可理解的地区入口/默认出口/直连策略，不重复堆入所有物理节点。
+- 业务组：可直接选择地区入口组，也可选择某个具体链式落地出口，从而自由决定最终落地节点；还可包含 Default Exit/直连策略。业务组不需要把同一入口组内部的每台物理入口节点重复展开。
 
 因此不需要再创建含义含混的“US-West Landing Transit A”中间组。服务商信息由节点名体现，地区关系由地区入口组和落地节点映射体现。
 
@@ -738,8 +741,9 @@ config/client-layout.local.json
 
 ### 12.7 校验内容
 
-- 可找到时运行 Mihomo 稳定版和 Alpha 核心；
-- sing-box JSON 严格解析；
+- 项目内置稳定版 Mihomo 和 sing-box 官方 Windows amd64 压缩包，先核对 SHA-256，再分别执行实际核心语法检查；
+- 可选的 Mihomo Alpha 只做额外兼容检查，不替代稳定版；
+- 内置核心缺失或损坏时可重试、手动选择，或输入确认短语明确跳过；跳过记为 `SkippedByUser`，不算通过，非交互模式不能自动跳过；
 - sing-box 文件必须低于 4 MiB；
 - selector 成员必须存在；
 - 拒绝 selector 循环；
@@ -793,7 +797,7 @@ config/client-layout.local.json
 
 ### 13.3 客户端片段
 
-Reality 通常生成 Mihomo 主/救援测试 YAML 和 sing-box 出站片段；AnyTLS 生成带可信证书/ECH 的测试文件；Shadowsocks 生成落地节点及其 transit/detour 片段。
+Reality 按主/救援入口和 IPv4/IPv6 生成 Mihomo 与 sing-box 完整测试配置，另生成 sing-box 出站片段；AnyTLS 按地址族生成带可信证书/ECH 的双核心测试文件；Shadowsocks 生成落地节点及其 transit/detour 片段。
 
 这些文件包含真实凭据。先用测试文件验证，再通过客户端设计器合入长期权威配置。
 
@@ -818,7 +822,7 @@ ssh -i '<管理私钥>' -p <主端口> admin@<VPS地址>
 - Xray 配置测试通过；
 - 服务 active；
 - 443/救援端口监听正确；
-- Mihomo 或 sing-box 真实 Reality 认证成功；
+- 稳定版 Mihomo 和 sing-box 均按已配置的 IPv4/IPv6 地址族完成真实 Reality 认证；
 - HTTPS 204 成功；
 - 出口 IP 是目标 VPS；
 - UDP 测试通过；
@@ -897,9 +901,9 @@ ssh -i '<管理私钥>' -p <主端口> admin@<VPS地址>
 
 云内核可能已经使用 BBR，也可能不提供对应模块。脚本会尽力启用并记录结果，但不会为了 BBR 更换内核。先看最终审计，不要只看某一条 sysctl 写入信息。
 
-### 15.7 找不到 Mihomo 核心
+### 15.7 内置测试核心缺失或损坏
 
-部署仍可进行，但 Windows 端双核心验证会跳过。可通过环境变量或本机默认配置指定稳定版/Alpha 路径。客户端设计器仍会做 JSON、引用和体积检查。
+正常情况下不需要查找或首次下载：稳定版 Mihomo 与 sing-box 压缩包已在 `vendor/test-cores/windows-amd64`，经 SHA-256 校验后解压到 `.cache/client-cores`。失败时可重新校验、手动选择可执行文件，或在交互模式输入确认短语明确跳过；跳过会记录为 `SkippedByUser`，不能显示为通过。项目不会扫描 Clash Verge AppData、注册表或系统 PATH，也不会改变系统代理/TUN。
 
 ### 15.8 系统代理偶发断网
 
@@ -954,7 +958,7 @@ config/app-defaults.local.json
 config/client-layout.local.json
 ```
 
-`app-defaults.local.json` 可只覆盖需要的字段，例如本机归档根目录或 Mihomo 核心路径。不要把真实节点秘密放入通用文件。
+`app-defaults.local.json` 可只覆盖需要的字段，例如本机归档根目录或可选 Mihomo Alpha 路径。稳定测试核心来自项目 vendor 目录。不要把真实节点秘密放入通用文件。
 
 ## 17. 更新、测试与已知边界
 
@@ -1005,7 +1009,7 @@ Xray、sing-box、Komari 的部署版本、资产名和 SHA-256 以 `config/vers
 
 ### 部署前
 
-- [ ] PowerShell 7 与 OpenSSH 可用；
+- [ ] PowerShell 7.4+ 与 OpenSSH 可用；
 - [ ] 项目离线自检通过；
 - [ ] VPS root 密码或私钥有效；
 - [ ] 服务商控制台/VNC 可用；

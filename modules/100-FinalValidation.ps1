@@ -54,52 +54,18 @@
         }
 
         if ([bool]$inventory.RealityEntry.Enabled) {
-            $core = @(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot | Where-Object { (Split-Path -Leaf $_) -eq 'verge-mihomo.exe' } | Select-Object -First 1)
-            $core = if($core.Count){$core[0]}else{''}
-            if (Test-Path -LiteralPath $core) {
-                $primaryEgress = Invoke-MxhMihomoEgressTest -Context $Context -CorePath $core `
-                    -ProfilePath $Context.State.ClientExports.PrimaryProfile `
-                    -MixedPort ([int]$Context.State.ClientExports.PrimaryMixedPort) -Label 'primary'
-                $backupEgress = $null
-                if ($Context.State.ClientExports.BackupProfile) {
-                    $backupEgress = Invoke-MxhMihomoEgressTest -Context $Context -CorePath $core `
-                        -ProfilePath $Context.State.ClientExports.BackupProfile `
-                        -MixedPort ([int]$Context.State.ClientExports.BackupMixedPort) -Label 'backup'
-                    if ($primaryEgress -ne $backupEgress) { Write-VpsUi '主/救援端口返回的出口 IP 不一致，请人工复核。' Warning }
-                }
-                $Context.State.RealityEgressTest = [ordered]@{
-                    Status = 'Passed'
-                    PrimaryEgress = $primaryEgress
-                    BackupEgress = $backupEgress
-                    UdpDns = 'Passed'
-                    TestedAt = (Get-Date).ToString('o')
-                }
-                Write-VpsUi $(if ($backupEgress) { '主端口和救援端口均完成 Reality Authentication、HTTP 204、出口 IP 与 UDP DNS 往返测试。' } else { 'Reality 主端口已完成 Authentication、HTTP 204、出口 IP 与 UDP DNS 往返测试；该导入实例没有救援入口。' }) Success
-            }
-            else {
-                $Context.State.RealityEgressTest = [ordered]@{ Status = 'NotRun'; Reason = 'Mihomo core not found' }
-                Write-VpsUi '未找到稳定版 Mihomo，真实 Reality 握手留待客户端人工完成。' Warning
-            }
+            $summary = Invoke-MxhRealClientValidation -Context $Context -Protocol Reality
+            Write-VpsUi $(if ($summary.Status -eq 'Passed') {
+                    'Mihomo 与 sing-box 已逐入口、逐地址族完成 Reality 握手、HTTPS 出口、出口 IP 与 UDP DNS 验收。'
+                } else { 'Reality 可执行的真实验收已完成；用户明确跳过的核心已记录为 SkippedByUser，不计为通过。' }) `
+                $(if ($summary.Status -eq 'Passed') { 'Success' } else { 'Warning' })
         }
-        elseif ([bool]$inventory.AnyTlsEntry.Enabled) {
-            $core = @(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot | Where-Object { (Split-Path -Leaf $_) -eq 'verge-mihomo.exe' } | Select-Object -First 1)
-            $core = if($core.Count){$core[0]}else{''}
-            if (Test-Path -LiteralPath $core) {
-                $egress = Invoke-MxhMihomoEgressTest -Context $Context -CorePath $core `
-                    -ProfilePath $Context.State.AnyTlsClientExports.MihomoProfile `
-                    -MixedPort ([int]$Context.State.AnyTlsClientExports.MihomoMixedPort) -Label 'anytls'
-                $Context.State.AnyTlsEgressTest = [ordered]@{
-                    Status = 'Passed'
-                    Egress = $egress
-                    UdpDns = 'Passed'
-                    TestedAt = (Get-Date).ToString('o')
-                }
-                Write-VpsUi 'AnyTLS 已完成受信证书、ECH、HTTP 204、出口 IP 与 UDP DNS 往返测试。' Success
-            }
-            else {
-                $Context.State.AnyTlsEgressTest = [ordered]@{ Status = 'NotRun'; Reason = 'Mihomo core not found' }
-                Write-VpsUi '未找到稳定版 Mihomo，AnyTLS 真实客户端测试留待人工完成。' Warning
-            }
+        if ([bool]$inventory.AnyTlsEntry.Enabled) {
+            $summary = Invoke-MxhRealClientValidation -Context $Context -Protocol AnyTLS
+            Write-VpsUi $(if ($summary.Status -eq 'Passed') {
+                    'Mihomo 与 sing-box 已逐地址族完成 AnyTLS 受信证书、ECH、HTTPS 出口、出口 IP 与 UDP DNS 验收。'
+                } else { 'AnyTLS 可执行的真实验收已完成；用户明确跳过的核心已记录为 SkippedByUser，不计为通过。' }) `
+                $(if ($summary.Status -eq 'Passed') { 'Success' } else { 'Warning' })
         }
         Save-VpsContext -Context $Context
     }

@@ -7,7 +7,7 @@
     IsEnabled = { param($Context) $true }
     Invoke    = {
         param($Context)
-        $publicKey = (Get-Content -Raw -LiteralPath ((Get-VpsSshKeyPath $Context) + '.pub')).Trim()
+        $publicKey = (Get-Content -Raw -LiteralPath (Get-VpsSshPublicKeyPath $Context)).Trim()
         $parameters = @{
             ADMIN_USER = [string]$Context.Plan.AdminUser
             ADMIN_PASSWORD = [string]$Context.Secrets.AdminPassword

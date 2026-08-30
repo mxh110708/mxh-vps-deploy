@@ -52,6 +52,15 @@
       }
     }
   },
+  "mihomo": {
+    "version": "1.19.30",
+    "assets": {
+      "windows_amd64": {
+        "name": "mihomo-windows-amd64-v1.19.30.zip",
+        "sha256": "22c09fd67673895ef7cd6b1820563918275c3d316f2462b306208675118db3c0"
+      }
+    }
+  },
   "target_audit": {
     "samples": 20,
     "preferred_median_ms": 10,

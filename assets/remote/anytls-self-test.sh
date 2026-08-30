@@ -17,7 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-read -r mixed_port udp_port < <(python3 - <<'PY'
+read -r mixed_port udp_port udp_fallback_port < <(python3 - <<'PY'
 import socket
 with socket.socket() as tcp:
     tcp.bind(("127.0.0.1", 0))
@@ -25,16 +25,19 @@ with socket.socket() as tcp:
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
     udp.bind(("127.0.0.1", 0))
     direct = udp.getsockname()[1]
-print(mixed, direct)
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+    udp.bind(("127.0.0.1", 0))
+    fallback = udp.getsockname()[1]
+print(mixed, direct, fallback)
 PY
 )
 
-python3 - "$work/client.json" "$mixed_port" "$udp_port" <<'PY'
+python3 - "$work/client.json" "$mixed_port" "$udp_port" "$udp_fallback_port" <<'PY'
 import json
 import os
 import sys
 
-output, mixed_port, udp_port = sys.argv[1:]
+output, mixed_port, udp_port, udp_fallback_port = sys.argv[1:]
 config = {
     "log": {"level": "warn"},
     "dns": {"servers": [{"type": "local", "tag": "local"}]},
@@ -44,6 +47,11 @@ config = {
             "type": "direct", "tag": "udp-test-in", "listen": "127.0.0.1",
             "listen_port": int(udp_port), "network": "udp",
             "override_address": "1.1.1.1", "override_port": 53
+        },
+        {
+            "type": "direct", "tag": "udp-fallback-in", "listen": "127.0.0.1",
+            "listen_port": int(udp_fallback_port), "network": "udp",
+            "override_address": "9.9.9.9", "override_port": 53
         }
     ],
     "outbounds": [{
@@ -73,32 +81,44 @@ pid="$!"
 sleep 1
 kill -0 "$pid"
 
-status="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 25 \
-  --output /dev/null --write-out '%{http_code}' \
-  --proxy "http://127.0.0.1:${mixed_port}" 'https://www.gstatic.com/generate_204')"
+status=''
+for endpoint in 'https://www.gstatic.com/generate_204' 'https://cp.cloudflare.com/generate_204'; do
+  status="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 25 \
+    --output /dev/null --write-out '%{http_code}' --proxy "http://127.0.0.1:${mixed_port}" "$endpoint" || true)"
+  [[ "$status" == '204' ]] && break
+done
 [[ "$status" == '204' ]]
-egress="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 25 \
-  --proxy "http://127.0.0.1:${mixed_port}" 'https://api.ipify.org')"
+egress=''
+for endpoint in 'https://api64.ipify.org' 'https://icanhazip.com'; do
+  egress="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 25 \
+    --proxy "http://127.0.0.1:${mixed_port}" "$endpoint" || true)"
+  [[ -n "$egress" ]] && break
+done
+[[ -n "$egress" ]]
 
-python3 - "$udp_port" <<'PY'
+python3 - "$udp_port" "$udp_fallback_port" <<'PY'
 import os
 import socket
 import struct
 import sys
 
-port = int(sys.argv[1])
-query_id = int.from_bytes(os.urandom(2), "big")
-labels = b"".join(bytes([len(label)]) + label for label in b"example.com".split(b".")) + b"\x00"
-packet = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0) + labels + struct.pack("!HH", 1, 1)
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-    sock.settimeout(10)
-    sock.sendto(packet, ("127.0.0.1", port))
-    response, _ = sock.recvfrom(4096)
-if len(response) < 12:
-    raise SystemExit("Short UDP DNS response through AnyTLS.")
-response_id, flags = struct.unpack("!HH", response[:4])
-if response_id != query_id or not flags & 0x8000 or flags & 0x000F:
-    raise SystemExit("Invalid UDP DNS response through AnyTLS.")
+for value in sys.argv[1:]:
+    port = int(value)
+    query_id = int.from_bytes(os.urandom(2), "big")
+    labels = b"".join(bytes([len(label)]) + label for label in b"example.com".split(b".")) + b"\x00"
+    packet = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0) + labels + struct.pack("!HH", 1, 1)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(10)
+            sock.sendto(packet, ("127.0.0.1", port))
+            response, _ = sock.recvfrom(4096)
+        response_id, flags = struct.unpack("!HH", response[:4]) if len(response) >= 12 else (None, 0)
+        if response_id == query_id and flags & 0x8000 and not flags & 0x000F:
+            break
+    except OSError:
+        pass
+else:
+    raise SystemExit("UDP DNS failed through AnyTLS primary and fallback endpoints.")
 PY
 
 printf 'VPSDEPLOY_EGRESS_B64=%s\n' "$(printf '%s' "$egress" | base64 | tr -d '\n')"

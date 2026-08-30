@@ -13,7 +13,7 @@
         try {
             if ([string]::IsNullOrWhiteSpace($token) -or $token -match '\s') { throw 'Komari Token 为空或含空白字符。' }
             $arch = [string]$Context.State.Audit.Architecture
-            $archKey = if ($arch -in @('x86_64', 'amd64')) { 'amd64' } else { 'arm64' }
+            $archKey = Get-VpsSupportedAssetArchitecture -Architecture $arch
             $asset = $Context.Versions.komari_agent.assets.$archKey
             $parameters = @{
                 ENDPOINT = [string]$Context.Plan.Komari.Endpoint

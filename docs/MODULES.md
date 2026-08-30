@@ -16,10 +16,13 @@ modules/*.ps1                         可排序的新部署/生命周期模块
 assets/remote/*.sh                    通过 stdin 参数执行的远端脚本
 templates/client/*                    无个人数据的客户端基础模板
 config/*.json                         通用默认与固定版本目录
+vendor/test-cores/windows-amd64/*     经校验后供 Windows 控制端验收的官方核心压缩包
 tests/Run-Tests.ps1                   跨模块回归、交互和秘密扫描
 ```
 
 主菜单导航属于核心而不是业务模块：主菜单 `9` 才退出；子层 `0` 才返回；`b/back` 永远作为普通输入。新增交互入口必须复用 `Read-VpsText`、`Read-VpsYesNo` 和 `Read-VpsMenu`，不能自行发明另一套返回别名。
+
+正式运行拓扑是 Windows amd64 控制端通过 OpenSSH 管理 Debian 12/13 amd64 VPS。新建、Import 和维护上下文都必须调用同一 OS/架构门禁；Debian 容器 CI 不是 Linux 控制端支持承诺。
 
 ## 模块定义
 
@@ -51,7 +54,7 @@ tests/Run-Tests.ps1                   跨模块回归、交互和秘密扫描
 
 Schema 3 新计划把运行数据放在 `<InstanceDirectory>/MXH-VPS-Deploy`，`Paths.InstanceDirectory` 指向用户实例目录，`Paths.Archive` 指向受管子目录，`Paths.KeyDirectory` 指向其下 `ssh`。旧 schema 的根目录布局仍按计划原值读取，不自动迁移。
 
-`SshKey.Mode` 为 `ReuseExisting` 或 `GenerateManaged`。复用模式复制私钥、先收紧到 OpenSSH 可接受的 ACL，再用 `ssh-keygen -y` 推导公钥；它不会修改源文件或服务器 `authorized_keys`。Import 的 `EnforceKeyOnlySsh` 是显式用户选择而非纳管前置条件。
+`SshKey.Mode` 为 `ReuseExisting` 或 `GenerateManaged`。复用模式复制私钥并用 `ssh-keygen -y` 推导公钥；它不会修改源文件、额外调整/检查本地 ACL 或轮换服务器 `authorized_keys`。Import 的 `EnforceKeyOnlySsh` 是显式用户选择而非纳管前置条件。
 
 供应商专有 IPv6 获取、策略路由或网络命名空间应作为单独模块加入，不应修改通用 `sing-box-shadowsocks` 模块。
 
@@ -66,7 +69,7 @@ Schema 3 新计划把运行数据放在 `<InstanceDirectory>/MXH-VPS-Deploy`，`
 - `certbot-dns`：验证 Cloudflare Zone Token，签发证书，执行模拟续期并安装唯一的续期计时器和部署 hook；
 - `local-https-target`：仅在 Reality 的 `LocalOwnedTls` 模式启用，部署回环 nginx 静态站；
 - `sing-box-anytls`：安装固定版本低权限核心、生成 AnyTLS 密码与 ECH 密钥、切换 443 并执行 TCP/UDP/ECH 自测；
-- `anytls-client-export`：生成 Mihomo 测试 YAML、sing-box 出站和 ECH client config 私有片段。
+- `anytls-client-export`：按 IPv4/IPv6 生成 Mihomo 与 sing-box 完整测试配置，并生成 sing-box 出站和 ECH client config 私有片段。
 
 Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`FixedVerified` 使用版本目录的当前基线；`LatestStable` 只接受 XTLS/Xray-core 官方 latest API 返回的非草稿、非预发行数字标签。远端安装始终使用锁定提交且校验 SHA-256 的 Xray-install 脚本，并在安装后核对实际版本。
 
@@ -74,7 +77,9 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 
 `New-MxhAnyTlsPaddingScheme` 在创建计划时生成 `PerInstanceConservativeV1`：保持协议默认方案的前八包结构，但在受控范围内改变各段长度，单段 TLS plaintext 上限不超过 1100 字节。结果写入部署计划并在继续运行时保持不变。服务端通过 AnyTLS 协议下发 padding scheme，客户端配置不需要也不应复制该数组；缺少字段的旧计划由 `Get-MxhAnyTlsPaddingScheme` 回退到官方默认值。
 
-`anytls-self-test.sh` 会以真实 AnyTLS+ECH 客户端完成 HTTPS 204、出口 IP 和 UDP DNS 往返。最终验收中的隔离 Mihomo 进程还会通过其 SOCKS5 UDP ASSOCIATE 对每个 Reality/AnyTLS 实测入口执行独立 DNS 往返，不修改桌面客户端、TUN 或系统代理。语法通过、443 可达或证书可读都不能替代这组功能测试。现场验收还应从另一台主机执行同样的外部探测。
+`anytls-self-test.sh` 会以真实 AnyTLS+ECH 客户端完成 HTTPS、出口 IP 和 UDP DNS 往返。`Invoke-MxhRealClientValidation` 使用项目 vendor 目录内经 SHA-256 校验的稳定版 Mihomo 与 sing-box，对 Reality 的主/救援入口及已配置地址族、AnyTLS 的已配置地址族逐项测试。两个核心都通过各自 SOCKS5 UDP 路径做独立 DNS 往返，不修改桌面客户端、TUN 或系统代理；主测试端点失败时再尝试独立备用端点。语法通过、443 可达或证书可读都不能替代这组功能测试。
+
+内置核心只支持 Windows amd64 控制端，解压目录为被 Git 忽略的 `.cache/client-cores`。正常流程不扫描 PATH、注册表或 Clash Verge AppData。交互式手动跳过必须记录 `SkippedByUser`；非交互流程找不到任一核心即失败。Mihomo Alpha 仅作为显式配置的额外兼容检查。
 
 协议生命周期管理不是重新运行新机向导。为兼容旧计划仍使用 `Migration` 字段，但 schema 2 另外记录 `Operation`、`InitialInventory`、`ValidationInventory`、`FinalInventory` 和 `FinalRole`。其中 inventory 将 installed 与 enabled/active 分开；Reality/AnyTLS 只允许一个 enabled，Shadowsocks 可独立并行。
 
@@ -101,7 +106,7 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 
 - `Start/Get/Complete/Undo-MxhMaintenanceTransaction`：本地 `maintenance-backups` 与远端 `protocol-lifecycle` 成对快照，20 分钟独立回滚；
 - `Get-MxhHealthAudit`：读取脱敏服务/监听/版本/证书/文件哈希并和 `HealthBaseline` 比较；
-- 手动恢复、凭据轮换、防火墙、固定资产升级、Komari 和退役：所有远端修改都必须先事务化，只有功能测试后提交；
+- 手动恢复、凭据轮换、防火墙、固定资产升级、Komari 和退役：所有远端修改都必须先事务化；协议受控升级重新生成当前测试配置并复用完整真实协议验收后才提交；
 - SSH 维护单独使用 `mxh-ssh-maintenance-rollback.timer`，因为错误端口或公钥不能依赖普通协议回滚连接；
 - 客户端候选由 `scripts/merge_client_authority.py` 使用 ruamel.yaml round-trip 处理 Clash、标准 JSON 处理 sing-box，只写实例 `client-candidates`/`decommission-client-candidate`。
 
@@ -139,6 +144,6 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 pwsh -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
 ```
 
-该入口在隔离的 PowerShell 子进程中运行测试，避免导入模块的脚本级变量污染当前交互会话，并统一使用 UTF-8 文本输出。CI 同时覆盖 Windows PowerShell 环境和 Unix shell/Bash 语法。
+该入口在隔离的 PowerShell 子进程中运行测试，避免导入模块的脚本级变量污染当前交互会话，并统一使用 UTF-8 文本输出。CI 的控制端主流程运行在 Windows；Debian 12/13 容器只验证将发送到 VPS 的 Bash、包名与 OpenSSH 契约。
 
 新增远端功能还应在可牺牲测试 VPS 上完成：预检、备份、实际变更、真实协议测试、提交以及失败回滚。一次成功 DryRun、配置语法或服务监听均不能代替端到端测试。

@@ -278,6 +278,8 @@ function Invoke-MxhExistingVpsImport {
         [pscustomobject]@{ Audit = $audit; Private = $private }
     }
     $imported = & $readImport
+    Assert-VpsSupportedTarget -OsId ([string]$imported.Audit.OsId) -OsVersion ([string]$imported.Audit.OsVersion) `
+        -Architecture ([string]$imported.Audit.Architecture) | Out-Null
     $managedKeyOnlyDropIn = $false
     $enforceKeyOnly = $Plan.Import.Contains('EnforceKeyOnlySsh') -and [bool]$Plan.Import.EnforceKeyOnlySsh
     if ($enforceKeyOnly -and ($imported.Audit.PasswordAuthentication -ne 'no' -or
@@ -308,7 +310,7 @@ function Invoke-MxhExistingVpsImport {
     $Plan.Role = Get-MxhInventoryPrimaryRole -Inventory $inventory
     if ($imported.Audit.Contains('AdminUser') -and $imported.Audit.AdminUser) { $Plan.AdminUser = [string]$imported.Audit.AdminUser }
     if ($Plan.AdminUser -ne 'root') {
-        $publicKey = (Get-Content -Raw ((Get-VpsSshKeyPath $context) + '.pub')).Trim()
+        $publicKey = (Get-Content -Raw (Get-VpsSshPublicKeyPath $context)).Trim()
         $adminKey = Invoke-VpsRemoteScript -Context $context -Asset 'existing-vps-import-admin-key.sh' -Parameters @{
             ADMIN_USER = [string]$Plan.AdminUser; PUBLIC_KEY = $publicKey
         } -TimeoutSeconds 180

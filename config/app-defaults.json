@@ -2,7 +2,6 @@
   "schema_version": 1,
   "instance_root": "..\\VPS-Instances",
   "mihomo": {
-    "stable_executable": "",
     "alpha_executable": ""
   },
   "release_apis": {

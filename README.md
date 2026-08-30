@@ -1,6 +1,6 @@
 # MXH VPS Deploy
 
-面向个人 Debian/Ubuntu VPS 的中文交互式部署与维护工具。Windows 端负责向导、私有归档和客户端配置，远端操作拆成可验证、可恢复的 Bash 模块。
+面向个人 Debian VPS 的中文交互式部署与维护工具。Windows 控制端负责向导、私有归档和客户端配置，远端操作拆成可验证、可恢复的 Bash 模块。
 
 它解决的不是“运行一条安装命令”，而是 VPS 的完整生命周期：新机部署、既有实例纳管、协议共存与切换、网络调优、日常维护、客户端配置生成以及最终退役。
 
@@ -8,10 +8,10 @@
 
 环境要求：
 
-- Windows 10/11；
-- PowerShell 7（`pwsh.exe`）；
+- Windows 10/11 amd64 控制端；
+- PowerShell 7.4 或更高版本（`pwsh.exe`）；
 - Windows OpenSSH Client（`ssh.exe`、`scp.exe`、`ssh-keygen.exe`）；
-- 目标机使用 systemd/apt，推荐 Debian 12/13 或 Ubuntu 22.04/24.04；
+- 目标 VPS 为 Debian 12/13 amd64，并使用 systemd/apt；
 - 目标机有可用的 root SSH 登录方式，可以是密码，也可以是服务商现有私钥。
 
 首次使用先运行离线自检：
@@ -106,7 +106,11 @@ pwsh -File .\Start-VPSDeploy.ps1
 - 网络调优需要服务商标称带宽，代表性 RTT 可留空；
 - 脚本结合远端实测内存和用户提供的套餐数据选择保守参数，不运行公网测速，也不把虚拟网卡速率当作套餐带宽；
 - 每次受管变更先建立本地/远端快照并启用 VPS 端自动回滚计时器；
-- Reality/AnyTLS 要做真实客户端握手、HTTPS 出口与 UDP 测试；Shadowsocks 还支持从另一台可信入口执行链式探测。
+- Reality 在 IPv4 与 IPv6 上建立独立监听；Reality/AnyTLS 按地址族分别使用稳定版 Mihomo 和 sing-box 做真实客户端握手、HTTPS 出口、出口 IP 与 UDP 测试；
+- 两个测试核心是强制前置条件。项目直接携带官方 Windows amd64 压缩包，运行时校验 SHA-256 后解压到被 Git 忽略的 `.cache/client-cores/`，不读取 Clash Verge、PATH 或注册表；
+- 核心缺失或损坏时，交互模式可重试、手动选择，或输入确认短语明确跳过；跳过记录为 `SkippedByUser`，不算通过，非交互模式不能自动跳过；
+- Shadowsocks 复用完整 HTTPS/出口 IP/UDP 自测，还支持从另一台可信入口执行链式探测；受控协议升级会重新执行同一套真实协议验收；
+- 远端 apt 操作会在 apt/dpkg 锁被占用时进行有界等待和重试。
 
 ### 运维与客户端配置
 
@@ -155,7 +159,7 @@ pwsh -File .\Start-VPSDeploy.ps1
 
 ## 客户端设计器依赖
 
-只有使用客户端权威配置设计器时需要 Python 3 和固定的 round-trip YAML 依赖：
+只有使用客户端权威配置设计器时需要 Python 3.9 或更高版本和固定的 round-trip YAML 依赖：
 
 ```powershell
 python -m pip install -r .\requirements-client-merge.txt
@@ -163,7 +167,9 @@ python -m pip install -r .\requirements-client-merge.txt
 
 设计器默认从 `templates/client/` 的通用骨架生成，不依赖任何个人路径。通用布局在 `config/client-layout.default.json`；本机偏好写入被 Git 忽略的 `config/client-layout.local.json`，可在设计器子菜单中查看、修改或恢复。
 
-工具拒绝写入 Clash Verge AppData。覆盖模式只接受用户明确指定的一对独立权威文件，并在 Mihomo/JSON/引用/体积检查通过后建立时间戳备份和原子替换。
+工具拒绝写入 Clash Verge AppData。覆盖模式只接受用户明确指定的一对独立权威文件，并在稳定版 Mihomo、稳定版 sing-box、引用和体积检查通过后建立时间戳备份和原子替换；用户明确跳过某个核心时会单独记录，不能显示为通过。
+
+项目的 CI 以 Windows PowerShell 为控制端主流程；Debian 12/13 容器仅校验会发送到 VPS 的 Bash、包名与 OpenSSH 契约，不代表支持在 Debian 上运行控制端。
 
 ## 命令行模式
 
@@ -214,7 +220,7 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode New -DryRun
 - 新部署的最小 nftables 只适用于审计确认的干净 VPS；
 - 导入实例默认使用 `PreserveExisting`，不会静默覆盖 Docker、面板或第三方规则；
 - Cloudflare 和 Komari Token 通过隐藏输入或私有文件取得，不写入普通日志或 Git；
-- Windows 私有文件 ACL 默认尽力收紧；设置 `MXH_VPS_STRICT_LOCAL_ACL=1` 可把 ACL 失败改为硬错误；
+- VPS 私有归档及相关本地文件沿用用户所选目录的现有权限，工具不做额外 ACL 加固或权限检查；
 - 远端修改在提交前均保留恢复路径，高风险清理/退役要求额外确认；
 - “服务监听”“语法通过”不能替代真实客户端握手、出口 IP、HTTPS 与 UDP 验收。
 

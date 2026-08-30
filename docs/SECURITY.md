@@ -14,7 +14,7 @@
 
 归档根目录来自命令行、本机环境变量或被 Git 忽略的本机默认文件，不在通用源码中硬编码盘符、用户名或个人路径。
 
-私有文件会尝试关闭继承 ACL，只授予当前 Windows 用户和 SYSTEM。个人电脑默认采用“尽力收紧”：ACL 操作失败会明确警告，但不会让部署流程失去可用性；设置环境变量 `MXH_VPS_STRICT_LOCAL_ACL=1` 后才把 ACL 失败视为硬错误。无论何种模式，秘密扫描、Git 忽略和禁止控制台输出秘密仍是强制边界。
+VPS 私有归档及相关本地文件沿用用户所选目录的权限。工具不修改、不收紧也不额外检查 Windows ACL 或本地文件模式；秘密扫描、Git 忽略和禁止控制台输出秘密仍是强制边界。
 
 ## 2. SSH 切换规则
 
@@ -42,7 +42,7 @@
 
 秘密不会作为 SSH 命令行参数。核心将参数编码后写入远端 `bash -s` 的标准输入；模块禁止 `set -x`，参数随隔离的子 shell 退出而销毁。Komari Token 不保存到部署计划，恢复运行时需要重新输入。Cloudflare Token 的本地文件路径可以写入计划，但 Token 值本身不会写入计划或普通日志。
 
-Xray 生成的秘密通过捕获的机器可读标记返回核心；普通控制台和普通日志不打印敏感 stdout。保存本地私有文件后立即应用 ACL。
+Xray 生成的秘密通过捕获的机器可读标记返回核心；普通控制台和普通日志不打印敏感 stdout。保存本地私有文件后不额外改变所在目录的权限模型。
 
 ## 4. 防火墙边界
 
@@ -54,7 +54,9 @@ Xray 生成的秘密通过捕获的机器可读标记返回核心；普通控制
 
 候选必须从目标 VPS 实测，至少满足：TCP/443、证书有效、TLS 1.3、ALPN h2、普通 HTTPS 行为、同地区或邻近、20 次握手中位通常不超过 15 ms、没有明显大型多租户共享 CDN 特征。大学、教育/科研机构、成熟企业或专业机构优先，不选个人站点和教程中被反复复制的热门 target。
 
-自动审计只能筛除明显不合格项，不能证明长期安全。正式使用仍以客户端 Reality Authentication、HTTP 204、真实出口 IP 和 UDP DNS 往返为最终标准；本机验收使用隔离 Mihomo 进程，不接管桌面客户端、TUN 或系统代理。
+自动审计只能筛除明显不合格项，不能证明长期安全。正式使用仍以客户端 Reality Authentication、HTTPS 出口、真实出口 IP 和 UDP DNS 往返为最终标准；本机验收使用项目内置且经 SHA-256 校验的稳定版 Mihomo 与 sing-box 隔离进程，逐入口、逐地址族执行，不接管桌面客户端、TUN 或系统代理。
+
+两个稳定核心默认都是强制前置条件。项目只从 `vendor/test-cores/windows-amd64` 解压到被 Git 忽略的 `.cache/client-cores`，不读取 Clash Verge AppData、注册表或 PATH。核心缺失/损坏时，交互模式允许手动选择或输入确认短语跳过；状态必须是 `SkippedByUser` 而不是 `Passed`，非交互模式禁止自动跳过。
 
 自动审计失败时允许交互式人工覆写，但必须展示完整非敏感结果、输入 `ACCEPT-TARGET-RISK` 并记录至少五个字符的原因；非交互模式禁止。覆写只改变自动门槛结论，不改变后续真实握手/出口验收，也不能把失败候选标记成自动通过。
 
@@ -82,13 +84,13 @@ Padding scheme 不是认证秘密。新计划为每台实例生成一组稳定�
 
 本地覆盖计划前先在实例目录 `migration-backups` 保存原计划、状态、私有凭据文件、服务端快照和客户端片段，并校验计划 SHA-256 在向导确认后没有变化。远端变更前打包三个协议的受管文件，记录各服务 enabled/active 状态，保存 nftables 和脚本管理的 sysctl，随后启用 20 分钟 systemd 回滚 timer。回滚服务不依赖 Windows 端进程；它会恢复变更前文件、服务状态、防火墙和网络调优。
 
-新安装或启用 Reality/AnyTLS 必须完成本机 Mihomo 的真实协议、证书/ECH、HTTP 204 和出口测试。新安装 Shadowsocks 除服务器回环自测外，必须从另一台白名单入口执行 TCP、UDP 和出口探测。安装为备用也必须先临时启用并完成同等真实测试，然后才恢复原状态。只有验收通过后，`migration-commit` 才应用最终服务组合并取消 timer。
+新安装或启用 Reality/AnyTLS 必须完成本机稳定版 Mihomo 与 sing-box 的真实协议、证书/ECH、HTTPS、出口 IP 和 UDP 测试。新安装 Shadowsocks 除服务器回环自测外，必须从另一台白名单入口执行 TCP、UDP 和出口探测。安装为备用也必须先临时启用并完成同等真实测试，然后才恢复原状态。受控协议升级重新执行同一套验收；只有通过或由用户明确记录核心跳过后，事务才进入提交判断。
 
 卸载只接受 disabled/inactive 协议；当前凭据和客户端片段会从活动归档移除，但变更前副本保留在受保护备份中。Certbot/ACME 与证书可能被多个协议共享，不随单协议卸载。备份清理严格限定在本地 `migration-backups` 和远端协议生命周期备份；活动回滚 timer 或未完成变更存在时拒绝删除，并要求显式确认及保留数量。
 
 ## 8. Cloudflare DNS-01 与 Certbot
 
-Token 仅授予目标 Zone 的 `DNS:Edit` 和 `Zone:Read`，不得使用全局 API Key。服务器凭据文件 `/etc/letsencrypt/cloudflare.ini` 为 root:root 0600，本地 Token 文件也必须收紧 ACL。若启用 Token 客户端 IP 白名单，所有续期 VPS 的稳定公网出口都必须在列表中。
+Token 仅授予目标 Zone 的 `DNS:Edit` 和 `Zone:Read`，不得使用全局 API Key。服务器凭据文件 `/etc/letsencrypt/cloudflare.ini` 为 root:root 0600；本地 Token 文件沿用用户所选目录权限，工具不做额外 ACL 检查。若启用 Token 客户端 IP 白名单，所有续期 VPS 的稳定公网出口都必须在列表中。
 
 AnyTLS SNI、ECH public name 与 Reality 本机 target 的 Cloudflare 记录、长期 Token、迁移和退役操作见 [Cloudflare、Certbot、AnyTLS 与 Reality 本机 target 配置手册](CLOUDFLARE-CERTBOT.zh-CN.md)。这些记录必须保持 DNS-only；Cloudflare 的 HTTP 代理、Origin CA 和 Cloudflare ECH 开关不参与本项目的协议路径。
 

@@ -40,6 +40,14 @@ Assert-True ([string]$manifest.komari_controller.assets.arm64.sha256 -match '^[0
 Assert-True ([string]$manifest.sing_box.version -match '^\d+\.\d+\.\d+$') 'sing-box pinned version'
 Assert-True ([string]$manifest.sing_box.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box amd64 SHA-256'
 Assert-True ([string]$manifest.sing_box.assets.windows_amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box Windows SHA-256'
+Assert-True ([string]$manifest.mihomo.version -eq '1.19.30') 'Mihomo stable test core version is pinned'
+$vendorManifest = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'vendor\test-cores\windows-amd64\checksums.json') | ConvertFrom-Json
+Assert-True (@($vendorManifest.artifacts).Count -eq 2) 'vendor manifest contains both required Windows test cores'
+foreach ($artifact in @($vendorManifest.artifacts)) {
+    $archive = Join-Path $ProjectRoot ('vendor\test-cores\windows-amd64\' + [string]$artifact.file)
+    Assert-True (Test-Path -LiteralPath $archive -PathType Leaf) "vendored archive exists: $($artifact.core)"
+    Assert-True ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -eq [string]$artifact.sha256) "vendored archive checksum matches: $($artifact.core)"
+}
 $appDefaults=Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'config\app-defaults.json')|ConvertFrom-Json -AsHashtable
 $clientDefaults=Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'config\client-layout.default.json')|ConvertFrom-Json -AsHashtable
 Assert-True ([int]$clientDefaults.schema_version -eq 2) 'portable client layout schema'
@@ -89,12 +97,13 @@ $legacyCompatibility=&$coreModule{param($plan)$copy=Copy-MxhHashtable $plan;$cop
 Assert-True ($legacyCompatibility.Contains('NetworkTuning') -and [string]$legacyCompatibility.NetworkTuning.Mode -eq 'LegacyBaseline') 'legacy managed plans gain a non-invasive network tuning compatibility section'
 Assert-True ($null -eq $legacyCompatibility.NetworkTuning.BandwidthMbps) 'legacy plan compatibility never invents nominal bandwidth'
 $shadowsocksSelfTest = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\shadowsocks-self-test.sh')
+$coreSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Core.psm1')
 Assert-True ($shadowsocksSelfTest -match 'VPSDEPLOY_UDP_B64') 'Shadowsocks self-test reports functional UDP result'
 Assert-True ($shadowsocksSelfTest -match '"type": "direct"') 'Shadowsocks self-test creates a UDP tunnel inbound'
 Assert-True ($shadowsocksSelfTest -match 'override_address') 'Shadowsocks UDP self-test uses an explicit DNS destination'
 Assert-True ($shadowsocksSelfTest -match 'VPSDEPLOY_SELFTEST_FAILURE_PHASE' -and $shadowsocksSelfTest -match 'report_failure "\$\?"' -and $shadowsocksSelfTest -match "phase='https'" -and $shadowsocksSelfTest -match "phase='udp'") 'Shadowsocks self-test reports only a sanitized failing phase through an explicit ERR handler'
 $shadowsocksModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\55-SingBoxShadowsocks.ps1')
-Assert-True ($shadowsocksModule -match 'SensitiveOutput -AllowFailure' -and $shadowsocksModule -match '未分类远端错误（敏感详情已隐藏') 'Shadowsocks self-test reports a sanitized failure phase without exposing credentials'
+Assert-True ($shadowsocksModule -match 'Invoke-MxhShadowsocksRealValidation' -and $coreSource -match 'SensitiveOutput -AllowFailure') 'Shadowsocks install and upgrade reuse the sanitized full protocol validation helper'
 $migrationCommitModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\115-ProtocolMigrationCommit.ps1')
 Assert-True ($migrationCommitModule -match "targetRole -eq 'ShadowsocksLanding'" -and $migrationCommitModule -match '现有 Reality/AnyTLS 入口保持原状态') 'Shadowsocks lifecycle commit message preserves concurrent entry protocol state'
 $externalProbe = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\shadowsocks-external-probe.sh')
@@ -130,10 +139,18 @@ $localHttpsSetup = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets
 Assert-True ($localHttpsSetup -match 'mask nginx\.service') 'nginx is masked while the package default site could start'
 Assert-True ($localHttpsSetup -match 'unmask nginx\.service') 'nginx is unmasked only after package installation checks'
 Assert-True ($localHttpsSetup -match 'listen 127\.0\.0\.1:\$\{VPS_PARAM_PORT\} ssl http2;' -and $localHttpsSetup -notmatch '(?m)^\s*http2 on;') 'local HTTPS target uses the nginx 1.22-compatible HTTP/2 syntax required by Debian 12'
-$coreSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Core.psm1')
+$baseSystem = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\base-system.sh')
+Assert-True ($baseSystem -match 'DPkg::Lock::Timeout=60' -and $baseSystem -match 'Waiting for apt/dpkg lock') 'remote apt operations wait and retry when apt/dpkg is locked'
 $finalValidationSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\100-FinalValidation.ps1')
 Assert-True ($coreSource -match 'Invoke-MxhSocks5UdpDnsTest' -and $coreSource -match '\[byte\[\]\]\(5, 3, 0, 1' -and $coreSource -match 'UDP DNS 事务校验失败') 'isolated Mihomo validation performs a real SOCKS5 UDP ASSOCIATE DNS round trip'
-Assert-True ($finalValidationSource -match "UdpDns = 'Passed'" -and $finalValidationSource -match 'UDP DNS 往返测试') 'Reality and AnyTLS final state records successful UDP validation'
+Assert-True ($finalValidationSource -match 'Invoke-MxhRealClientValidation' -and $coreSource -match "UdpDnsEndpoint =") 'Reality and AnyTLS final state records per-core HTTPS and UDP validation'
+Assert-True ($coreSource -match 'vendor\\test-cores\\windows-amd64' -and $coreSource -match "Status = 'SkippedByUser'" -and $coreSource -match '非交互模式不能跳过') 'bundled cores are mandatory unless an interactive user explicitly records a skip'
+Assert-True ($coreSource -notmatch 'Clash Verge\\verge-mihomo' -and $coreSource -notmatch 'CurrentVersion\\Uninstall') 'core resolution does not inspect Clash Verge files or uninstall registry entries'
+Assert-True ($coreSource -notmatch 'icacls\.exe' -and $coreSource -notmatch 'MXH_VPS_STRICT_LOCAL_ACL') 'local VPS archives receive no additional ACL hardening or permission checks'
+$operationsSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Operations.ps1')
+Assert-True ($operationsSource -match 'Invoke-MxhRealClientValidation.+Reality' -and $operationsSource -match 'Invoke-MxhShadowsocksRealValidation') 'controlled upgrades reuse full real-protocol validation'
+Assert-True (([regex]::Matches($operationsSource, 'Invoke-MxhRealClientValidation -Context \$(?:candidate|Context) -Protocol (?:Reality|AnyTLS)')).Count -ge 4 -and ([regex]::Matches($operationsSource, 'Invoke-MxhShadowsocksRealValidation -Context \$(?:candidate|Context)')).Count -ge 2) 'credential rotation and controlled upgrades share the complete Reality, AnyTLS, and Shadowsocks validation helpers'
+Assert-True ($coreSource -match '直接回车使用默认值') 'text prompts explicitly explain how to accept a default value'
 $targetAuditModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\40-TargetAudit.ps1')
 Assert-True ($targetAuditModule -match 'ACCEPT-TARGET-RISK' -and $targetAuditModule -match 'manual_override') 'failed target audits support an explicit recorded manual override'
 Assert-True ($targetAuditModule -match 'NonInteractive.*禁止人工覆写') 'noninteractive target audit cannot silently bypass automatic requirements'
@@ -159,10 +176,13 @@ Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDepl
 Write-Host '== Supported operating systems and SSH port strategy ==' -ForegroundColor Cyan
 Assert-True (Test-VpsSupportedOsRelease -Id debian -VersionId 12) 'Debian 12 is an explicitly supported release'
 Assert-True (Test-VpsSupportedOsRelease -Id Debian -VersionId '13.1') 'Debian 13 point releases remain supported'
-Assert-True (Test-VpsSupportedOsRelease -Id ubuntu -VersionId 22.04) 'Ubuntu 22.04 is supported'
-Assert-True (Test-VpsSupportedOsRelease -Id ubuntu -VersionId 24.04) 'Ubuntu 24.04 is supported'
+Assert-True (-not (Test-VpsSupportedOsRelease -Id ubuntu -VersionId 22.04)) 'Ubuntu is outside the formal VPS support contract'
 Assert-True (-not (Test-VpsSupportedOsRelease -Id debian -VersionId 11)) 'Debian 11 is outside the verified contract'
 Assert-True (-not (Test-VpsSupportedOsRelease -Id ubuntu -VersionId 20.04)) 'Ubuntu 20.04 is outside the verified contract'
+Assert-True ((Get-VpsSupportedAssetArchitecture -Architecture x86_64) -eq 'amd64') 'x86_64 maps to the only supported VPS asset architecture'
+$armRejected = $false
+try { Get-VpsSupportedAssetArchitecture -Architecture arm64 | Out-Null } catch { $armRejected = $true }
+Assert-True $armRejected 'arm64 is rejected by the formal VPS architecture gate'
 
 $port22Selection = New-VpsSshPortSelection -BootstrapPort 22
 Assert-True (-not [bool]$port22Selection.ReuseBootstrap) 'port 22 follows the replacement path'
@@ -186,7 +206,7 @@ Assert-True ($sshTransition -match 'Primary and rescue SSH ports must be differe
 $sshCutoverModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\110-SshCutover.ps1')
 Assert-True ($sshCutoverModule -match 'BootstrapSshReused' -and $sshCutoverModule -match '未创建第三个 SSH 端口') 'final SSH module preserves a reused provider port without creating a third entry'
 $ciText = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot '.github\workflows\ci.yml')
-Assert-True ($ciText -match 'debian:12-slim') 'CI includes a Debian 12 package and OpenSSH contract job'
+Assert-True ($ciText -match "debian: \['12', '13'\]" -and $ciText -match 'VPS remote contract') 'CI checks Debian 12 and 13 remote-script contracts while Windows remains the control-plane job'
 
 Write-Host '== Bootstrap authentication arguments ==' -ForegroundColor Cyan
 $sshArgumentContext = [pscustomobject]@{
@@ -292,8 +312,12 @@ $clientModule = $modules | Where-Object Id -eq 'client-export'
 $singBoxFixture = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'client-exports\sing-box-outbounds.private.json') | ConvertFrom-Json
 Assert-True (@($singBoxFixture.outbounds).Count -eq 2) 'sing-box IPv4 and IPv6 outbounds generated'
 Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'client-exports\mihomo-test-primary.yaml')) -match 'xtls-rprx-vision') 'Mihomo Vision profile generated'
+Assert-True (@($fixtureContext.State.ClientExports.ValidationTargets).Count -eq 4) 'Reality exports cover primary/backup and IPv4/IPv6 independently'
+Assert-True ($fixtureContext.State.ClientExports.CoreValidation.mihomo.Status -eq 'Ready' -and $fixtureContext.State.ClientExports.CoreValidation['sing-box'].Status -eq 'Ready') 'Reality export requires both bundled stable cores'
 $serverConfig = New-MxhXrayServerConfig -Context $fixtureContext
 $serverConfigRoundTrip = $serverConfig | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+Assert-True (@($serverConfigRoundTrip.inbounds).Count -eq 4) 'Reality server creates independent IPv4 and IPv6 listeners for both ports'
+Assert-True ('0.0.0.0' -in @($serverConfigRoundTrip.inbounds.listen) -and '2001:db8::10' -in @($serverConfigRoundTrip.inbounds.listen)) 'Reality listener addresses include explicit IPv4 wildcard and configured IPv6 address'
 Assert-True (@($serverConfigRoundTrip.routing.rules).Count -eq 1) 'Xray routing rules remain a JSON array with one rule'
 Assert-True ($serverConfigRoundTrip.routing.rules[0].outboundTag -eq 'block') 'Xray IPv6 egress block rule preserved'
 $localRealityPlan = [ordered]@{
@@ -940,6 +964,7 @@ function New-TestMigrationSourceFixture {
     $state = [ordered]@{
         SchemaVersion = 1
         CurrentManagementPort = [int]$plan.Ports.SshPrimary
+        Audit = [ordered]@{ OsId = 'debian'; OsVersion = '12'; Architecture = 'x86_64' }
         Modules = [ordered]@{
             'ssh-transition' = & $successState
             $ProtocolModule = & $successState

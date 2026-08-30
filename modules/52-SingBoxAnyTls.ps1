@@ -9,7 +9,7 @@
         param($Context)
 
         $arch = [string]$Context.State.Audit.Architecture
-        $archKey = if ($arch -in @('x86_64', 'amd64')) { 'amd64' } else { 'arm64' }
+        $archKey = Get-VpsSupportedAssetArchitecture -Architecture $arch
         $asset = $Context.Versions.sing_box.assets.$archKey
         $version = [string]$Context.Plan.AnyTls.SingBoxVersion
         $install = Invoke-VpsRemoteScript -Context $Context -Asset 'sing-box-anytls-install.sh' -Parameters @{

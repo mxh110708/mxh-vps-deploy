@@ -4,6 +4,8 @@ function Get-MxhMaintenanceContext {
     $context = New-MxhReadonlyContextFromPlan -ProjectRoot $ProjectRoot -PlanPath $Source.PlanPath
     $context.DryRun = [bool]$DryRun
     $context.NonInteractive = $false
+    Assert-VpsSupportedTarget -OsId ([string]$context.State.Audit.OsId) -OsVersion ([string]$context.State.Audit.OsVersion) `
+        -Architecture ([string]$context.State.Audit.Architecture) | Out-Null
     return $context
 }
 
@@ -213,15 +215,11 @@ function Invoke-MxhCredentialRotation {
         $modulePath=if($role -eq 'RealityEntry'){'modules\90-ClientExport.ps1'}elseif($role -eq 'AnyTlsEntry'){'modules\91-AnyTlsClientExport.ps1'}else{'modules\92-LandingClientExport.ps1'}
         $module=&(Join-Path $Context.ProjectRoot $modulePath); & $module.Invoke $candidate
         if($role -eq 'RealityEntry'){
-            $core=@(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot|Where-Object{(Split-Path -Leaf $_)-eq'verge-mihomo.exe'}|Select-Object -First 1);if(-not$core.Count){throw '找不到 Mihomo 稳定核心，不能完成 Reality 真实握手。'};$core=$core[0]
-            Invoke-MxhMihomoEgressTest $candidate $core $candidate.State.ClientExports.PrimaryProfile ([int]$candidate.State.ClientExports.PrimaryMixedPort) 'credential-candidate'|Out-Null
+            Invoke-MxhRealClientValidation -Context $candidate -Protocol Reality|Out-Null
         } elseif($role -eq 'AnyTlsEntry'){
-            $r=Invoke-VpsRemoteScript $Context 'anytls-self-test.sh' @{PASSWORD=$candidateSecrets.AnyTls.Password;PORT=[string]$Context.Plan.Ports.AnyTlsPrimary;SERVER=[string]$Context.Plan.Server.IPv4;SERVER_NAME=[string]$Context.Plan.AnyTls.ServerName;ECH_CONFIG_PEM=[string]$candidateSecrets.AnyTls.EchClientConfigPem} -TimeoutSeconds 300 -SensitiveOutput
-            if($r.StdOut -notmatch 'VPSDEPLOY_ANYTLS_SELF_TEST_OK'){throw 'AnyTLS 候选密码功能测试失败。'}
+            Invoke-MxhRealClientValidation -Context $candidate -Protocol AnyTLS|Out-Null
         } else {
-            $password=[string]$candidateSecrets.Shadowsocks.ServerKey+':'+[string]$candidateSecrets.Shadowsocks.PrimaryUserKey
-            $r=Invoke-VpsRemoteScript $Context 'shadowsocks-self-test.sh' @{METHOD=[string]$Context.Plan.Shadowsocks.Method;PASSWORD=$password;LANDING_PORT=[string]$Context.Plan.Ports.LandingShadowsocks;IP_VERSION='4';TEST_SERVER='127.0.0.1'} -TimeoutSeconds 300 -SensitiveOutput
-            if($r.StdOut -notmatch 'VPSDEPLOY_SHADOWSOCKS_SELF_TEST_OK'){throw 'Shadowsocks 候选用户密钥功能测试失败。'}
+            Invoke-MxhShadowsocksRealValidation -Context $candidate|Out-Null
         }
         Complete-MxhMaintenanceTransaction $Context
         $Context.Secrets=$candidateSecrets; $Context.State=$candidate.State
@@ -251,7 +249,7 @@ function Invoke-MxhSshMaintenance {
     $primary=if($changePorts){Get-VpsRandomPort}else{[int]$Context.Plan.Ports.SshPrimary}
     $rescue=if($changePorts){Get-VpsRandomPort -Exclude @($primary)}else{[int]$Context.Plan.Ports.SshRescue}
     if($Context.DryRun){Write-VpsUi 'DryRun：将并行保留旧/新入口，验证新密钥后再移除旧入口和旧公钥。' Success;return}
-    $key=Get-VpsSshKeyPath $Context; $oldPublic=(Get-Content -Raw ($key+'.pub')).Trim()
+    $key=Get-VpsSshKeyPath $Context; $oldPublic=(Get-Content -Raw (Get-VpsSshPublicKeyPath $Context)).Trim()
     $temp=$key+'.rotation-'+(Get-Date -Format yyyyMMddHHmmss); $keygen=Get-VpsCommandPath 'ssh-keygen.exe'
     $r=Invoke-VpsProcess $keygen @('-t','ed25519','-a','64','-N','','-C',$Context.Plan.NodeName,'-f',$temp) -TimeoutSeconds 60
     if($r.ExitCode -ne 0){throw '生成候选 SSH 密钥失败。'}; Protect-VpsPrivateFile $temp
@@ -330,14 +328,21 @@ function Invoke-MxhControlledUpgrade {
         ) 1 -AllowBack
         $targetVersion=if($channelChoice -eq 1){[string]$Context.Plan.Reality.XrayVersion}elseif($channelChoice -eq 2){[string]$Context.Versions.xray.version}else{Resolve-VpsXrayVersion -ProjectRoot $Context.ProjectRoot -Channel LatestStable}
         $targetChannel=if($channelChoice -eq 3){'LatestStable'}elseif($channelChoice -eq 2){'FixedVerified'}elseif($Context.Plan.Reality.Contains('XrayVersionChannel')){[string]$Context.Plan.Reality.XrayVersionChannel}else{'ImportedOrLegacy'}
+        $sameVersion=if($targetChannel -eq 'LatestStable' -and $targetVersion -eq [string]$Context.Versions.xray.version){'；当前恰好与固定验证版同号'}else{''}
+        Write-VpsUi "升级目标通道：$targetChannel；解析版本：Xray $targetVersion$sameVersion。安装脚本固定校验不改变核心版本通道。" Info
     }
     if($Context.DryRun){Write-VpsUi "DryRun：将下载并校验固定资产、配置检查、同版本可重复安装、失败自动回滚：$role" Success;return}
     Start-MxhMaintenanceTransaction $Context 'ControlledUpgrade'|Out-Null
     try{
-        $arch=if([string]$Context.State.Audit.Architecture -in @('x86_64','amd64')){'amd64'}else{'arm64'}
+        $arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture)
         if($role -eq 'RealityEntry'){
             Invoke-VpsRemoteScript $Context 'xray-install.sh' @{VERSION=$targetVersion;INSTALLER_URL=[string]$Context.Versions.xray.installer_url;INSTALLER_SHA256=[string]$Context.Versions.xray.installer_sha256} -TimeoutSeconds 1200|Out-Null
             $Context.Plan.Reality.XrayVersion=$targetVersion;$Context.Plan.Reality.XrayVersionChannel=$targetChannel
+            $target=Get-MxhRealityTargetSettings -Plan $Context.Plan
+            $configJson=(New-MxhXrayServerConfig -Context $Context)|ConvertTo-Json -Depth 30
+            $apply=Invoke-VpsRemoteScript $Context 'xray-apply-config.sh' @{CONFIG_JSON=$configJson;PRIMARY_PORT=[string]$Context.Plan.Ports.XrayPrimary;BACKUP_PORT=[string]$Context.Plan.Ports.XrayBackup;TARGET=[string]$target.TargetAddress} -TimeoutSeconds 600 -SensitiveOutput
+            if(-not $Context.State.Contains('BackupDirectories')){$Context.State.BackupDirectories=@{}}
+            $Context.State.BackupDirectories.Xray=Get-VpsMarkerValue $apply.StdOut BACKUP_DIR -Required
         }elseif($role -in @('AnyTlsEntry','ShadowsocksLanding')){
             $asset=$Context.Versions.sing_box.assets.$arch; $script=if($role -eq 'AnyTlsEntry'){'sing-box-anytls-install.sh'}else{'sing-box-install.sh'}
             $params=@{VERSION=[string]$Context.Versions.sing_box.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256}
@@ -363,9 +368,20 @@ function Invoke-MxhControlledUpgrade {
             } -TimeoutSeconds 300
             if($stateResult.StdOut -notmatch 'VPSDEPLOY_PROTOCOL_STATE_APPLIED'){throw '升级后原服务启停状态恢复未确认。'}
         }
+        if($role -eq 'RealityEntry'){
+            $clientModule=& (Join-Path $Context.ProjectRoot 'modules\90-ClientExport.ps1')
+            & $clientModule.Invoke $Context
+            Invoke-MxhRealClientValidation -Context $Context -Protocol Reality|Out-Null
+        }elseif($role -eq 'AnyTlsEntry'){
+            $clientModule=& (Join-Path $Context.ProjectRoot 'modules\91-AnyTlsClientExport.ps1')
+            & $clientModule.Invoke $Context
+            Invoke-MxhRealClientValidation -Context $Context -Protocol AnyTLS|Out-Null
+        }elseif($role -eq 'ShadowsocksLanding'){
+            Invoke-MxhShadowsocksRealValidation -Context $Context|Out-Null
+        }
         $report=Get-MxhHealthAudit $Context;if($report.Status -eq 'Critical'){throw '升级后健康审计出现严重项。'}
         Complete-MxhMaintenanceTransaction $Context;$Context.State.LastControlledUpgrade=[ordered]@{Component=$role;At=(Get-Date).ToString('o');Catalog='versions.json'};Save-MxhMaintenanceContext $Context
-        Write-VpsUi '固定资产校验、安装、配置检查和服务复验均通过。' Success
+        Write-VpsUi '固定资产校验、安装、配置检查、服务复验和真实协议验收均已完成。' Success
     }catch{Undo-MxhMaintenanceTransaction $Context $_.Exception.Message;throw}
 }
 
@@ -396,11 +412,11 @@ Controller 升级会先下载一份完整本地备份，再进入事务；失败
     try{
         if($choice -eq 2){
             $secure=Read-Host 'Komari Agent Token（不显示）' -AsSecureString;$token=ConvertFrom-VpsSecureString $secure
-            try{$arch=if([string]$Context.State.Audit.Architecture -in @('x86_64','amd64')){'amd64'}else{'arm64'};$asset=$Context.Versions.komari_agent.assets.$arch
+            try{$arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture);$asset=$Context.Versions.komari_agent.assets.$arch
                 $r=Invoke-VpsRemoteScript $Context 'komari-agent.sh' @{ENDPOINT=$endpoint;TOKEN=$token;NODE_NAME=[string]$Context.Plan.NodeName;VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200 -SensitiveOutput
             }finally{$token=$null;$secure.Dispose()};$Context.Plan.Komari.Endpoint=$endpoint;$Context.Plan.Komari.Enabled=$true;$Context.State.KomariInstalled=$true
         }elseif($choice -eq 3){
-            $arch=if([string]$Context.State.Audit.Architecture -in @('x86_64','amd64')){'amd64'}else{'arm64'};$asset=$Context.Versions.komari_agent.assets.$arch
+            $arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture);$asset=$Context.Versions.komari_agent.assets.$arch
             Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='AgentUpgrade';VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200|Out-Null
         }elseif($choice -eq 4){Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='AgentUninstall'}|Out-Null;$Context.Plan.Komari.Enabled=$false;$Context.State.KomariInstalled=$false
         }elseif($choice -eq 5){
@@ -414,7 +430,7 @@ Controller 升级会先下载一份完整本地备份，再进入事务；失败
             $secure=Read-Host 'Cloudflare Tunnel Token（不显示）' -AsSecureString;$token=ConvertFrom-VpsSecureString $secure
             try{Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='TunnelRotate';TUNNEL_TOKEN=$token} -TimeoutSeconds 300 -SensitiveOutput|Out-Null}finally{$token=$null;$secure.Dispose()}
         }elseif($choice -eq 8){
-            $arch=if([string]$Context.State.Audit.Architecture -in @('x86_64','amd64')){'amd64'}else{'arm64'};$asset=$Context.Versions.komari_controller.assets.$arch
+            $arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture);$asset=$Context.Versions.komari_controller.assets.$arch
             $backupResult=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerBackup'} -TimeoutSeconds 600;$remoteBackup=Get-VpsMarkerValue $backupResult.StdOut KOMARI_BACKUP -Required
             $backupDirectory=Join-Path $Context.ArchivePath 'komari-backups';[IO.Directory]::CreateDirectory($backupDirectory)|Out-Null;$localBackup=Join-Path $backupDirectory (Split-Path -Leaf $remoteBackup);Invoke-VpsScpDownload $Context $remoteBackup $localBackup
             Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerUpgrade';VERSION=[string]$Context.Versions.komari_controller.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200|Out-Null

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- 正式拓扑收窄为 Windows PowerShell 7.4+ 控制端管理 Debian 12/13 amd64 VPS；新建、Import、维护统一使用同一 OS/架构门禁。CI 的 Debian 12/13 容器只验证远端 Bash、包名与 OpenSSH 契约。
+- 项目直接携带并校验稳定版 Mihomo 1.19.30 与 sing-box 1.13.19 Windows amd64 官方压缩包；运行时只解压到 `.cache/client-cores`，不扫描 Clash Verge AppData、注册表或 PATH。交互式显式跳过记为 `SkippedByUser`，非交互模式不能跳过。
+- Reality 服务端改为 IPv4/IPv6 独立入站；Reality/AnyTLS 按入口、地址族分别生成 Mihomo 与 sing-box 完整测试配置，执行 HTTPS、出口 IP 与 UDP DNS 验收，并在受控协议升级后复用同一流程。
+- apt 安装增加锁占用等待/重试，客户端设计器预检 Python 3.9+，PowerShell 控制端预检 7.4+；真实验收增加独立 HTTPS、出口 IP 和 UDP DNS 备用端点。
+- 有默认值的文本提示现在明确显示“直接回车使用默认值”；Xray LatestStable 提示同时展示通道、解析版本和“与固定验证版同号”的情况，不再把安装脚本固定误解为核心版本固定。
+- 按用户归档策略，VPS 私有归档及相关本地文件沿用所在目录权限，项目不再额外修改或检查 ACL/文件模式。
 - 所有交互式本地路径与对应命令行参数现在接受统一的 `/` 或统一的 `\` 写法，输入阶段拒绝同一路径混用两种分隔符，并在使用前规范化为本机格式。
 - Reality/AnyTLS 最终验收补充真实 SOCKS5 UDP DNS 往返，和客户端握手、HTTPS 204、出口 IP 一起成为必过项；测试使用隔离 Mihomo 进程，不修改桌面客户端代理状态。
 - 修复 Debian 12 Nginx 1.22 不支持独立 `http2 on;` 导致 Reality 本机 HTTPS target 部署失败；改用向前兼容的 `listen ... ssl http2`。
@@ -13,7 +19,7 @@
 - Shadowsocks 远端自测增加不含配置或凭据的阶段标记，可区分临时配置、客户端启动、HTTPS 出口和 UDP DNS，便于在继续模式下定位失败而不关闭敏感输出保护。
 - 修复低权限 Shadowsocks 服务启用 `auto_detect_interface` 后 UDP direct 出站尝试绑定临时端口时报 `operation not permitted`；默认改为系统路由，仅在明确填写接口绑定时授予并恢复 `CAP_NET_RAW`。
 - 新部署现在识别服务商提供的非特权高位初始 SSH：直接复用为最终主端口，只新增一个不同的随机/手动救援端口；SSH 过渡配置去重，最终模块复验后保留主端口，不再创建第三个入口或误提示删除。
-- 将支持系统收紧为明确验证的 Debian 12/13 与 Ubuntu 22.04/24.04，并新增 Debian 12 官方容器的包名、OpenSSH 配置和全部远端 Bash 语法 CI 契约。
+- 将目标 VPS 支持系统收紧为 Debian 12/13 amd64，并新增 Debian 12/13 官方容器的包名、OpenSSH 配置和全部远端 Bash 语法 CI 契约；控制端仍为 Windows。
 - 新增独立 Cloudflare/Certbot 中文操作手册：逐项说明 AnyTLS SNI、ECH public name、Reality 本机 target 的 DNS-only 记录、最小权限长期 Token、客户端 IP 白名单、Token 文件格式、续期验证、迁移和退役清理。
 - 客户端设计器改为默认使用项目内无个人数据的 Clash/sing-box 完整模板；现有权威配置降为可选只读来源，运行不再依赖个人盘符或固定文件名。
 - 新增客户端设计器子菜单和可持久编辑的本机布局默认值：地区/节点顺序、落地 transit、业务组、来源与输出路径均可修改或恢复通用默认。
@@ -31,7 +37,7 @@
 - 新增独立 `ClientConfig` 模式、可版本控制的基础布局和本机覆盖模板；支持多实例私有片段提取、未纳管节点隐藏输入、地区/落地/业务组排序与默认值、selector 引用/循环检查及 dialer-proxy/detour 同步。
 - 客户端合并器对 sing-box 运行配置使用紧凑 JSON，并在 4 MiB 前硬性停止；完整权威回放从约 4.94 MiB 降至约 2.44 MiB，避免桌面端 IPC 导入失败。
 - Xray 新部署、协议补充和受控升级同时支持 `FixedVerified` 与官方 `LatestStable` 通道；latest 会解析并固化具体非预发行版本。
-- Windows 本地 ACL 默认改为尽力收紧并明确警告；设置 `MXH_VPS_STRICT_LOCAL_ACL=1` 可恢复硬失败策略。远端秘密、回滚和 Git 防泄漏边界不放宽。
+- Windows 本地归档曾采用尽力收紧 ACL 的过渡策略；本次 Unreleased 后续变更已按用户要求取消额外 ACL 修改与检查。远端秘密、回滚和 Git 防泄漏边界不放宽。
 - 修复 GitHub Actions：Windows runner 先安装固定 YAML 依赖；Linux ShellCheck 修正 Komari trap 状态变量和恢复脚本递归删除保护。
 - 新增统一 `Maintain` 运维中心：手动恢复、健康/漂移审计、协议凭据轮换、SSH/防火墙独立维护、固定资产升级、客户端权威候选合并、Komari 生命周期和分级退役。
 - 健康报告只保存脱敏状态和配置 SHA-256；支持建立基线、发现计划外哈希变化，并只在纯哈希变化且人工确认时更新基线。

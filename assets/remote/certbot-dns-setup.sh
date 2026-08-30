@@ -33,8 +33,23 @@ for existing in \
 done
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq certbot python3-certbot-dns-cloudflare ca-certificates >/dev/null
+apt_get_retry() {
+  local attempt output status
+  for attempt in 1 2 3 4 5 6; do
+    set +e
+    output="$(apt-get -o DPkg::Lock::Timeout=60 "$@" 2>&1)"
+    status="$?"
+    set -e
+    if [[ "$status" -eq 0 ]]; then printf '%s\n' "$output"; return 0; fi
+    if ! grep -Eqi 'could not get lock|unable to acquire.*lock|is another process using it' <<<"$output"; then printf '%s\n' "$output" >&2; return "$status"; fi
+    printf 'Waiting for apt/dpkg lock (attempt %s/6).\n' "$attempt" >&2
+    sleep 5
+  done
+  printf '%s\n' "$output" >&2
+  return "$status"
+}
+apt_get_retry update -qq
+apt_get_retry install -y -qq certbot python3-certbot-dns-cloudflare ca-certificates >/dev/null
 certbot plugins 2>/dev/null | grep -Fq 'dns-cloudflare'
 # The distribution timer does not run our explicit deploy hook. Keep a single
 # renewal owner so a renewed certificate is always copied and the service is

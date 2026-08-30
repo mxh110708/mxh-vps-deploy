@@ -98,40 +98,121 @@ function Resolve-VpsPortablePath {
     return [IO.Path]::GetFullPath((Join-Path $ProjectRoot $expanded))
 }
 
+function Test-VpsClientCoreExecutable {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('mihomo', 'sing-box')][string]$Core,
+        [Parameter(Mandatory)][string]$Path
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "测试核心不存在：$Path" }
+    $arguments = if ($Core -eq 'mihomo') { @('-v') } else { @('version') }
+    $result = Invoke-VpsProcess -FilePath $Path -ArgumentList $arguments -TimeoutSeconds 30
+    if ($result.ExitCode -ne 0) { throw "$Core 测试核心无法执行或版本查询失败。" }
+    $versionText = (($result.StdOut + "`n" + $result.StdErr).Trim())
+    if ($versionText -notmatch [regex]::Escape($(if ($Core -eq 'mihomo') { 'Mihomo' } else { 'sing-box' }))) {
+        throw "$Core 测试核心返回了无法识别的版本信息。"
+    }
+    return $versionText
+}
+
+function Get-VpsBundledClientCore {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][ValidateSet('mihomo', 'sing-box')][string]$Core
+    )
+    if (-not $IsWindows -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) {
+        throw '项目内置测试核心仅支持 Windows amd64 控制端。'
+    }
+    $versions = Get-VpsVersions -ProjectRoot $ProjectRoot
+    $catalog = if ($Core -eq 'mihomo') { $versions.mihomo } else { $versions.sing_box }
+    $asset = $catalog.assets.windows_amd64
+    if (-not $asset -or -not $asset.name -or -not $asset.sha256) { throw "$Core 的 Windows amd64 资产目录不完整。" }
+    $manifestPath = Join-Path $ProjectRoot 'vendor\test-cores\windows-amd64\checksums.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw '内置测试核心 checksums.json 缺失。' }
+    $manifest = Read-VpsJsonHashtable -Path $manifestPath
+    $manifestEntry = @($manifest.artifacts | Where-Object { [string]$_.core -eq $Core } | Select-Object -First 1)
+    if (-not $manifestEntry.Count -or [string]$manifestEntry[0].file -ne [string]$asset.name -or
+        ([string]$manifestEntry[0].sha256).ToLowerInvariant() -ne ([string]$asset.sha256).ToLowerInvariant()) {
+        throw "$Core 的 versions.json 与 vendor checksums.json 不一致。"
+    }
+    $archive = Join-Path $ProjectRoot ("vendor\test-cores\windows-amd64\" + [string]$asset.name)
+    if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw "$Core 内置测试核心压缩包缺失。" }
+    $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $expected = ([string]$asset.sha256).ToLowerInvariant()
+    if ($actual -ne $expected) { throw "$Core 内置测试核心 SHA-256 不匹配。" }
+
+    $cacheRoot = Join-Path $ProjectRoot (".cache\client-cores\$Core-$([string]$catalog.version)-windows-amd64")
+    $hashMarker = Join-Path $cacheRoot '.archive-sha256'
+    $executableName = if ($Core -eq 'mihomo') { 'mihomo*.exe' } else { 'sing-box.exe' }
+    $cached = @(Get-ChildItem -LiteralPath $cacheRoot -Recurse -File -Filter $executableName -ErrorAction SilentlyContinue | Select-Object -First 1)
+    $markerValue = if (Test-Path -LiteralPath $hashMarker -PathType Leaf) { (Get-Content -Raw -LiteralPath $hashMarker).Trim() } else { '' }
+    if (-not $cached.Count -or $markerValue -ne $expected) {
+        if (Test-Path -LiteralPath $cacheRoot) { Remove-Item -LiteralPath $cacheRoot -Recurse -Force }
+        [IO.Directory]::CreateDirectory($cacheRoot) | Out-Null
+        Expand-Archive -LiteralPath $archive -DestinationPath $cacheRoot -Force
+        $cached = @(Get-ChildItem -LiteralPath $cacheRoot -Recurse -File -Filter $executableName | Select-Object -First 1)
+        if (-not $cached.Count) { throw "$Core 压缩包中没有预期的可执行文件。" }
+        [IO.File]::WriteAllText($hashMarker, $expected + "`n", [Text.UTF8Encoding]::new($false))
+    }
+    Test-VpsClientCoreExecutable -Core $Core -Path $cached[0].FullName | Out-Null
+    return $cached[0].FullName
+}
+
+function Resolve-VpsClientValidationCore {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][ValidateSet('mihomo', 'sing-box')][string]$Core
+    )
+    while ($true) {
+        try {
+            $path = Get-VpsBundledClientCore -ProjectRoot $Context.ProjectRoot -Core $Core
+            return [ordered]@{ Core = $Core; Status = 'Ready'; Path = $path; Source = 'BundledVerified'; ResolvedAt = (Get-Date).ToString('o') }
+        }
+        catch {
+            $failure = $_.Exception.Message
+            if ($Context.NonInteractive) { throw "$Core 是强制前置条件，非交互模式不能跳过：$failure" }
+            Write-VpsUi "$Core 内置测试核心不可用：$failure" Warning
+            $choice = Read-VpsMenu "$Core 测试核心处理" @(
+                '重新校验并解压项目内置核心',
+                '手动选择该核心的可执行文件',
+                '明确跳过该核心验收（记录为 SkippedByUser，不算通过）'
+            ) 1 -AllowBack
+            if ($choice -eq 1) { continue }
+            if ($choice -eq 2) {
+                $manual = Read-VpsText "$Core 可执行文件路径" -AllowBack -Validate {
+                    param($value) Test-VpsExistingInputPath -Value $value -PathType Leaf
+                } -ValidationMessage '找不到文件；路径可全用 / 或全用 \，但不能混用。'
+                $manual = (Resolve-Path -LiteralPath (ConvertTo-VpsInputPath -Value $manual)).Path
+                Test-VpsClientCoreExecutable -Core $Core -Path $manual | Out-Null
+                return [ordered]@{ Core = $Core; Status = 'Ready'; Path = $manual; Source = 'Manual'; ResolvedAt = (Get-Date).ToString('o') }
+            }
+            $confirmation = Read-VpsText "输入 SKIP-$($Core.ToUpperInvariant()) 确认跳过" -AllowBack
+            if ($confirmation -cne "SKIP-$($Core.ToUpperInvariant())") { Write-VpsUi '确认短语不匹配，未跳过。' Warning; continue }
+            $reason = Read-VpsText '记录跳过原因' -AllowBack -Validate { param($value) $value.Trim().Length -ge 3 } -ValidationMessage '原因至少输入 3 个字符。'
+            return [ordered]@{ Core = $Core; Status = 'SkippedByUser'; Path = ''; Source = 'ExplicitOverride'; Reason = $reason; ResolvedAt = (Get-Date).ToString('o') }
+        }
+    }
+}
+
 function Get-VpsMihomoCorePaths {
     param([Parameter(Mandatory)][string]$ProjectRoot)
-    $settings = Get-VpsAppDefaults -ProjectRoot $ProjectRoot
     $found = [Collections.Generic.List[string]]::new()
-    foreach ($value in @($env:MXH_VPS_MIHOMO_STABLE,$env:MXH_VPS_MIHOMO_ALPHA,[string]$settings.mihomo.stable_executable,[string]$settings.mihomo.alpha_executable)) {
+    try { $found.Add((Get-VpsBundledClientCore -ProjectRoot $ProjectRoot -Core mihomo)) }
+    catch { }
+    $settings = Get-VpsAppDefaults -ProjectRoot $ProjectRoot
+    foreach ($value in @($env:MXH_VPS_MIHOMO_ALPHA, [string]$settings.mihomo.alpha_executable)) {
         if ([string]::IsNullOrWhiteSpace($value)) { continue }
         $path = Resolve-VpsPortablePath -ProjectRoot $ProjectRoot -Path $value
         if ((Test-Path -LiteralPath $path -PathType Leaf) -and $path -notin $found) { $found.Add($path) }
     }
-    foreach ($name in @('verge-mihomo.exe','verge-mihomo-alpha.exe')) {
-        $command = Get-Command $name -ErrorAction SilentlyContinue
-        if ($command -and $command.Source -notin $found) { $found.Add($command.Source) }
-    }
-    $searchRoots=[Collections.Generic.List[string]]::new()
-    foreach($root in @($env:ProgramFiles,${env:ProgramFiles(x86)})){if(-not[string]::IsNullOrWhiteSpace($root)){$searchRoots.Add($root)}}
-    if(-not[string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)){$searchRoots.Add((Join-Path $env:LOCALAPPDATA 'Programs'))}
-    foreach ($root in $searchRoots) {
-        if ([string]::IsNullOrWhiteSpace($root)) { continue }
-        foreach ($relative in @('Clash Verge\verge-mihomo.exe','Clash Verge\verge-mihomo-alpha.exe','Clash Verge Rev\verge-mihomo.exe','Clash Verge Rev\verge-mihomo-alpha.exe')) {
-            $path = Join-Path $root $relative
-            if ((Test-Path -LiteralPath $path -PathType Leaf) -and $path -notin $found) { $found.Add($path) }
-        }
-    }
-    foreach ($registryRoot in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
-        foreach ($item in @(Get-ItemProperty $registryRoot -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties['DisplayName'] -and [string]$_.DisplayName -match 'Clash Verge' })) {
-            $location = ([string]$item.InstallLocation).Trim().Trim('"')
-            if ([string]::IsNullOrWhiteSpace($location)) { continue }
-            foreach ($name in @('verge-mihomo.exe','verge-mihomo-alpha.exe')) {
-                $path = Join-Path $location $name
-                if ((Test-Path -LiteralPath $path -PathType Leaf) -and $path -notin $found) { $found.Add($path) }
-            }
-        }
-    }
     return @($found)
+}
+
+function Get-VpsSingBoxCorePath {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+    return Get-VpsBundledClientCore -ProjectRoot $ProjectRoot -Core 'sing-box'
 }
 
 function Read-VpsText {
@@ -148,7 +229,7 @@ function Read-VpsText {
     )
 
     while ($true) {
-        $suffix = if ($Default) { " [$Default]" } else { '' }
+        $suffix = if ($Default) { " [$Default；直接回车使用默认值]" } else { '' }
         $backHint = if ($AllowBack) {
             if ($ZeroIsValue) { '（本字段的 0 是有效数值；返回请在上一层菜单操作）' }
             else { '（输入 0 返回上一级）' }
@@ -376,9 +457,29 @@ function Test-VpsSupportedOsRelease {
     $normalizedVersion = $VersionId.Trim().Trim('"')
     switch ($normalizedId) {
         'debian' { return $normalizedVersion -match '^(12|13)(?:\.|$)' }
-        'ubuntu' { return $normalizedVersion -match '^(22\.04|24\.04)(?:\.|$)' }
         default { return $false }
     }
+}
+
+function Get-VpsSupportedAssetArchitecture {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Architecture)
+    if ($Architecture.Trim().ToLowerInvariant() -in @('x86_64', 'amd64')) { return 'amd64' }
+    throw "当前正式支持的 VPS 架构仅为 amd64，检测到：$Architecture"
+}
+
+function Assert-VpsSupportedTarget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$OsId,
+        [Parameter(Mandatory)][string]$OsVersion,
+        [Parameter(Mandatory)][string]$Architecture
+    )
+    if (-not (Test-VpsSupportedOsRelease -Id $OsId -VersionId $OsVersion)) {
+        throw "当前正式支持的 VPS 系统仅为 Debian 12/13，检测到：$OsId $OsVersion"
+    }
+    [void](Get-VpsSupportedAssetArchitecture -Architecture $Architecture)
+    return $true
 }
 
 function Get-MxhAnyTlsOfficialPaddingScheme {
@@ -989,7 +1090,12 @@ function New-VpsInteractivePlan {
                 ) $default -AllowBack
                 $wizard.XrayVersionChannel = if ($choice -eq 2) { 'LatestStable' } else { 'FixedVerified' }
                 $wizard.XrayVersion = Resolve-VpsXrayVersion -ProjectRoot $ProjectRoot -Channel $wizard.XrayVersionChannel
-                Write-VpsUi "本次将使用 Xray $($wizard.XrayVersion)；安装脚本来源仍按 versions.json 固定并校验 SHA-256。" Info
+                if ($wizard.XrayVersionChannel -eq 'LatestStable') {
+                    $sameVersion = if ($wizard.XrayVersion -eq [string]$versions.xray.version) { '；当前恰好与固定验证版相同' } else { '' }
+                    Write-VpsUi "已选择官方最新稳定版通道；当前在线解析为 Xray $($wizard.XrayVersion)$sameVersion。部署计划仍记录 LatestStable。" Info
+                }
+                else { Write-VpsUi "已选择固定验证版通道：Xray $($wizard.XrayVersion)。" Info }
+                Write-VpsUi '这里固定并校验的是 Xray 安装脚本来源，不会把 LatestStable 通道改写成固定版本通道。' Muted
             }
         },
         [pscustomobject]@{
@@ -1415,33 +1521,9 @@ function New-VpsInteractivePlan {
 function Protect-VpsPrivateFile {
     [CmdletBinding()]
     param([Parameter(Mandatory)] [string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path)) { return }
-    $strict = [Environment]::GetEnvironmentVariable('MXH_VPS_STRICT_LOCAL_ACL') -eq '1'
-    if ($IsWindows) {
-        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-        $commands = @(
-            @($Path, '/inheritance:r'),
-            @($Path, '/grant:r', "${identity}:(F)", 'SYSTEM:(F)')
-        )
-        foreach ($arguments in $commands) {
-            $result = Invoke-VpsProcess -FilePath 'icacls.exe' -ArgumentList $arguments -TimeoutSeconds 30
-            if ($result.ExitCode -ne 0) {
-                $message = "无法收紧私有文件 ACL：$Path。文件仍已保存，请确认该目录只由当前 Windows 账户使用。"
-                if ($strict) { throw $message }
-                Write-VpsUi $message Warning
-                return
-            }
-        }
-    }
-    else {
-        & chmod 600 -- $Path
-        if ($LASTEXITCODE -ne 0) {
-            $message = "无法设置私有文件权限：$Path"
-            if ($strict) { throw $message }
-            Write-VpsUi $message Warning
-        }
-    }
+    # 用户明确要求 VPS 私有归档及相关本地文件沿用所在目录权限；
+    # 保留调用点以兼容旧模块，但不再修改或检查额外 ACL/文件模式。
+    return
 }
 
 function Save-VpsJson {
@@ -1695,7 +1777,7 @@ function Get-VpsCommandPath {
     return $command.Source
 }
 
-function Get-VpsSshKeyPath {
+function Get-VpsManagedSshKeyPath {
     param([Parameter(Mandatory)] $Context)
     $fileName = 'id_ed25519'
     if ($Context.Plan.Contains('SshKey') -and $Context.Plan.SshKey.Contains('ManagedFileName') -and
@@ -1703,6 +1785,21 @@ function Get-VpsSshKeyPath {
         $fileName = [string]$Context.Plan.SshKey.ManagedFileName
     }
     return Join-Path ([string]$Context.Plan.Paths.KeyDirectory) $fileName
+}
+
+function Get-VpsSshKeyPath {
+    param([Parameter(Mandatory)] $Context)
+    if ($Context.Plan.Contains('SshKey') -and [string]$Context.Plan.SshKey.Mode -eq 'ReuseExisting' -and
+        $Context.Plan.SshKey.Contains('SourcePrivateKeyPath') -and $Context.Plan.SshKey.SourcePrivateKeyPath) {
+        $source = [IO.Path]::GetFullPath([string]$Context.Plan.SshKey.SourcePrivateKeyPath)
+        if (Test-Path -LiteralPath $source -PathType Leaf) { return $source }
+    }
+    return Get-VpsManagedSshKeyPath -Context $Context
+}
+
+function Get-VpsSshPublicKeyPath {
+    param([Parameter(Mandatory)] $Context)
+    return (Get-VpsManagedSshKeyPath -Context $Context) + '.pub'
 }
 
 function Get-VpsSshArguments {
@@ -1765,12 +1862,13 @@ function Initialize-VpsSshKey {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Context)
 
-    $keyPath = Get-VpsSshKeyPath $Context
+    $keyPath = Get-VpsManagedSshKeyPath $Context
     $publicPath = $keyPath + '.pub'
     $sshKeygen = Get-VpsCommandPath 'ssh-keygen.exe'
     if ((Test-Path -LiteralPath $keyPath) -and (Test-Path -LiteralPath $publicPath)) {
         Protect-VpsPrivateFile -Path $keyPath
-        $derivedExisting = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $keyPath) -TimeoutSeconds 60
+        $activeKeyPath = Get-VpsSshKeyPath $Context
+        $derivedExisting = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $activeKeyPath) -TimeoutSeconds 60
         $derivedMatch = [regex]::Match($derivedExisting.StdOut.Trim(), '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+([A-Za-z0-9+/=]+)(?:\s+.*)?$')
         $storedMatch = [regex]::Match((Get-Content -Raw -LiteralPath $publicPath).Trim(), '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+([A-Za-z0-9+/=]+)(?:\s+.*)?$')
         if ($derivedExisting.ExitCode -ne 0 -or -not $derivedMatch.Success -or -not $storedMatch.Success -or
@@ -1794,16 +1892,13 @@ function Initialize-VpsSshKey {
         [IO.Directory]::CreateDirectory((Split-Path -Parent $keyPath)) | Out-Null
         $sourceResolved = (Resolve-Path -LiteralPath $source).Path
         $destinationFull = [IO.Path]::GetFullPath($keyPath)
-        if (-not $sourceResolved.Equals($destinationFull, [StringComparison]::OrdinalIgnoreCase)) {
-            Copy-Item -LiteralPath $sourceResolved -Destination $keyPath -Force
-        }
-        # OpenSSH refuses a copied private key before it is normalized to a
-        # current-user ACL, so protection must happen before ssh-keygen -y.
-        Protect-VpsPrivateFile -Path $keyPath
-        $derived = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $keyPath) -TimeoutSeconds 60
+        $derived = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $sourceResolved) -TimeoutSeconds 60
         $publicMatch = [regex]::Match($derived.StdOut.Trim(), '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+([A-Za-z0-9+/=]+)(?:\s+.*)?$')
         if ($derived.ExitCode -ne 0 -or -not $publicMatch.Success) {
             throw '现有私钥无法作为无交互 OpenSSH 管理密钥使用；请确认格式和口令状态，或选择生成新 Ed25519 密钥。'
+        }
+        if (-not $sourceResolved.Equals($destinationFull, [StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $sourceResolved -Destination $keyPath -Force
         }
         $publicMaterial = $publicMatch.Groups[1].Value + ' ' + $publicMatch.Groups[2].Value
         [IO.File]::WriteAllText($publicPath, ($publicMaterial + ' ' + [string]$Context.Plan.NodeName + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
@@ -1824,7 +1919,7 @@ function Initialize-VpsBootstrapAccess {
 
     Initialize-VpsSshKey -Context $Context
     $keyPath = Get-VpsSshKeyPath $Context
-    $publicKey = (Get-Content -Raw -LiteralPath ($keyPath + '.pub')).Trim()
+    $publicKey = (Get-Content -Raw -LiteralPath (Get-VpsSshPublicKeyPath $Context)).Trim()
     if (-not (Test-VpsSupportedSshPublicKey -PublicKey $publicKey)) { throw '生成的 SSH 公钥格式异常。' }
 
     $rootPort = [int]$Context.Plan.Server.BootstrapSshPort
@@ -2089,13 +2184,14 @@ function New-MxhXrayInbound {
     param(
         [Parameter(Mandatory)] [string]$Tag,
         [Parameter(Mandatory)] [int]$Port,
+        [Parameter(Mandatory)] [string]$Listen,
         [Parameter(Mandatory)] [Collections.IDictionary]$Secrets,
         [Parameter(Mandatory)] [string]$TargetAddress,
         [Parameter(Mandatory)] [string]$ServerName
     )
     return [ordered]@{
         tag = $Tag
-        listen = '0.0.0.0'
+        listen = $Listen
         port = $Port
         protocol = 'vless'
         settings = [ordered]@{
@@ -2127,10 +2223,20 @@ function New-MxhXrayServerConfig {
 
     $xraySecrets = $Context.Secrets.Xray
     $target = Get-MxhRealityTargetSettings -Plan $Context.Plan
-    $inbounds = @(
-        (New-MxhXrayInbound -Tag 'reality-primary' -Port ([int]$Context.Plan.Ports.XrayPrimary) -Secrets $xraySecrets -TargetAddress $target.TargetAddress -ServerName $target.ServerName),
-        (New-MxhXrayInbound -Tag 'reality-backup' -Port ([int]$Context.Plan.Ports.XrayBackup) -Secrets $xraySecrets -TargetAddress $target.TargetAddress -ServerName $target.ServerName)
-    )
+    $inbounds = [Collections.Generic.List[object]]::new()
+    foreach ($entry in @(
+            [ordered]@{ Name = 'primary'; Port = [int]$Context.Plan.Ports.XrayPrimary },
+            [ordered]@{ Name = 'backup'; Port = [int]$Context.Plan.Ports.XrayBackup }
+        )) {
+        if ($entry.Port -lt 1) { continue }
+        $inbounds.Add((New-MxhXrayInbound -Tag "reality-$($entry.Name)-ipv4" -Port $entry.Port -Listen '0.0.0.0' `
+                    -Secrets $xraySecrets -TargetAddress $target.TargetAddress -ServerName $target.ServerName))
+        if ($Context.Plan.Server.IPv6) {
+            $ipv6Listen = ([string]$Context.Plan.Server.IPv6).Split('/')[0].Trim('[', ']')
+            $inbounds.Add((New-MxhXrayInbound -Tag "reality-$($entry.Name)-ipv6" -Port $entry.Port -Listen $ipv6Listen `
+                        -Secrets $xraySecrets -TargetAddress $target.TargetAddress -ServerName $target.ServerName))
+        }
+    }
     $directSettings = if ($Context.Plan.Reality.ForceIpv4Egress) { [ordered]@{ domainStrategy = 'ForceIPv4' } } else { @{} }
     [object[]]$routingRules = @()
     if ($Context.Plan.Reality.ForceIpv4Egress) {
@@ -2252,16 +2358,19 @@ function New-MxhAnyTlsMihomoProfileText {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] $Context,
-        [Parameter(Mandatory)] [int]$MixedPort
+        [Parameter(Mandatory)] [int]$MixedPort,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4'
     )
-    $nodeName = "$($Context.Plan.NodeName)-AnyTLS-IPv4"
+    $server = if ($AddressFamily -eq 'IPv6') { [string]$Context.Plan.Server.IPv6 } else { [string]$Context.Plan.Server.IPv4 }
+    if ([string]::IsNullOrWhiteSpace($server)) { throw "计划未配置 $AddressFamily 地址。" }
+    $nodeName = "$($Context.Plan.NodeName)-AnyTLS-$AddressFamily"
     $lines = [Collections.Generic.List[string]]::new()
     foreach ($line in @(
             "mixed-port: $MixedPort", 'allow-lan: false', 'bind-address: 127.0.0.1',
             'mode: rule', 'log-level: warning', 'ipv6: true', '', 'proxies:',
             "  - name: $(ConvertTo-MxhYamlString $nodeName)",
             '    type: anytls',
-            "    server: $(ConvertTo-MxhYamlString ([string]$Context.Plan.Server.IPv4))",
+            "    server: $(ConvertTo-MxhYamlString $server)",
             "    port: $([int]$Context.Plan.Ports.AnyTlsPrimary)",
             "    password: $(ConvertTo-MxhYamlString ([string]$Context.Secrets.AnyTls.Password))",
             '    udp: true',
@@ -2362,8 +2471,10 @@ function New-MxhMihomoProfileText {
         [Parameter(Mandatory)] $Context,
         [Parameter(Mandatory)] [int]$ServerPort,
         [Parameter(Mandatory)] [int]$MixedPort,
-        [switch]$IncludeIpv6
+        [switch]$IncludeIpv6,
+        [ValidateSet('IPv4', 'IPv6', 'Dual')][string]$AddressFamily = 'IPv4'
     )
+    if ($IncludeIpv6) { $AddressFamily = 'Dual' }
     $s = $Context.Secrets.Xray
     $realityTarget = Get-MxhRealityTargetSettings -Plan $Context.Plan
     $nodeBase = [string]$Context.Plan.NodeName
@@ -2391,10 +2502,13 @@ function New-MxhMihomoProfileText {
         $lines.Add("      short-id: $(ConvertTo-MxhYamlString ([string]$s.ShortId))")
     }
 
-    Add-MxhNode $node4 ([string]$Context.Plan.Server.IPv4)
     $nodes = [Collections.Generic.List[string]]::new()
-    $nodes.Add($node4)
-    if ($IncludeIpv6 -and $Context.Plan.Server.IPv6) {
+    if ($AddressFamily -in @('IPv4', 'Dual')) {
+        Add-MxhNode $node4 ([string]$Context.Plan.Server.IPv4)
+        $nodes.Add($node4)
+    }
+    if ($AddressFamily -in @('IPv6', 'Dual')) {
+        if (-not $Context.Plan.Server.IPv6) { throw '计划未配置 IPv6，不能生成 IPv6 Reality 验收配置。' }
         $node6 = "$nodeBase-IPv6"
         Add-MxhNode $node6 ([string]$Context.Plan.Server.IPv6)
         $nodes.Add($node6)
@@ -2409,6 +2523,59 @@ function New-MxhMihomoProfileText {
     $lines.Add('rules:')
     $lines.Add('  - MATCH,Proxy')
     return ($lines -join "`n") + "`n"
+}
+
+function New-MxhRealitySingBoxOutbound {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][int]$ServerPort,
+        [ValidateSet('IPv4', 'IPv6')][string]$AddressFamily = 'IPv4'
+    )
+    $server = if ($AddressFamily -eq 'IPv6') { [string]$Context.Plan.Server.IPv6 } else { [string]$Context.Plan.Server.IPv4 }
+    if ([string]::IsNullOrWhiteSpace($server)) { throw "计划未配置 $AddressFamily 地址。" }
+    $secrets = $Context.Secrets.Xray
+    $target = Get-MxhRealityTargetSettings -Plan $Context.Plan
+    return [ordered]@{
+        type = 'vless'
+        tag = 'proxy'
+        server = $server
+        server_port = $ServerPort
+        uuid = [string]$secrets.Uuid
+        flow = 'xtls-rprx-vision'
+        packet_encoding = 'xudp'
+        tls = [ordered]@{
+            enabled = $true
+            server_name = [string]$target.ServerName
+            utls = [ordered]@{ enabled = $true; fingerprint = 'chrome' }
+            reality = [ordered]@{
+                enabled = $true
+                public_key = [string]$secrets.RealityClientKey
+                short_id = [string]$secrets.ShortId
+            }
+        }
+    }
+}
+
+function New-MxhSingBoxTestConfig {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][Collections.IDictionary]$Outbound,
+        [Parameter(Mandatory)][int]$MixedPort
+    )
+    $proxyOutbound = Copy-MxhHashtable -Value $Outbound
+    $proxyOutbound.tag = 'proxy'
+    return [ordered]@{
+        log = [ordered]@{ level = 'warn'; timestamp = $true }
+        inbounds = @([ordered]@{
+                type = 'mixed'
+                tag = 'mixed-in'
+                listen = '127.0.0.1'
+                listen_port = $MixedPort
+            })
+        outbounds = @($proxyOutbound, [ordered]@{ type = 'direct'; tag = 'direct' })
+        route = [ordered]@{ final = 'proxy' }
+    }
 }
 
 function New-MxhLandingMihomoProfileText {
@@ -2486,7 +2653,8 @@ function Invoke-MxhSocks5UdpDnsTest {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [int]$SocksPort,
-        [string]$Label = 'proxy'
+        [string]$Label = 'proxy',
+        [string]$DnsServer = '1.1.1.1'
     )
 
     $tcp = [Net.Sockets.TcpClient]::new()
@@ -2535,8 +2703,12 @@ function Invoke-MxhSocks5UdpDnsTest {
         }
         $dnsQuery.AddRange([byte[]](0, 0, 1, 0, 1))
 
+        $dnsAddress = [Net.IPAddress]::Parse($DnsServer)
+        if ($dnsAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { throw 'UDP DNS 测试端点必须是 IPv4 地址。' }
         $packet = [Collections.Generic.List[byte]]::new()
-        $packet.AddRange([byte[]](0, 0, 0, 1, 1, 1, 1, 1, 0, 53))
+        $packet.AddRange([byte[]](0, 0, 0, 1))
+        $packet.AddRange($dnsAddress.GetAddressBytes())
+        $packet.AddRange([byte[]](0, 53))
         $packet.AddRange($dnsQuery.ToArray())
         $udp = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
         $udp.Client.ReceiveTimeout = 20000
@@ -2570,6 +2742,56 @@ function Invoke-MxhSocks5UdpDnsTest {
     }
 }
 
+function Invoke-MxhProxyAcceptanceRequests {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Proxy,
+        [Parameter(Mandatory)][int]$SocksPort,
+        [Parameter(Mandatory)][string]$Label
+    )
+    $httpsEndpoint = $null
+    $httpsErrors = [Collections.Generic.List[string]]::new()
+    foreach ($uri in @('https://www.gstatic.com/generate_204', 'https://cp.cloudflare.com/generate_204')) {
+        try {
+            $response = Invoke-WebRequest -Uri $uri -Proxy $Proxy -TimeoutSec 25
+            if ($response.StatusCode -ne 204) { throw "HTTP $($response.StatusCode)" }
+            $httpsEndpoint = $uri
+            break
+        }
+        catch { $httpsErrors.Add("$uri => $($_.Exception.Message)") }
+    }
+    if (-not $httpsEndpoint) { throw "HTTPS 出口验证全部失败：$Label / $($httpsErrors -join ' | ')" }
+
+    $egress = $null
+    $ipEndpoint = $null
+    $ipErrors = [Collections.Generic.List[string]]::new()
+    foreach ($uri in @('https://api64.ipify.org', 'https://icanhazip.com')) {
+        try {
+            $candidate = ([string](Invoke-RestMethod -Uri $uri -Proxy $Proxy -TimeoutSec 25)).Trim()
+            $parsed = $null
+            if (-not [Net.IPAddress]::TryParse($candidate, [ref]$parsed)) { throw '返回内容不是 IP 地址' }
+            $egress = $candidate
+            $ipEndpoint = $uri
+            break
+        }
+        catch { $ipErrors.Add("$uri => $($_.Exception.Message)") }
+    }
+    if (-not $ipEndpoint) { throw "出口 IP 验证全部失败：$Label / $($ipErrors -join ' | ')" }
+
+    $udpEndpoint = $null
+    $udpErrors = [Collections.Generic.List[string]]::new()
+    foreach ($server in @('1.1.1.1', '9.9.9.9')) {
+        try {
+            Invoke-MxhSocks5UdpDnsTest -SocksPort $SocksPort -Label $Label -DnsServer $server | Out-Null
+            $udpEndpoint = $server
+            break
+        }
+        catch { $udpErrors.Add("$server => $($_.Exception.Message)") }
+    }
+    if (-not $udpEndpoint) { throw "UDP DNS 验证全部失败：$Label / $($udpErrors -join ' | ')" }
+    return [ordered]@{ Egress = $egress; HttpsEndpoint = $httpsEndpoint; IpEndpoint = $ipEndpoint; UdpDnsEndpoint = $udpEndpoint }
+}
+
 function Invoke-MxhMihomoEgressTest {
     [CmdletBinding()]
     param(
@@ -2577,7 +2799,8 @@ function Invoke-MxhMihomoEgressTest {
         [Parameter(Mandatory)] [string]$CorePath,
         [Parameter(Mandatory)] [string]$ProfilePath,
         [Parameter(Mandatory)] [int]$MixedPort,
-        [Parameter(Mandatory)] [string]$Label
+        [Parameter(Mandatory)] [string]$Label,
+        [switch]$Detailed
     )
     $dataDir = Join-Path $Context.ArchivePath ("client-exports\runtime-" + $Label)
     [IO.Directory]::CreateDirectory($dataDir) | Out-Null
@@ -2598,12 +2821,9 @@ function Invoke-MxhMihomoEgressTest {
     try {
         Start-Sleep -Milliseconds 1800
         if ($process.HasExited) { throw "Mihomo 提前退出：$Label" }
-        $proxy = "http://127.0.0.1:$MixedPort"
-        $response = Invoke-WebRequest -Uri 'https://www.gstatic.com/generate_204' -Proxy $proxy -TimeoutSec 25
-        if ($response.StatusCode -ne 204) { throw "HTTP 204 验证失败：$Label" }
-        $egress = (Invoke-RestMethod -Uri 'https://api.ipify.org' -Proxy $proxy -TimeoutSec 25).Trim()
-        Invoke-MxhSocks5UdpDnsTest -SocksPort $MixedPort -Label $Label | Out-Null
-        return $egress
+        $acceptance = Invoke-MxhProxyAcceptanceRequests -Proxy "http://127.0.0.1:$MixedPort" -SocksPort $MixedPort -Label $Label
+        if ($Detailed) { return $acceptance }
+        return $acceptance.Egress
     }
     finally {
         if (-not $process.HasExited) { $process.Kill($true) }
@@ -2614,6 +2834,140 @@ function Invoke-MxhMihomoEgressTest {
         Protect-VpsPrivateFile $stderrPath
         $process.Dispose()
     }
+}
+
+function Invoke-MxhSingBoxEgressTest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$CorePath,
+        [Parameter(Mandatory)][string]$ProfilePath,
+        [Parameter(Mandatory)][int]$MixedPort,
+        [Parameter(Mandatory)][string]$Label,
+        [switch]$Detailed
+    )
+    $dataDir = Join-Path $Context.ArchivePath ("client-exports\runtime-sing-box-" + $Label)
+    [IO.Directory]::CreateDirectory($dataDir) | Out-Null
+    $stdoutPath = Join-Path $dataDir 'sing-box.stdout.log'
+    $stderrPath = Join-Path $dataDir 'sing-box.stderr.log'
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $CorePath
+    $startInfo.WorkingDirectory = $dataDir
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($arg in @('run', '-c', $ProfilePath)) { [void]$startInfo.ArgumentList.Add($arg) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw "无法启动 sing-box：$Label" }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    try {
+        Start-Sleep -Milliseconds 1800
+        if ($process.HasExited) { throw "sing-box 提前退出：$Label" }
+        $acceptance = Invoke-MxhProxyAcceptanceRequests -Proxy "http://127.0.0.1:$MixedPort" -SocksPort $MixedPort -Label $Label
+        if ($Detailed) { return $acceptance }
+        return $acceptance.Egress
+    }
+    finally {
+        if (-not $process.HasExited) { $process.Kill($true) }
+        $process.WaitForExit()
+        [IO.File]::WriteAllText($stdoutPath, $stdoutTask.GetAwaiter().GetResult(), [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($stderrPath, $stderrTask.GetAwaiter().GetResult(), [Text.UTF8Encoding]::new($false))
+        Protect-VpsPrivateFile $stdoutPath
+        Protect-VpsPrivateFile $stderrPath
+        $process.Dispose()
+    }
+}
+
+function Invoke-MxhRealClientValidation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][ValidateSet('Reality', 'AnyTLS')][string]$Protocol
+    )
+    $exports = if ($Protocol -eq 'Reality') { $Context.State.ClientExports } else { $Context.State.AnyTlsClientExports }
+    if (-not $exports -or -not $exports.ValidationTargets) { throw "$Protocol 缺少逐地址族客户端验收配置，请先重新生成客户端导出。" }
+    $coreStates = if ($exports.CoreValidation) { $exports.CoreValidation } else { [ordered]@{} }
+    $results = [Collections.Generic.List[object]]::new()
+    foreach ($coreName in @('mihomo', 'sing-box')) {
+        $coreState = if ($coreStates.Contains($coreName)) { $coreStates[$coreName] } else { Resolve-VpsClientValidationCore -Context $Context -Core $coreName }
+        if ($coreState.Status -eq 'SkippedByUser') {
+            $results.Add([ordered]@{ Core = $coreName; Status = 'SkippedByUser'; Reason = [string]$coreState.Reason; TestedAt = (Get-Date).ToString('o') })
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $coreState.Path -PathType Leaf)) { $coreState = Resolve-VpsClientValidationCore -Context $Context -Core $coreName }
+        foreach ($target in @($exports.ValidationTargets)) {
+            $entryName = if ($target.Entry) { [string]$target.Entry } else { 'primary' }
+            $label = "$($Protocol.ToLowerInvariant())-$coreName-$entryName-$([string]$target.AddressFamily)"
+            $acceptance = if ($coreName -eq 'mihomo') {
+                Invoke-MxhMihomoEgressTest -Context $Context -CorePath $coreState.Path -ProfilePath $target.MihomoProfile `
+                    -MixedPort ([int]$target.MixedPort) -Label $label -Detailed
+            }
+            else {
+                Invoke-MxhSingBoxEgressTest -Context $Context -CorePath $coreState.Path -ProfilePath $target.SingBoxProfile `
+                    -MixedPort ([int]$target.MixedPort) -Label $label -Detailed
+            }
+            $results.Add([ordered]@{
+                    Core = $coreName
+                    Entry = $entryName
+                    AddressFamily = [string]$target.AddressFamily
+                    ServerPort = if ($target.ServerPort) { [int]$target.ServerPort } else { [int]$Context.Plan.Ports.AnyTlsPrimary }
+                    Status = 'Passed'
+                    Egress = [string]$acceptance.Egress
+                    HttpsEndpoint = [string]$acceptance.HttpsEndpoint
+                    IpEndpoint = [string]$acceptance.IpEndpoint
+                    UdpDnsEndpoint = [string]$acceptance.UdpDnsEndpoint
+                    TestedAt = (Get-Date).ToString('o')
+                })
+        }
+    }
+    $status = if (@($results | Where-Object Status -eq 'SkippedByUser').Count) { 'SkippedByUser' } else { 'Passed' }
+    $summary = [ordered]@{ Status = $status; Protocol = $Protocol; Results = $results.ToArray(); TestedAt = (Get-Date).ToString('o') }
+    if ($Protocol -eq 'Reality') { $Context.State.RealityEgressTest = $summary } else { $Context.State.AnyTlsEgressTest = $summary }
+    Save-VpsContext -Context $Context
+    return $summary
+}
+
+function Invoke-MxhShadowsocksRealValidation {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Context)
+    $testServer = if ($Context.Plan.Server.IPv6) { '::1' } else { '127.0.0.1' }
+    $runSelfTest = {
+        param([string]$Label, [string]$Password, [string]$IpVersion)
+        $test = Invoke-VpsRemoteScript -Context $Context -Asset 'shadowsocks-self-test.sh' -Parameters @{
+            METHOD = [string]$Context.Plan.Shadowsocks.Method
+            PASSWORD = $Password
+            LANDING_PORT = [string]$Context.Plan.Ports.LandingShadowsocks
+            IP_VERSION = $IpVersion
+            TEST_SERVER = $testServer
+        } -TimeoutSeconds 240 -SensitiveOutput -AllowFailure
+        if ($test.ExitCode -ne 0) {
+            $details = ([string]$test.StdOut) + "`n" + ([string]$test.StdErr)
+            $phaseMatch = [regex]::Match($details, '(?m)^VPSDEPLOY_SELFTEST_FAILURE_PHASE=([a-z-]+)$')
+            $phase = if ($phaseMatch.Success) { $phaseMatch.Groups[1].Value } else { 'unknown' }
+            throw "Shadowsocks $Label 真实协议验收失败（阶段：$phase；敏感详情仅保存在私有日志）。"
+        }
+        $udp = Get-VpsMarkerValue $test.StdOut UDP -Required
+        if ($udp -ne 'yes') { throw "Shadowsocks $Label UDP 验收失败。" }
+        return [ordered]@{
+            Label = $Label
+            Egress = Get-VpsMarkerValue $test.StdOut EGRESS -Required
+            Udp = 'Passed'
+            TestedAt = (Get-Date).ToString('o')
+        }
+    }
+    $credentials = $Context.Secrets.Shadowsocks
+    $results = [Collections.Generic.List[object]]::new()
+    $results.Add((& $runSelfTest 'IPv4 用户' (([string]$credentials.ServerKey) + ':' + ([string]$credentials.PrimaryUserKey)) '4'))
+    if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
+        $results.Add((& $runSelfTest 'IPv6 用户' (([string]$credentials.ServerKey) + ':' + ([string]$credentials.SecondaryUserKey)) '6'))
+    }
+    $summary = [ordered]@{ Status = 'Passed'; Results = $results.ToArray(); TestedAt = (Get-Date).ToString('o') }
+    $Context.State.ShadowsocksSelfTest = $summary
+    Save-VpsContext -Context $Context
+    return $summary
 }
 
 function Get-VpsModules {
@@ -2970,7 +3324,7 @@ function Start-VpsDeploy {
         [switch]$NonInteractive
     )
 
-    if ($PSVersionTable.PSVersion.Major -lt 7) { throw '需要 PowerShell 7 或更高版本。' }
+    if ($PSVersionTable.PSVersion -lt [version]'7.4') { throw "Windows 控制端需要 PowerShell 7.4 或更高版本；当前为 $($PSVersionTable.PSVersion)。" }
     if ([string]::IsNullOrWhiteSpace($InstanceRoot)) {
         $settings = Get-VpsAppDefaults -ProjectRoot $ProjectRoot
         $configuredRoot = if ($env:MXH_VPS_INSTANCE_ROOT) { $env:MXH_VPS_INSTANCE_ROOT } else { [string]$settings.instance_root }
@@ -3061,14 +3415,17 @@ Export-ModuleMember -Function @(
     'Start-VpsDeploy', 'Write-VpsUi', 'Write-VpsLog', 'Read-VpsYesNo', 'Read-VpsText',
     'ConvertFrom-VpsSecureString', 'Invoke-VpsRemoteScript', 'Invoke-VpsSshCommand',
     'Invoke-VpsScpDownload', 'Invoke-VpsScpUpload', 'Initialize-VpsBootstrapAccess', 'Test-VpsSshConnection',
-    'Save-VpsContext', 'Save-VpsJson', 'Protect-VpsPrivateFile', 'Get-VpsSshKeyPath',
+    'Save-VpsContext', 'Save-VpsJson', 'Protect-VpsPrivateFile', 'Get-VpsSshKeyPath', 'Get-VpsSshPublicKeyPath',
     'Invoke-VpsProcess', 'Get-VpsCommandPath', 'Get-VpsModules', 'Get-VpsRandomPort',
     'Test-VpsReusableBootstrapSshPort', 'New-VpsSshPortSelection', 'Test-VpsBootstrapSshPortRetained',
-    'Test-VpsSupportedOsRelease',
+    'Test-VpsSupportedOsRelease', 'Get-VpsSupportedAssetArchitecture', 'Assert-VpsSupportedTarget',
+    'Get-VpsBundledClientCore', 'Resolve-VpsClientValidationCore', 'Get-VpsMihomoCorePaths', 'Get-VpsSingBoxCorePath',
     'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',
     'Read-VpsNetworkTuningSettings', 'Get-VpsConservativeNetworkPlan',
     'Get-MxhRealityTargetSettings', 'Set-MxhRealityExternalTarget',
-    'New-MxhXrayInbound', 'New-MxhXrayServerConfig', 'New-MxhMihomoProfileText', 'Invoke-MxhMihomoEgressTest',
+    'New-MxhXrayInbound', 'New-MxhXrayServerConfig', 'New-MxhMihomoProfileText', 'New-MxhRealitySingBoxOutbound',
+    'New-MxhSingBoxTestConfig', 'Invoke-MxhMihomoEgressTest', 'Invoke-MxhSingBoxEgressTest',
+    'Invoke-MxhRealClientValidation', 'Invoke-MxhShadowsocksRealValidation',
     'New-MxhAnyTlsPaddingScheme', 'Get-MxhAnyTlsPaddingScheme',
     'ConvertFrom-MxhEchKeyPairText', 'New-MxhAnyTlsServerConfig', 'New-MxhAnyTlsClientOutbound', 'New-MxhAnyTlsMihomoProfileText',
     'New-MxhRandomBase64Key', 'New-MxhShadowsocksServerConfig', 'New-MxhLandingMihomoProfileText',

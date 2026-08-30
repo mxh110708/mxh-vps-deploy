@@ -292,6 +292,8 @@ function New-MxhManualClientNode {
 function Test-MxhClientBuilderRuntime {
     param([Parameter(Mandatory)][string]$ProjectRoot)
     $python = Get-VpsCommandPath 'python.exe'
+    $versionProbe = Invoke-VpsProcess $python @('-c','import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 9)') -TimeoutSeconds 30
+    if ($versionProbe.ExitCode -ne 0) { throw '客户端权威配置设计器需要 Python 3.9 或更高版本。' }
     $probe = Invoke-VpsProcess $python @('-c','import ruamel.yaml') -TimeoutSeconds 30
     if ($probe.ExitCode -eq 0) { return $python }
     Write-VpsUi '客户端配置设计器缺少固定依赖 ruamel.yaml。部署/纳管功能不受影响。' Warning
@@ -301,6 +303,43 @@ function Test-MxhClientBuilderRuntime {
     $install = Invoke-VpsProcess $python @('-m','pip','install','--disable-pip-version-check','-r',(Join-Path $ProjectRoot 'requirements-client-merge.txt')) -TimeoutSeconds 600
     if ($install.ExitCode -ne 0) { throw 'Python 依赖安装失败，请检查网络或手动运行 requirements-client-merge.txt。' }
     return $python
+}
+
+function Test-MxhClientAuthorityPair {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$ClashPath,
+        [Parameter(Mandatory)][string]$SingBoxPath
+    )
+    $context = [pscustomobject]@{ ProjectRoot = $ProjectRoot; NonInteractive = $false }
+    $states = [ordered]@{}
+    $mihomo = Resolve-VpsClientValidationCore -Context $context -Core mihomo
+    $states.mihomo = $mihomo
+    if ($mihomo.Status -eq 'Ready') {
+        $data = Join-Path ([IO.Path]::GetTempPath()) ('mxh-mihomo-' + [guid]::NewGuid().ToString('N'))
+        [IO.Directory]::CreateDirectory($data) | Out-Null
+        try {
+            $test = Invoke-VpsProcess $mihomo.Path @('-t', '-d', $data, '-f', $ClashPath) -TimeoutSeconds 180
+            if ($test.ExitCode -ne 0) { throw "Clash 候选未通过内置稳定 Mihomo：$($test.StdErr.Trim())" }
+        }
+        finally { Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $singBox = Resolve-VpsClientValidationCore -Context $context -Core 'sing-box'
+    $states['sing-box'] = $singBox
+    if ($singBox.Status -eq 'Ready') {
+        $test = Invoke-VpsProcess $singBox.Path @('check', '-c', $SingBoxPath) -TimeoutSeconds 180
+        if ($test.ExitCode -ne 0) { throw "sing-box 候选未通过内置稳定核心：$($test.StdErr.Trim())" }
+    }
+    foreach ($alpha in @(Get-VpsMihomoCorePaths -ProjectRoot $ProjectRoot | Where-Object { $_ -ne $mihomo.Path })) {
+        $data = Join-Path ([IO.Path]::GetTempPath()) ('mxh-mihomo-alpha-' + [guid]::NewGuid().ToString('N'))
+        [IO.Directory]::CreateDirectory($data) | Out-Null
+        try {
+            $test = Invoke-VpsProcess $alpha @('-t', '-d', $data, '-f', $ClashPath) -TimeoutSeconds 180
+            if ($test.ExitCode -ne 0) { throw "Clash 候选未通过可选 Mihomo alpha：$($test.StdErr.Trim())" }
+        }
+        finally { Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    return $states
 }
 
 function Test-MxhForbiddenAuthorityPath {
@@ -526,18 +565,12 @@ function Invoke-MxhBuildClientAuthority {
     $builder = Join-Path $ProjectRoot 'scripts\build_client_authority.py'
     $result = Invoke-VpsProcess $python @($builder,'--clash',$clash.Trim('"'),'--sing-box',$sing.Trim('"'),'--spec',$specPath,'--output',$output) -TimeoutSeconds 300
     if ($result.ExitCode -ne 0) { throw "客户端候选生成失败：$($result.StdErr.Trim())" }
-    $candidate = Join-Path $output 'Clash_General.candidate.yaml'; $testData = Join-Path $output 'mihomo-test-data'; [IO.Directory]::CreateDirectory($testData)|Out-Null
-    $tested = [Collections.Generic.List[string]]::new()
-    foreach ($core in @(Get-VpsMihomoCorePaths -ProjectRoot $ProjectRoot)) {
-        if (-not (Test-Path -LiteralPath $core)) { continue }
-        $test = Invoke-VpsProcess $core @('-t','-d',$testData,'-f',$candidate) -TimeoutSeconds 180
-        if ($test.ExitCode -ne 0) { throw "候选未通过 $(Split-Path -Leaf $core)：$($test.StdErr.Trim())" }
-        $tested.Add((Split-Path -Leaf $core))
-    }
+    $candidate = Join-Path $output 'Clash_General.candidate.yaml'
     $singCandidate = Join-Path $output 'sing-box-general.candidate.json'
     Get-Content -Raw $singCandidate | ConvertFrom-Json | Out-Null
     $singBytes = (Get-Item -LiteralPath $singCandidate).Length
     if ($singBytes -ge 4MB) { throw "sing-box 候选为 $singBytes 字节，超过桌面端 4 MiB 安全上限；请减少内联规则或节点。" }
+    $coreStates = Test-MxhClientAuthorityPair -ProjectRoot $ProjectRoot -ClashPath $candidate -SingBoxPath $singCandidate
     $backupRoot=Join-Path $outputRoot ('backups\'+$stamp)
     if($outputMode -eq 1){
         $published=Publish-MxhAuthorityPair -CandidateClash $candidate -CandidateSingBox $singCandidate -TargetClash $targetClash.Trim('"') -TargetSingBox $targetSing.Trim('"') -BackupRoot $backupRoot
@@ -554,7 +587,7 @@ function Invoke-MxhBuildClientAuthority {
     $layout.authority_defaults.output_root=$outputRoot
     if(Read-VpsYesNo '将本次来源、地区、组顺序和输出路径保存为本机默认？' $false -AllowBack){Save-VpsJson -Value $layout -Path (Join-Path $ProjectRoot 'config\client-layout.local.json') -Private}
     Write-VpsUi "配置已写入：$targetClash；$targetSing" Success
-    Write-VpsUi "Mihomo 核心：$(if($tested.Count){$tested -join ', '}else{'未发现，已跳过'})；sing-box JSON 严格解析通过，体积 $singBytes 字节（低于 4 MiB）。$(if($outputMode -eq 1){'原文件备份：'+$backupRoot}else{'当前权威配置未修改。'})" Info
+    Write-VpsUi "Mihomo=$($coreStates.mihomo.Status)，sing-box=$($coreStates['sing-box'].Status)；sing-box 体积 $singBytes 字节（低于 4 MiB）。$(if($outputMode -eq 1){'原文件备份：'+$backupRoot}else{'当前权威配置未修改。'})" Info
 }
 
 function Invoke-MxhClientAuthorityDesigner {
@@ -598,8 +631,9 @@ function Invoke-MxhClientAuthorityDesigner {
                 $clash=Read-VpsText 'Clash YAML' -Default $clashDefault -AllowBack -Validate{param($v)Test-VpsExistingInputPath -Value $v -PathType Leaf} -ValidationMessage '找不到文件，或路径混用了 / 与 \。'
                 $sing=Read-VpsText 'sing-box JSON' -Default $singDefault -AllowBack -Validate{param($v)Test-VpsExistingInputPath -Value $v -PathType Leaf} -ValidationMessage '找不到文件，或路径混用了 / 与 \。'
                 $clash=ConvertTo-VpsInputPath -Value $clash;$sing=ConvertTo-VpsInputPath -Value $sing
-                foreach($core in @(Get-VpsMihomoCorePaths -ProjectRoot $ProjectRoot)){$data=Join-Path ([IO.Path]::GetTempPath()) ('mxh-mihomo-'+[guid]::NewGuid().ToString('N'));[IO.Directory]::CreateDirectory($data)|Out-Null;try{$t=Invoke-VpsProcess $core @('-t','-d',$data,'-f',$clash.Trim('"')) -TimeoutSeconds 180;if($t.ExitCode-ne 0){throw "未通过 $(Split-Path -Leaf $core)：$($t.StdErr)"}}finally{Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue}}
-                Get-Content -Raw -LiteralPath $sing.Trim('"')|ConvertFrom-Json|Out-Null;$bytes=(Get-Item -LiteralPath $sing.Trim('"')).Length;if($bytes-ge 4MB){throw "sing-box 文件为 $bytes 字节，达到或超过 4 MiB。"};Write-VpsUi '两份配置已通过当前可用的本地语法/结构检查。' Success
+                Get-Content -Raw -LiteralPath $sing.Trim('"')|ConvertFrom-Json|Out-Null;$bytes=(Get-Item -LiteralPath $sing.Trim('"')).Length;if($bytes-ge 4MB){throw "sing-box 文件为 $bytes 字节，达到或超过 4 MiB。"}
+                $states=Test-MxhClientAuthorityPair -ProjectRoot $ProjectRoot -ClashPath $clash.Trim('"') -SingBoxPath $sing.Trim('"')
+                Write-VpsUi "两份配置已校验：Mihomo=$($states.mihomo.Status)，sing-box=$($states['sing-box'].Status)。" Success
             }
         }catch{if(Test-VpsWizardBackError $_){Write-VpsUi '已返回客户端配置设计器。' Info;continue};if(Test-VpsNavigationError $_){Write-VpsUi (Get-VpsNavigationMessage $_) Info;continue};throw}
     }

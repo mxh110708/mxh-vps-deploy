@@ -39,6 +39,13 @@
         }
         $singBoxPath = Join-Path $exportDir 'sing-box-shadowsocks-outbounds.private.json'
         Save-VpsJson -Value ([ordered]@{ outbounds = $outbounds }) -Path $singBoxPath -Private
+        $singBoxTestPath = Join-Path $exportDir 'sing-box-shadowsocks-syntax-test.private.json'
+        $singTestOutbound = Copy-MxhHashtable -Value $outbounds[0]
+        $singTestOutbound.tag = 'proxy'
+        $singTestOutbound.detour = [string]$Context.Plan.Shadowsocks.ClientTransitTag
+        $singTestConfig = New-MxhSingBoxTestConfig -Outbound $singTestOutbound -MixedPort $mixedPort
+        $singTestConfig.outbounds += [ordered]@{ type = 'direct'; tag = [string]$Context.Plan.Shadowsocks.ClientTransitTag }
+        Save-VpsJson -Value $singTestConfig -Path $singBoxTestPath -Private
 
         $notePath = Join-Path $exportDir 'README-shadowsocks-private.txt'
         $note = @"
@@ -52,18 +59,24 @@ sing-box 片段中的 detour 已指向同名 tag。合并时必须确认主配�
         [IO.File]::WriteAllText($notePath, $note, [Text.UTF8Encoding]::new($false))
         Protect-VpsPrivateFile $notePath
 
-        $cores = @(Get-VpsMihomoCorePaths -ProjectRoot $Context.ProjectRoot)
-        $testData = Join-Path $exportDir 'landing-syntax-test-data'
-        [IO.Directory]::CreateDirectory($testData) | Out-Null
-        foreach ($core in $cores) {
-            $test = Invoke-VpsProcess -FilePath $core -ArgumentList @('-t', '-d', $testData, '-f', $mihomoPath) -TimeoutSeconds 120
-            if ($test.ExitCode -ne 0) { throw "Mihomo Shadowsocks 语法测试失败：$(Split-Path -Leaf $core)" }
+        $coreStates = [ordered]@{}
+        foreach ($coreName in @('mihomo', 'sing-box')) {
+            $coreState = Resolve-VpsClientValidationCore -Context $Context -Core $coreName
+            $coreStates[$coreName] = $coreState
+            if ($coreState.Status -eq 'SkippedByUser') { continue }
+            if ($coreName -eq 'mihomo') {
+                $testData = Join-Path $exportDir 'landing-syntax-test-data'
+                [IO.Directory]::CreateDirectory($testData) | Out-Null
+                $test = Invoke-VpsProcess -FilePath $coreState.Path -ArgumentList @('-t', '-d', $testData, '-f', $mihomoPath) -TimeoutSeconds 120
+            }
+            else { $test = Invoke-VpsProcess -FilePath $coreState.Path -ArgumentList @('check', '-c', $singBoxTestPath) -TimeoutSeconds 120 }
+            if ($test.ExitCode -ne 0) { throw "$coreName Shadowsocks 语法测试失败。" }
         }
-        if ($cores.Count -eq 0) { Write-VpsUi '未找到 Clash Verge Mihomo 核心，已跳过落地片段语法测试。' Warning }
         $Context.State.LandingClientExports = [ordered]@{
             MihomoProfile = $mihomoPath
             SingBoxOutbounds = $singBoxPath
-            MihomoCoresTested = @($cores)
+            SingBoxSyntaxProfile = $singBoxTestPath
+            CoreValidation = $coreStates
         }
         Save-VpsContext -Context $Context
     }

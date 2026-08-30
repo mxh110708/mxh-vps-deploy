@@ -3,8 +3,8 @@ set -euo pipefail
 
 : "${VPS_PARAM_CONFIG_JSON:?}"
 : "${VPS_PARAM_PRIMARY_PORT:?}"
-: "${VPS_PARAM_BACKUP_PORT:?}"
 : "${VPS_PARAM_TARGET:?}"
+backup_port="${VPS_PARAM_BACKUP_PORT:-}"
 
 config='/usr/local/etc/xray/config.json'
 stamp="$(date -u +%Y%m%d-%H%M%S)"
@@ -30,7 +30,9 @@ chmod 0640 /var/log/xray/error.log
 systemctl restart xray.service
 systemctl is-active --quiet xray.service
 sleep 1
-for port in "$VPS_PARAM_PRIMARY_PORT" "$VPS_PARAM_BACKUP_PORT"; do
+ports=("$VPS_PARAM_PRIMARY_PORT")
+if [[ -n "$backup_port" ]]; then ports+=("$backup_port"); fi
+for port in "${ports[@]}"; do
   ss -H -lntp "sport = :$port" | grep -q xray || { echo "Xray is not listening on $port" >&2; exit 1; }
 done
 

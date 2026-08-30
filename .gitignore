@@ -14,6 +14,7 @@ id_rsa
 # Local test/build output.
 .test-output/
 .tmp/
+.cache/
 TestResults/
 *.log
 __pycache__/

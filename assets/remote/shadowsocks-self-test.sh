@@ -33,31 +33,37 @@ with socket.socket() as sock:
 PY
 )"
 
-udp_port="$(python3 - <<'PY'
+read -r udp_port udp_fallback_port < <(python3 - <<'PY'
 import socket
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
     sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
+    first = sock.getsockname()[1]
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    second = sock.getsockname()[1]
+print(first, second)
 PY
-)"
+)
 
 strategy='ipv4_only'
 check_url='https://api.ipify.org'
 udp_target='1.1.1.1'
+udp_fallback_target='9.9.9.9'
 udp_query_type='1'
 if [[ "$VPS_PARAM_IP_VERSION" == '6' ]]; then
   strategy='ipv6_only'
   check_url='https://api64.ipify.org'
   udp_target='2606:4700:4700::1111'
+  udp_fallback_target='2620:fe::fe'
   udp_query_type='28'
 fi
 
-python3 - "$work/client.json" "$mixed_port" "$udp_port" "$strategy" "$udp_target" <<'PY'
+python3 - "$work/client.json" "$mixed_port" "$udp_port" "$udp_fallback_port" "$strategy" "$udp_target" "$udp_fallback_target" <<'PY'
 import json
 import os
 import sys
 
-output, mixed_port, udp_port, strategy, udp_target = sys.argv[1:]
+output, mixed_port, udp_port, udp_fallback_port, strategy, udp_target, udp_fallback_target = sys.argv[1:]
 config = {
     "log": {"level": "warn"},
     "dns": {"servers": [{"type": "local", "tag": "local"}]},
@@ -70,6 +76,11 @@ config = {
             "type": "direct", "tag": "udp-test-in", "listen": "127.0.0.1",
             "listen_port": int(udp_port), "network": "udp",
             "override_address": udp_target, "override_port": 53
+        },
+        {
+            "type": "direct", "tag": "udp-fallback-in", "listen": "127.0.0.1",
+            "listen_port": int(udp_fallback_port), "network": "udp",
+            "override_address": udp_fallback_target, "override_port": 53
         }
     ],
     "outbounds": [{
@@ -94,31 +105,39 @@ pid="$!"
 sleep 1
 kill -0 "$pid"
 phase='https'
-egress="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 25 \
-  --proxy "http://127.0.0.1:${mixed_port}" "$check_url")"
+egress=''
+for endpoint in "$check_url" 'https://icanhazip.com'; do
+  egress="$(curl --fail --silent --show-error --connect-timeout 10 --max-time 25 \
+    --proxy "http://127.0.0.1:${mixed_port}" "$endpoint" || true)"
+  [[ -n "$egress" ]] && break
+done
 [[ -n "$egress" ]] || { echo 'Empty Shadowsocks egress result.' >&2; exit 1; }
 
 phase='udp'
-python3 - "$udp_port" "$udp_query_type" <<'PY'
+python3 - "$udp_port" "$udp_fallback_port" "$udp_query_type" <<'PY'
 import os
 import socket
 import struct
 import sys
 
-port = int(sys.argv[1])
-query_type = int(sys.argv[2])
-query_id = int.from_bytes(os.urandom(2), "big")
-labels = b"".join(bytes([len(label)]) + label for label in b"example.com".split(b".")) + b"\x00"
-packet = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0) + labels + struct.pack("!HH", query_type, 1)
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-    sock.settimeout(10)
-    sock.sendto(packet, ("127.0.0.1", port))
-    response, _ = sock.recvfrom(4096)
-if len(response) < 12:
-    raise SystemExit("Short UDP DNS response through Shadowsocks.")
-response_id, flags = struct.unpack("!HH", response[:4])
-if response_id != query_id or not flags & 0x8000 or flags & 0x000F:
-    raise SystemExit("Invalid UDP DNS response through Shadowsocks.")
+query_type = int(sys.argv[3])
+for value in sys.argv[1:3]:
+    port = int(value)
+    query_id = int.from_bytes(os.urandom(2), "big")
+    labels = b"".join(bytes([len(label)]) + label for label in b"example.com".split(b".")) + b"\x00"
+    packet = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0) + labels + struct.pack("!HH", query_type, 1)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(10)
+            sock.sendto(packet, ("127.0.0.1", port))
+            response, _ = sock.recvfrom(4096)
+        response_id, flags = struct.unpack("!HH", response[:4]) if len(response) >= 12 else (None, 0)
+        if response_id == query_id and flags & 0x8000 and not flags & 0x000F:
+            break
+    except OSError:
+        pass
+else:
+    raise SystemExit("UDP DNS failed through Shadowsocks primary and fallback endpoints.")
 PY
 
 phase='complete'

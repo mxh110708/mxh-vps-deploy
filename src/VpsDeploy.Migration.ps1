@@ -911,6 +911,11 @@ function New-MxhProtocolMigrationDetails {
                 ) $default -AllowBack
                 $wizard.XrayVersionChannel = if ($choice -eq 2) { 'LatestStable' } else { 'FixedVerified' }
                 $wizard.XrayVersion = Resolve-VpsXrayVersion -ProjectRoot $ProjectRoot -Channel $wizard.XrayVersionChannel
+                if ($wizard.XrayVersionChannel -eq 'LatestStable') {
+                    $sameVersion = if ($wizard.XrayVersion -eq [string]$versions.xray.version) { '；当前恰好与固定验证版相同' } else { '' }
+                    Write-VpsUi "已选择官方最新稳定版通道；当前在线解析为 Xray $($wizard.XrayVersion)$sameVersion。部署计划仍记录 LatestStable。" Info
+                }
+                else { Write-VpsUi "已选择固定验证版通道：Xray $($wizard.XrayVersion)。" Info }
             }
         },
         [pscustomobject]@{

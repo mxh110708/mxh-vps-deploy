@@ -20,7 +20,7 @@
             throw '无法通过实例专用密钥登录验证入口 VPS。'
         }
         $arch = [string]$entryContext.State.Audit.Architecture
-        $archKey = if ($arch -in @('x86_64', 'amd64')) { 'amd64' } else { 'arm64' }
+        $archKey = Get-VpsSupportedAssetArchitecture -Architecture $arch
         $asset = $Context.Versions.sing_box.assets.$archKey
         $credentials = $Context.Secrets.Shadowsocks
         $password = ([string]$credentials.ServerKey) + ':' + ([string]$credentials.PrimaryUserKey)

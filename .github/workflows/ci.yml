@@ -8,9 +8,13 @@ permissions:
   contents: read
 
 jobs:
-  debian12:
+  debian-remote-contract:
+    name: Debian ${{ matrix.debian }} VPS remote contract
     runs-on: ubuntu-latest
-    container: debian:12-slim
+    strategy:
+      matrix:
+        debian: ['12', '13']
+    container: debian:${{ matrix.debian }}-slim
     steps:
       - name: Install checkout prerequisites
         shell: bash
@@ -18,7 +22,7 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends ca-certificates git
       - uses: actions/checkout@v5
-      - name: Validate Debian 12 package and OpenSSH contract
+      - name: Validate Debian VPS package and OpenSSH contract
         shell: bash
         run: |
           set -euo pipefail
@@ -28,7 +32,7 @@ jobs:
             bash ca-certificates curl dnsutils iproute2 jq nftables nginx openssh-server \
             openssl python3 python3-certbot-dns-cloudflare sudo systemd-timesyncd tar unzip
           . /etc/os-release
-          [[ "$ID" == 'debian' && "$VERSION_ID" == '12' ]]
+          [[ "$ID" == 'debian' && "$VERSION_ID" == '${{ matrix.debian }}' ]]
           install -d -m 0755 /run/sshd
           sshd -t
           for command in bash curl dig ip jq nft nginx sshd openssl python3 sudo tar unzip; do
@@ -53,21 +57,14 @@ jobs:
       - name: Run project tests
         shell: pwsh
         run: ./tests/Run-Tests.ps1 -ProjectRoot $PWD
-      - name: Validate generated configs with pinned sing-box
+      - name: Validate bundled client cores and generated configs
         shell: pwsh
         run: |
-          $versions = Get-Content -Raw ./config/versions.json | ConvertFrom-Json
-          $asset = $versions.sing_box.assets.windows_amd64
-          $archive = Join-Path $env:RUNNER_TEMP $asset.name
-          $url = "https://github.com/SagerNet/sing-box/releases/download/v$($versions.sing_box.version)/$($asset.name)"
-          curl.exe -fsSL --retry 3 --output $archive $url
-          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          if ($actual -ne $asset.sha256) { throw 'sing-box release checksum mismatch' }
-          $destination = Join-Path $env:RUNNER_TEMP 'sing-box-check'
-          Expand-Archive -LiteralPath $archive -DestinationPath $destination
-          $core = Get-ChildItem $destination -Recurse -Filter sing-box.exe | Select-Object -First 1
-          if (-not $core) { throw 'sing-box.exe not found' }
-          ./tests/Test-SingBoxConfig.ps1 -ProjectRoot $PWD -SingBoxPath $core.FullName
+          Import-Module ./src/VpsDeploy.Core.psm1 -Force
+          $mihomo = Get-VpsBundledClientCore -ProjectRoot $PWD -Core mihomo
+          $singBox = Get-VpsBundledClientCore -ProjectRoot $PWD -Core sing-box
+          if (-not (Test-Path $mihomo)) { throw 'bundled Mihomo validation failed' }
+          ./tests/Test-SingBoxConfig.ps1 -ProjectRoot $PWD -SingBoxPath $singBox
 
   shell:
     runs-on: ubuntu-latest
