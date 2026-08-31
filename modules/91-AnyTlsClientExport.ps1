@@ -14,9 +14,11 @@
         $targets = [Collections.Generic.List[object]]::new()
         $mixedPort = 17895
         $outbounds = [Collections.Generic.List[object]]::new()
+        $nodeBase = [string]$Context.Plan.NodeName
+        $dualStack = [bool]$Context.Plan.Server.IPv6
         foreach ($family in $families) {
             $server = if ($family -eq 'IPv6') { [string]$Context.Plan.Server.IPv6 } else { [string]$Context.Plan.Server.IPv4 }
-            $tag = "$($Context.Plan.NodeName)-AnyTLS-$family"
+            $tag = Get-MxhAddressFamilyNodeName -BaseName $nodeBase -AddressFamily $family -DualStack $dualStack
             $outbound = New-MxhAnyTlsClientOutbound -Context $Context -Server $server -Tag $tag
             $outbounds.Add($outbound)
             $suffix = $family.ToLowerInvariant()

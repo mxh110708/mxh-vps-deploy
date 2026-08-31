@@ -81,7 +81,7 @@ else
 fi
 sleep 1
 for port in "${ssh_ports[@]}"; do
-  ss -H -lntp "sport = :$port" | grep -q sshd || { echo "sshd is not listening on $port" >&2; exit 1; }
+  grep -q sshd <<< "$(ss -H -lntp "sport = :$port")" || { echo "sshd is not listening on $port" >&2; exit 1; }
 done
 
 printf 'VPSDEPLOY_BACKUP_DIR_B64=%s\n' "$(printf '%s' "$backup_dir" | base64 | tr -d '\n')"

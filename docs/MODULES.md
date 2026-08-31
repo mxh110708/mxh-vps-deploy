@@ -20,7 +20,7 @@ vendor/test-cores/windows-amd64/*     经校验后供 Windows 控制端验收的
 tests/Run-Tests.ps1                   跨模块回归、交互和秘密扫描
 ```
 
-主菜单导航属于核心而不是业务模块：主菜单 `9` 才退出；子层 `0` 才返回；`b/back` 永远作为普通输入。新增交互入口必须复用 `Read-VpsText`、`Read-VpsYesNo` 和 `Read-VpsMenu`，不能自行发明另一套返回别名。
+主菜单导航属于核心而不是业务模块：主菜单 `9` 才退出，子层统一使用 `0` 返回。新增交互入口必须复用 `Read-VpsText`、`Read-VpsYesNo` 和 `Read-VpsMenu`，不能自行发明另一套返回方式。
 
 正式运行拓扑是 Windows amd64 控制端通过 OpenSSH 管理 Debian 12/13 amd64 VPS。新建、Import 和维护上下文都必须调用同一 OS/架构门禁；Debian 容器 CI 不是 Linux 控制端支持承诺。
 
@@ -56,6 +56,10 @@ Schema 3 新计划把运行数据放在 `<InstanceDirectory>/MXH-VPS-Deploy`，`
 
 `SshKey.Mode` 为 `ReuseExisting` 或 `GenerateManaged`。复用模式复制私钥并用 `ssh-keygen -y` 推导公钥；它不会修改源文件、额外调整/检查本地 ACL 或轮换服务器 `authorized_keys`。Import 的 `EnforceKeyOnlySsh` 是显式用户选择而非纳管前置条件。
 
+`bootstrap-access` 先尝试实例管理私钥，失败后才进入服务商初始认证。密码输入由 OpenSSH 直接处理且不回显，真实的初始登录失败允许重试。若初始密码会话成功，但 Debian 服务商镜像的有效配置禁用了公钥认证、使用非标准 `AuthorizedKeysFile` 或限定了 `AuthenticationMethods`，模块会写入最小的 `00-00-mxh-bootstrap-access.conf`，仅恢复标准公钥入口。该临时兼容配置必须通过 `sshd -t`、`sshd -T` 和 reload，失败即回滚；它不会提前关闭密码或移除服务商端口。最终 key-only 策略仍由 `ssh-transition` 提交。
+
+`deployment-baseline`（Order 5）在恢复公钥已验证、其他新机模块尚未修改服务器时建立统一快照。它只记录项目管理的 SSH、协议、证书、nftables、sysctl、Komari、服务状态和受管账户，并记录基线时已有的软件包及 `/root/vps-deploy-backups` 子目录。`deployment-baseline-commit`（Order 119）只有在 AuditOnly 的 `audit` 或常规角色的 `ssh-cutover` 成功后才删除基线；即使通过 `-OnlyModule` 显式调用也不能绕过该门禁。
+
 供应商专有 IPv6 获取、策略路由或网络命名空间应作为单独模块加入，不应修改通用 `sing-box-shadowsocks` 模块。
 
 `network-tuning` 使用计划中的 `NetworkTuning.Mode/BandwidthMbps/ReferenceRttMs` 和初始审计的实际内存计算参数。标称带宽与代表性 RTT 属于用户输入，禁止通过公网测速或虚拟网卡显示速率自动猜测。
@@ -86,8 +90,8 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 `Migration.ModuleIds` 对模块集合做白名单筛选，按操作选择步骤：
 
 - `migration-preflight`：复验双 SSH、全部已安装协议配置以及远端 installed/enabled/active 状态没有在确认后变化；
-- 目标协议的 target/证书前置模块；
 - `migration-arm-rollback`：打包全部受管协议文件，记录三个 systemd 服务状态，备份 nftables/sysctl 并部署独立回滚 timer；
+- 目标协议的 target/证书前置模块；回滚必须先于 Certbot、target 和协议写入建立；
 - 安装操作运行目标协议服务、网络调优和客户端导出；纯启停使用 `protocol-lifecycle-state`，卸载使用 `protocol-lifecycle-uninstall`；
 - `nftables-transition` 使用 `ValidationInventory` 为临时真实测试开放必要端口；
 - Shadowsocks 目标额外运行 `migration-shadowsocks-probe`，从另一台白名单入口执行真实 TCP/UDP 探测；
@@ -96,7 +100,7 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 - `migration-commit`：应用最终 enabled/active 状态、更新 inventory 并撤销 timer；
 - `private-archive`：下载全部仍安装协议的配置，记录生命周期状态并重新生成校验和。
 
-变更失败时核心调用 `Invoke-MxhProtocolMigrationRollback` 立即触发回滚；若 SSH 暂时被错误防火墙阻断，systemd timer 仍独立执行。回滚会恢复变更前协议文件和所有服务状态，而不是只启动一个“源角色”。
+变更失败时核心调用 `Invoke-MxhProtocolMigrationRollback` 立即触发回滚；若 SSH 暂时被错误防火墙阻断，systemd timer 仍独立执行。回滚会恢复变更前协议文件和所有服务状态，而不是只启动一个“源角色”。回滚后会清除本次 `Migration.ModuleIds` 的成功/失败记录，确保继续时从新快照重新执行全部变更模块。
 
 备份清理不进入可恢复模块流水线，因为它本身删除恢复材料。交互层只允许清理实例 `migration-backups` 与远端时间戳目录中的 `protocol-lifecycle`/旧 `protocol-migration` 子目录，支持保留最近 N 份；活动 rollback timer 或未完成操作存在时拒绝执行。
 
@@ -133,6 +137,8 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 ## 状态与兼容
 
 每完成一个模块，核心更新实例私有目录中的 `deployment-state.json`。继续模式默认跳过已成功模块。维护模式可用 `-OnlyModule` 显式重跑，但会显示风险确认。
+
+继续入口还可以放弃未完成事务。新机统一回滚先执行远端恢复、验证初始 root SSH，再以精确路径删除统一基线和本事务新增的时间戳备份；本地清理最后执行。协议变更必须携带 `BaselineCapturedBeforeMutations=true` 才允许自动放弃。旧计划若已经修改远端但没有该可验证基线，只能继续、人工恢复或服务商重置。
 
 新计划使用受管子目录布局；旧计划按照其 `Paths` 原值继续读取。代码不能只靠目录是否存在推断协议状态，应同时核对计划、状态和远端 inventory。没有计划的既有 VPS 必须走 Import，而不是伪造一个最小 `deployment-plan.json`。
 

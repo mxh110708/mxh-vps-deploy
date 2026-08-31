@@ -433,7 +433,7 @@ Cloudflare 和 Certbot 正常不等于代理协议正常。最终仍需检查：
 | 现象 | 常见原因 | 处理 |
 |---|---|---|
 | 找不到 Zone 或 Zone 查询不是唯一结果 | Zone 名填成了完整子域名；缺少 Zone Read | Zone 填根域名，补 `Zone / Zone / Read` |
-| 403/权限不足 | Token 权限、Zone Resource 或 IP 白名单不匹配 | 对照第 5 节逐项检查 |
+| 403/权限不足 | Token 权限、Zone Resource 或 API 实际使用的 IPv4/IPv6 不在白名单 | 对照项目显示的请求源地址和第 5 节逐项检查 |
 | Token 验证看似成功，但签发时失败 | Cloudflare 的 Token verify 接口不受 IP 白名单限制，而实际 Zone/DNS API 受限制 | 把 Certbot VPS 的真实出口加入白名单 |
 | Token 文件格式错误 | 文件带前缀、引号、多行或空行 | 只保留一行原始 Token |
 | 域名解析到 Cloudflare 地址 | 记录仍是橙云，或 CNAME 链中存在橙云 | 改为灰云并检查整个 CNAME 链 |

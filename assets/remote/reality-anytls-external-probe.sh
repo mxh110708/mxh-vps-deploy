@@ -7,11 +7,10 @@ set -euo pipefail
 : "${VPS_PARAM_SING_BOX_VERSION:?}"
 : "${VPS_PARAM_SING_BOX_ASSET_NAME:?}"
 : "${VPS_PARAM_SING_BOX_SHA256:?}"
-: "${VPS_PARAM_METHOD:?}"
-: "${VPS_PARAM_PASSWORD:?}"
-: "${VPS_PARAM_LANDING_PORT:?}"
-: "${VPS_PARAM_IP_VERSION:?}"
-: "${VPS_PARAM_TEST_SERVER:?}"
+: "${VPS_PARAM_MIHOMO_PROFILE_B64:?}"
+: "${VPS_PARAM_SING_BOX_PROFILE_B64:?}"
+: "${VPS_PARAM_MIHOMO_PORT:?}"
+: "${VPS_PARAM_SING_BOX_PORT:?}"
 
 work="$(mktemp -d)"
 pids=()
@@ -45,86 +44,17 @@ chmod 0755 "$sing_box"
 sing_box_version_output="$("$sing_box" version)"
 grep -qi 'sing-box' <<< "$sing_box_version_output"
 
-read -r mihomo_port sing_port < <(python3 - <<'PY'
-import socket
-ports = []
-for _ in range(2):
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        ports.append(sock.getsockname()[1])
-print(*ports)
-PY
-)
-
-python3 - "$work/mihomo.json" "$work/sing-box.json" "$mihomo_port" "$sing_port" <<'PY'
-import json
-import os
-import sys
-
-mihomo_path, sing_path, mihomo_port, sing_port = sys.argv[1:]
-method = os.environ["VPS_PARAM_METHOD"]
-password = os.environ["VPS_PARAM_PASSWORD"]
-server = os.environ["VPS_PARAM_TEST_SERVER"]
-server_port = int(os.environ["VPS_PARAM_LANDING_PORT"])
-ip_version = os.environ["VPS_PARAM_IP_VERSION"]
-strategy = "ipv6_only" if ip_version == "6" else "ipv4_only"
-
-mihomo = {
-    "mixed-port": int(mihomo_port),
-    "allow-lan": False,
-    "bind-address": "127.0.0.1",
-    "mode": "rule",
-    "log-level": "warning",
-    "ipv6": True,
-    "proxies": [{
-        "name": "proxy", "type": "ss", "server": server,
-        "port": server_port, "cipher": method, "password": password,
-        "udp": True, "ip-version": "ipv4",
-    }],
-    "proxy-groups": [{"name": "Proxy", "type": "select", "proxies": ["proxy"]}],
-    "rules": ["MATCH,Proxy"],
-}
-sing = {
-    "log": {"level": "warn"},
-    "dns": {"servers": [{"type": "local", "tag": "local"}]},
-    "inbounds": [{
-        "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1",
-        "listen_port": int(sing_port),
-    }],
-    "outbounds": [{
-        "type": "shadowsocks", "tag": "proxy", "server": server,
-        "server_port": server_port, "method": method, "password": password,
-        "domain_resolver": {"server": "local", "strategy": strategy},
-    }],
-    "route": {"final": "proxy"},
-}
-for path, value in ((mihomo_path, mihomo), (sing_path, sing)):
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(value, handle, indent=2)
-        handle.write("\n")
-PY
-chmod 0600 "$work/mihomo.json" "$work/sing-box.json"
-"$work/mihomo" -t -d "$work/mihomo-data" -f "$work/mihomo.json"
-"$sing_box" check -c "$work/sing-box.json"
-
-wait_port() {
-  local port="$1"
-  for _ in $(seq 1 30); do
-    if bash -c "</dev/tcp/127.0.0.1/$port" 2>/dev/null; then return 0; fi
-    sleep 0.2
-  done
-  return 1
-}
+printf '%s' "$VPS_PARAM_MIHOMO_PROFILE_B64" | base64 -d > "$work/mihomo.yaml"
+printf '%s' "$VPS_PARAM_SING_BOX_PROFILE_B64" | base64 -d > "$work/sing-box.json"
 
 udp_test() {
-  python3 - "$1" "$VPS_PARAM_IP_VERSION" <<'PY'
+  python3 - "$1" <<'PY'
 import os
 import socket
 import struct
 import sys
 
 port = int(sys.argv[1])
-ip_version = sys.argv[2]
 tcp = socket.create_connection(("127.0.0.1", port), timeout=15)
 tcp.settimeout(15)
 tcp.sendall(b"\x05\x01\x00")
@@ -145,18 +75,12 @@ else:
     raise SystemExit("unexpected SOCKS5 UDP relay address")
 if relay_host in ("0.0.0.0", "::"):
     relay_host = "127.0.0.1"
-
-if ip_version == "6":
-    target_header = b"\x04" + socket.inet_pton(socket.AF_INET6, "2606:4700:4700::1111")
-    query_type = 28
-else:
-    target_header = b"\x01" + socket.inet_aton("1.1.1.1")
-    query_type = 1
-
 transaction = os.urandom(2)
-labels = b"".join(bytes((len(label),)) + label for label in b"example.com".split(b".")) + b"\x00"
-query = transaction + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + labels + struct.pack("!HH", query_type, 1)
-packet = b"\x00\x00\x00" + target_header + struct.pack("!H", 53) + query
+query = transaction + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+for label in (b"one", b"one", b"one", b"one"):
+    query += bytes((len(label),)) + label
+query += b"\x00\x00\x01\x00\x01"
+packet = b"\x00\x00\x00\x01" + socket.inet_aton("1.1.1.1") + struct.pack("!H", 53) + query
 udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 udp.settimeout(20)
 udp.sendto(packet, (relay_host, relay_port))
@@ -170,6 +94,15 @@ if len(payload) < 12 or payload[0:2] != transaction or payload[2] & 0x80 == 0:
 udp.close()
 tcp.close()
 PY
+}
+
+wait_port() {
+  local port="$1"
+  for _ in $(seq 1 30); do
+    if bash -c "</dev/tcp/127.0.0.1/$port" 2>/dev/null; then return 0; fi
+    sleep 0.2
+  done
+  return 1
 }
 
 run_acceptance() {
@@ -186,27 +119,24 @@ run_acceptance() {
     if [[ "$code" == '204' ]]; then endpoint="$candidate"; break; fi
   done
   [[ -n "$endpoint" ]] || { sed -n '1,80p' "$log" >&2; return 1; }
-  local ip_endpoint='https://api.ipify.org'
-  [[ "$VPS_PARAM_IP_VERSION" == '6' ]] && ip_endpoint='https://api6.ipify.org'
   local egress
-  egress="$(curl --fail --silent --show-error --max-time 25 --proxy "http://127.0.0.1:$port" "$ip_endpoint")"
-  python3 - "$egress" "$VPS_PARAM_IP_VERSION" <<'PY'
-import ipaddress
-import sys
-address = ipaddress.ip_address(sys.argv[1].strip())
-if address.version != int(sys.argv[2]):
-    raise SystemExit("unexpected egress address family")
+  egress="$(curl --fail --silent --show-error --max-time 25 --proxy "http://127.0.0.1:$port" https://api64.ipify.org)"
+  local family
+  family="$(python3 - "$egress" <<'PY'
+import ipaddress, sys
+print('IPv6' if ipaddress.ip_address(sys.argv[1].strip()).version == 6 else 'IPv4')
 PY
+)"
   udp_test "$port"
-  printf '%s\t%s\t%s\t%s\n' "$core" "$endpoint" "$egress" "$VPS_PARAM_IP_VERSION" >> "$work/results.tsv"
+  printf '%s\t%s\t%s\t%s\n' "$core" "$endpoint" "$egress" "$family" >> "$work/results.tsv"
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 }
 
 mkdir -p "$work/mihomo-data"
-run_acceptance mihomo "$mihomo_port" "$work/mihomo.log" \
-  "$work/mihomo" -d "$work/mihomo-data" -f "$work/mihomo.json"
-run_acceptance sing-box "$sing_port" "$work/sing-box.log" \
+run_acceptance mihomo "$VPS_PARAM_MIHOMO_PORT" "$work/mihomo.log" \
+  "$work/mihomo" -d "$work/mihomo-data" -f "$work/mihomo.yaml"
+run_acceptance sing-box "$VPS_PARAM_SING_BOX_PORT" "$work/sing-box.log" \
   "$sing_box" run -c "$work/sing-box.json"
 
 python3 - "$work/results.tsv" <<'PY'
@@ -218,10 +148,7 @@ results = []
 with open(sys.argv[1], encoding="utf-8") as handle:
     for line in handle:
         core, endpoint, egress, family = line.rstrip("\n").split("\t")
-        results.append({
-            "core": core, "https_endpoint": endpoint, "egress": egress,
-            "egress_family": "IPv6" if family == "6" else "IPv4", "udp": "Passed",
-        })
+        results.append({"core": core, "https_endpoint": endpoint, "egress": egress, "egress_family": family, "udp": "Passed"})
 payload = json.dumps({"status": "Passed", "results": results}, separators=(",", ":")).encode()
 print("VPSDEPLOY_EXTERNAL_ACCEPTANCE_B64=" + base64.b64encode(payload).decode())
 print("VPSDEPLOY_EXTERNAL_ACCEPTANCE_OK")

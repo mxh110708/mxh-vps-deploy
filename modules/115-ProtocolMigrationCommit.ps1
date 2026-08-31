@@ -26,15 +26,19 @@
                     throw '未完成真实 AnyTLS+ECH 客户端出口测试，拒绝提交协议变更。'
                 }
             }
-            elseif ($operation -in @('InstallActivate', 'InstallStandby')) {
-                if (-not $Context.State.Contains('ShadowsocksSelfTest') -or
-                    $Context.State.ShadowsocksSelfTest.PrimaryUdp -ne 'Passed' -or
-                    -not $Context.State.ShadowsocksSelfTest.PrimaryIpv4Egress) {
+            elseif ($targetRole -eq 'ShadowsocksLanding' -and $operation -in @('InstallActivate', 'InstallStandby', 'Enable')) {
+                if ($operation -in @('InstallActivate', 'InstallStandby') -and
+                    (-not $Context.State.Contains('ShadowsocksSelfTest') -or
+                    $Context.State.ShadowsocksSelfTest.Status -ne 'Passed' -or
+                    -not @($Context.State.ShadowsocksSelfTest.Results).Count -or
+                    @($Context.State.ShadowsocksSelfTest.Results | Where-Object Udp -ne 'Passed').Count)) {
                     throw '未完成 Shadowsocks TCP/UDP 与真实出口自测，拒绝提交协议变更。'
                 }
                 if (-not $Context.State.Contains('MigrationShadowsocksExternalProbe') -or
-                    $Context.State.MigrationShadowsocksExternalProbe.Status -ne 'Passed') {
-                    throw '未从可信入口完成 Shadowsocks 链式外部实测，拒绝提交协议变更。'
+                    $Context.State.MigrationShadowsocksExternalProbe.Status -ne 'Passed' -or
+                    @($Context.State.MigrationShadowsocksExternalProbe.Results).Count -lt 2 -or
+                    @($Context.State.MigrationShadowsocksExternalProbe.Results | Where-Object Udp -ne 'Passed').Count) {
+                    throw '未从可信入口完成 Shadowsocks 双核心链式外部实测，拒绝提交协议变更。'
                 }
             }
         }

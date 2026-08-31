@@ -12,10 +12,15 @@ KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
 EOF
 if [[ -n "$old_public" && "$old_public" != "$VPS_PARAM_NEW_PUBLIC_KEY" ]]; then
+  old_type="$(awk '{print $1}' <<< "$old_public")"
+  old_blob="$(awk '{print $2}' <<< "$old_public")"
   for user in root "$admin"; do
     id "$user" >/dev/null 2>&1 || continue
     home="$(getent passwd "$user" | cut -d: -f6)"; file="$home/.ssh/authorized_keys"
-    [[ ! -f "$file" ]] || sed -i "\|^${old_public//|/\\|}$|d" "$file"
+    if [[ -f "$file" ]]; then
+      awk -v type="$old_type" -v blob="$old_blob" '!($1 == type && $2 == blob)' "$file" > "$file.tmp"
+      chown --reference="$file" "$file.tmp"; chmod --reference="$file" "$file.tmp"; mv "$file.tmp" "$file"
+    fi
   done
 fi
 sshd -t; systemctl reload ssh.service 2>/dev/null || systemctl reload sshd.service

@@ -54,7 +54,7 @@ case "$VPS_PARAM_ACTION" in
     systemctl stop cloudflared.service komari.service >/dev/null 2>&1 || true
     tar --numeric-owner -xzpf "$file" -C /; systemctl daemon-reload
     systemctl enable --now komari.service >/dev/null
-    ss -H -lntp 'sport = :25774' | grep -Fq '127.0.0.1:25774'
+    grep -Fq '127.0.0.1:25774' <<< "$(ss -H -lntp 'sport = :25774')"
     if [[ "$final_active" == false ]]; then systemctl disable --now komari.service >/dev/null 2>&1 || true; fi
     trap - EXIT
     printf 'VPSDEPLOY_BACKUP_DIR_B64=%s\n' "$(printf '%s' "$safety" | base64 | tr -d '\n')"
@@ -77,8 +77,8 @@ case "$VPS_PARAM_ACTION" in
     version_output="$("$binary" --version 2>&1 || true)"; grep -Fq "Komari Monitor ${VPS_PARAM_VERSION}" <<<"$version_output"
     if [[ "$was_active" == true ]]; then
       systemctl start komari.service; systemctl is-active --quiet komari.service
-      for _ in {1..30}; do ss -H -lnt 'sport = :25774' 2>/dev/null | grep -Fq '127.0.0.1:25774' && break; sleep 1; done
-      ss -H -lnt 'sport = :25774' | grep -Fq '127.0.0.1:25774'
+      for _ in {1..30}; do grep -Fq '127.0.0.1:25774' <<< "$(ss -H -lnt 'sport = :25774' 2>/dev/null)" && break; sleep 1; done
+      grep -Fq '127.0.0.1:25774' <<< "$(ss -H -lnt 'sport = :25774')"
       code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 http://127.0.0.1:25774/)"
       [[ "$code" =~ ^(200|302|303|307|308|401|403)$ ]]
     fi

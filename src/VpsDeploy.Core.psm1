@@ -228,16 +228,24 @@ function Read-VpsText {
         [string]$HelpText
     )
 
+    $showPrompt = {
+        Write-Host $Prompt
+        if (-not [string]::IsNullOrWhiteSpace($Default)) {
+            Write-Host "  默认值：$Default（直接按 Enter/回车采用）" -ForegroundColor DarkGray
+        }
+        if ($AllowBack) {
+            if ($ZeroIsValue) { Write-Host '  本字段的 0 是有效数值；返回请在上一层菜单操作。' -ForegroundColor DarkGray }
+            else { Write-Host '  输入 0 返回上一级。' -ForegroundColor DarkGray }
+        }
+    }
+
+    & $showPrompt
     while ($true) {
-        $suffix = if ($Default) { " [$Default；直接回车使用默认值]" } else { '' }
-        $backHint = if ($AllowBack) {
-            if ($ZeroIsValue) { '（本字段的 0 是有效数值；返回请在上一层菜单操作）' }
-            else { '（输入 0 返回上一级）' }
-        } else { '' }
-        $value = Read-Host ($Prompt + $suffix + $backHint)
+        $value = Read-Host '请输入'
         if ($null -eq $value) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         if (Test-VpsClearCommand $value) {
             Clear-VpsScreen
+            & $showPrompt
             continue
         }
         if (Test-VpsHelpCommand $value) {
@@ -246,6 +254,7 @@ function Read-VpsText {
                 else { '；输入 0 返回上一级' }
             } else { '' }
             Show-VpsHelp $(if ($HelpText) { $HelpText } else { "请按提示输入此字段；clear/cls 清屏$navigationHelp。" })
+            & $showPrompt
             continue
         }
         if ($AllowBack -and -not $ZeroIsValue -and $value.Trim() -eq '0') {
@@ -274,18 +283,25 @@ function Read-VpsYesNo {
         [switch]$AllowBack
     )
 
-    $hint = if ($Default) { '[Y/n]' } else { '[y/N]' }
-    if ($AllowBack) { $hint += ' [0=返回]' }
+    $showPrompt = {
+        Write-Host $Prompt
+        Write-Host ("  默认值：{0}（直接按 Enter/回车采用）" -f $(if ($Default) { '是' } else { '否' })) -ForegroundColor DarkGray
+        if ($AllowBack) { Write-Host '  输入 0 返回上一级。' -ForegroundColor DarkGray }
+    }
+
+    & $showPrompt
     while ($true) {
-        $rawAnswer = Read-Host "$Prompt $hint"
+        $rawAnswer = Read-Host '请输入 y/n'
         if ($null -eq $rawAnswer) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         $answer = $rawAnswer.Trim().ToLowerInvariant()
         if (Test-VpsClearCommand $answer) {
             Clear-VpsScreen
+            & $showPrompt
             continue
         }
         if (Test-VpsHelpCommand $answer) {
-            Show-VpsHelp '输入 y/yes/是 表示确认；输入 n/no/否 表示拒绝；留空采用方括号中的默认值。'
+            Show-VpsHelp '输入 y/yes/是 表示确认；输入 n/no/否 表示拒绝；直接按 Enter/回车采用提示中的默认值。'
+            & $showPrompt
             continue
         }
         if ($AllowBack -and $answer -eq '0') {
@@ -316,12 +332,13 @@ function Read-VpsMenu {
             Write-Host ("  {0}. {1}" -f ($i + 1), $Options[$i])
         }
         if ($AllowBack) { Write-Host ("  0. {0}" -f $BackLabel) }
+        Write-Host ("  默认项：{0}（直接按 Enter/回车采用）" -f $Default) -ForegroundColor DarkGray
         Write-Host '  clear / cls. 清除当前屏幕输出' -ForegroundColor DarkGray
         Write-Host '  help / h. 查看帮助说明' -ForegroundColor DarkGray
     }
     & $showMenu
     while ($true) {
-        $raw = Read-Host "请选择 [$Default]"
+        $raw = Read-Host '请选择'
         if ($null -eq $raw) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         if (Test-VpsClearCommand $raw) {
             Clear-VpsScreen
@@ -361,6 +378,25 @@ function Get-VpsNavigationMessage {
         return '已取消当前操作，未开始执行新的远端模块。'
     }
     return '已返回上一级。'
+}
+
+function Wait-VpsReturnToMainMenu {
+    [CmdletBinding()]
+    param()
+
+    Write-Host ''
+    if ([Console]::IsInputRedirected) {
+        Write-VpsUi '当前操作已停止并返回主菜单。' Info
+        return
+    }
+    try {
+        Write-Host '请按任意键返回主菜单 . . .' -NoNewline
+        [void][Console]::ReadKey($true)
+        Write-Host ''
+    }
+    catch {
+        [void](Read-Host '请按 Enter/回车返回主菜单')
+    }
 }
 
 function ConvertFrom-VpsSecureString {
@@ -756,6 +792,17 @@ function Test-VpsNodeName {
     return -not [string]::IsNullOrWhiteSpace($Value) -and $Value -match '^[A-Za-z0-9][A-Za-z0-9._-]{1,79}$'
 }
 
+function Get-MxhAddressFamilyNodeName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BaseName,
+        [Parameter(Mandatory)][ValidateSet('IPv4', 'IPv6')][string]$AddressFamily,
+        [Parameter(Mandatory)][bool]$DualStack
+    )
+    if (-not $DualStack) { return $BaseName }
+    return "$BaseName-$AddressFamily"
+}
+
 function Test-VpsHostName {
     param([string]$Value)
     return -not [string]::IsNullOrWhiteSpace($Value) -and
@@ -821,6 +868,31 @@ function Resolve-VpsXrayVersion {
     }
 }
 
+function Show-VpsXrayVersionSelection {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('FixedVerified', 'LatestStable')][string]$Channel,
+        [Parameter(Mandatory)][string]$ResolvedVersion,
+        [Parameter(Mandatory)][string]$FixedVersion,
+        [ValidateSet('部署', '升级')][string]$Action = '部署'
+    )
+
+    if ($Channel -eq 'LatestStable') {
+        Write-VpsUi 'Xray 版本来源：XTLS/Xray-core 官方最新稳定版（LatestStable）。' Info
+        Write-VpsUi "本次实际$($Action)版本：Xray $ResolvedVersion。" Success
+        if ($ResolvedVersion -eq $FixedVersion) {
+            Write-VpsUi "版本对比：官方 latest 与项目固定验证版当前同为 Xray $ResolvedVersion；本次版本来源仍是 LatestStable。" Info
+        }
+        else {
+            Write-VpsUi "版本对比：官方 latest 为 Xray $ResolvedVersion，项目固定验证版为 Xray $FixedVersion；本次采用官方 latest。" Info
+        }
+        return
+    }
+
+    Write-VpsUi 'Xray 版本来源：项目当前固定验证版（FixedVerified）。' Info
+    Write-VpsUi "本次实际$($Action)版本：Xray $ResolvedVersion。" Success
+}
+
 function New-VpsInteractivePlan {
     [CmdletBinding()]
     param(
@@ -833,7 +905,7 @@ function New-VpsInteractivePlan {
     Write-Host ''
     Write-Host 'MXH VPS Deploy - 新部署向导' -ForegroundColor White
     Write-Host '支持初始密码或服务商现有私钥；现有 OpenSSH 私钥默认复用，也可明确选择生成新的管理密钥。' -ForegroundColor DarkGray
-    Write-Host '所有可返回的文本、是/否和编号输入统一使用 0；b/back 均按普通内容处理。第一项输入 0 返回主菜单。' -ForegroundColor DarkGray
+    Write-Host '返回统一输入 0；第一项输入 0 返回主菜单。' -ForegroundColor DarkGray
 
     $defaultInstanceRoot = [IO.Path]::GetFullPath($InstanceRoot.Trim().Trim('"')).TrimEnd('\', '/')
 
@@ -1090,12 +1162,8 @@ function New-VpsInteractivePlan {
                 ) $default -AllowBack
                 $wizard.XrayVersionChannel = if ($choice -eq 2) { 'LatestStable' } else { 'FixedVerified' }
                 $wizard.XrayVersion = Resolve-VpsXrayVersion -ProjectRoot $ProjectRoot -Channel $wizard.XrayVersionChannel
-                if ($wizard.XrayVersionChannel -eq 'LatestStable') {
-                    $sameVersion = if ($wizard.XrayVersion -eq [string]$versions.xray.version) { '；当前恰好与固定验证版相同' } else { '' }
-                    Write-VpsUi "已选择官方最新稳定版通道；当前在线解析为 Xray $($wizard.XrayVersion)$sameVersion。部署计划仍记录 LatestStable。" Info
-                }
-                else { Write-VpsUi "已选择固定验证版通道：Xray $($wizard.XrayVersion)。" Info }
-                Write-VpsUi '这里固定并校验的是 Xray 安装脚本来源，不会把 LatestStable 通道改写成固定版本通道。' Muted
+                Show-VpsXrayVersionSelection -Channel $wizard.XrayVersionChannel `
+                    -ResolvedVersion $wizard.XrayVersion -FixedVersion ([string]$versions.xray.version) -Action '部署'
             }
         },
         [pscustomobject]@{
@@ -1267,7 +1335,7 @@ function New-VpsInteractivePlan {
             Id = 'landing-transit-tag'; ShouldRun = { $wizard.Role -eq 'ShadowsocksLanding' }; Run = {
                 $wizard.ClientTransitTag = Read-VpsText '客户端链式连接使用的入口组/tag' -Default ([string]$wizard.ClientTransitTag) -AllowBack -Validate {
                     param($v)
-                    -not [string]::IsNullOrWhiteSpace($v) -and $v -notin @('Proxy', "$($wizard.NodeName)-IPv4", "$($wizard.NodeName)-IPv6")
+                    -not [string]::IsNullOrWhiteSpace($v) -and $v -notin @('Proxy', [string]$wizard.NodeName, "$($wizard.NodeName)-IPv4", "$($wizard.NodeName)-IPv6")
                 } -ValidationMessage '入口组/tag 不能与生成的 Proxy 或落地节点名称重复。'
             }
         },
@@ -1356,6 +1424,12 @@ function New-VpsInteractivePlan {
         [ordered]@{
         SchemaVersion = 3
         CreatedAt = (Get-Date).ToString('o')
+        DeploymentTransaction = [ordered]@{
+            SchemaVersion = 1
+            Id = ([Guid]::NewGuid().ToString('N'))
+            Status = 'Planned'
+            RollbackScope = 'ManagedStateWithRecoveryKey'
+        }
         Provider = $wizard.Provider
         Instance = $wizard.Instance
         NodeName = $wizard.NodeName
@@ -1734,7 +1808,8 @@ function Invoke-VpsProcess {
         [Parameter(Mandatory)] [string]$FilePath,
         [string[]]$ArgumentList = @(),
         [AllowNull()] [string]$InputText,
-        [int]$TimeoutSeconds = 300
+        [int]$TimeoutSeconds = 300,
+        [string]$ProgressActivity
     )
 
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
@@ -1746,6 +1821,7 @@ function Invoke-VpsProcess {
     $startInfo.RedirectStandardInput = $null -ne $InputText
     $startInfo.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
     $startInfo.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    $startInfo.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
     foreach ($argument in $ArgumentList) { [void]$startInfo.ArgumentList.Add([string]$argument) }
 
     $process = [Diagnostics.Process]::new()
@@ -1753,13 +1829,55 @@ function Invoke-VpsProcess {
     if (-not $process.Start()) { throw "无法启动进程：$FilePath" }
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $progressShown = $false
+    $lastProgressLength = 0
+    $lastProgressElapsed = ''
     if ($null -ne $InputText) {
         $process.StandardInput.Write($InputText)
         $process.StandardInput.Close()
     }
-    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-        try { $process.Kill($true) } catch { }
-        throw "进程执行超时（${TimeoutSeconds}s）：$FilePath"
+    try {
+        if ([string]::IsNullOrWhiteSpace($ProgressActivity)) {
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                try { $process.Kill($true) } catch { }
+                throw "进程执行超时（${TimeoutSeconds}s）：$FilePath"
+            }
+        }
+        else {
+            while (-not $process.WaitForExit(500)) {
+                if ($stopwatch.Elapsed.TotalSeconds -ge 2) {
+                    $progressShown = $true
+                    $elapsed = $stopwatch.Elapsed.ToString('hh\:mm\:ss')
+                    if ($elapsed -ne $lastProgressElapsed) {
+                        try {
+                            $progressText = "$ProgressActivity（已运行 $elapsed，任务仍在执行，请勿关闭窗口）"
+                            $padding = ' ' * [Math]::Max(0, $lastProgressLength - $progressText.Length)
+                            Write-Host ("`r" + $progressText + $padding) -NoNewline
+                            $lastProgressLength = $progressText.Length
+                            $lastProgressElapsed = $elapsed
+                        }
+                        catch { }
+                    }
+                }
+                if ($stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                    try { $process.Kill($true) } catch { }
+                    throw "进程执行超时（${TimeoutSeconds}s）：$FilePath"
+                }
+            }
+        }
+    }
+    finally {
+        $stopwatch.Stop()
+        if ($progressShown) {
+            try {
+                $elapsed = $stopwatch.Elapsed.ToString('hh\:mm\:ss')
+                $progressText = "$ProgressActivity（已结束，用时 $elapsed）"
+                $padding = ' ' * [Math]::Max(0, $lastProgressLength - $progressText.Length)
+                Write-Host ("`r" + $progressText + $padding)
+            }
+            catch { }
+        }
     }
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
@@ -1830,6 +1948,10 @@ function Get-VpsSshArguments {
         }
     }
     elseif (-not $Interactive) {
+        $arguments.Add('-o'); $arguments.Add('IdentitiesOnly=yes')
+        $arguments.Add('-o'); $arguments.Add('PreferredAuthentications=publickey')
+        $arguments.Add('-o'); $arguments.Add('PasswordAuthentication=no')
+        $arguments.Add('-o'); $arguments.Add('KbdInteractiveAuthentication=no')
         $arguments.Add('-o'); $arguments.Add('BatchMode=yes')
         $arguments.Add('-i'); $arguments.Add((Get-VpsSshKeyPath $Context))
     }
@@ -1856,6 +1978,21 @@ function Test-VpsSupportedSshPublicKey {
         $PublicKey.Trim(),
         '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+[A-Za-z0-9+/=]+(?:\s+.*)?$'
     )
+}
+
+function New-VpsBootstrapAccessCommand {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string]$PublicKey)
+
+    $quotedKey = ConvertTo-VpsShellSingleQuote $PublicKey
+    $projectRoot = Split-Path -Parent $PSScriptRoot
+    $assetPath = Join-Path $projectRoot 'assets\remote\bootstrap-access.sh'
+    if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+        throw "缺少远端引导脚本：$assetPath"
+    }
+    $scriptText = [IO.File]::ReadAllText($assetPath, [Text.Encoding]::UTF8).Replace("`r`n", "`n")
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scriptText))
+    return "printf '%s' '$encoded' | base64 -d | VPS_PARAM_PUBLIC_KEY=$quotedKey bash -s"
 }
 
 function Initialize-VpsSshKey {
@@ -1931,8 +2068,7 @@ function Initialize-VpsBootstrapAccess {
     }
 
     $ssh = Get-VpsCommandPath 'ssh.exe'
-    $quotedKey = ConvertTo-VpsShellSingleQuote $publicKey
-    $remote = "umask 077; install -d -m 700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; grep -qxF $quotedKey /root/.ssh/authorized_keys || printf '%s\\n' $quotedKey >> /root/.ssh/authorized_keys; printf 'VPSDEPLOY_BOOTSTRAP_OK\\n'"
+    $remote = New-VpsBootstrapAccessCommand -PublicKey $publicKey
     $bootstrapAuth = if ($Context.Plan.Server.Contains('BootstrapAuth')) {
         [string]$Context.Plan.Server.BootstrapAuth
     }
@@ -1962,15 +2098,34 @@ function Initialize-VpsBootstrapAccess {
         if ($Context.NonInteractive) {
             throw '非交互模式下实例专用公钥尚不可用，无法请求初始 root 密码。'
         }
-        Write-VpsUi '即将首次连接。若出现密码提示，请输入服务商提供的 root 初始密码。' Warning
         $arguments = Get-VpsSshArguments -Context $Context -Port $rootPort -User 'root' -Interactive
-        & $ssh @arguments $remote
-        if ($LASTEXITCODE -ne 0) { throw '初始密码登录或公钥写入失败。旧入口未做任何关闭操作。' }
+        while ($true) {
+            Write-VpsUi '即将打开 OpenSSH 密码提示，请输入服务商提供的 root 初始密码。' Warning
+            Write-VpsUi '密码及粘贴内容不会显示字符或星号；Windows Terminal 可用鼠标右键或 Ctrl+Shift+V 粘贴，确认剪贴板没有首尾空格或换行。' Info
+            & $ssh @arguments $remote
+            if ($LASTEXITCODE -eq 0) {
+                Write-VpsUi '初始密码认证成功，管理公钥已提交到服务器；正在进行独立公钥复验。' Success
+                break
+            }
+            Write-VpsUi '本次初始 SSH 登录未成功，可能是密码、用户名、端口、服务端登录策略或网络问题。尚未关闭任何旧入口。' Error
+            $retry = Read-VpsMenu '如何处理初始 SSH 登录失败' @(
+                '重新打开 SSH 密码提示',
+                '停止本次部署并保留计划，稍后使用继续模式'
+            ) 1
+            if ($retry -ne 1) { throw '用户停止初始 SSH 登录重试。旧入口未做任何关闭操作。' }
+        }
     }
 
-    $verified = Invoke-VpsSshCommand -Context $Context -User 'root' -Port $rootPort `
-        -Command "printf 'VPSDEPLOY_KEY_OK\\n'"
-    if ($verified.StdOut -notmatch 'VPSDEPLOY_KEY_OK') { throw 'root 公钥复验失败。' }
+    $verified = $null
+    foreach ($attempt in 1..3) {
+        $verified = Invoke-VpsSshCommand -Context $Context -User 'root' -Port $rootPort `
+            -Command "printf 'VPSDEPLOY_KEY_OK\\n'" -AllowFailure
+        if ($verified.ExitCode -eq 0 -and $verified.StdOut -match 'VPSDEPLOY_KEY_OK') { break }
+        if ($attempt -lt 3) { Start-Sleep -Milliseconds 800 }
+    }
+    if ($verified.ExitCode -ne 0 -or $verified.StdOut -notmatch 'VPSDEPLOY_KEY_OK') {
+        throw '初始登录认证已经成功，但新管理公钥复验失败；这不是初始密码错误。可能是服务端禁用了公钥登录、使用了非标准 AuthorizedKeysFile，或本机 OpenSSH 没有采用该私钥。旧入口未做任何关闭操作。'
+    }
     Write-VpsUi 'root 公钥登录已验证。' Success
 }
 
@@ -1984,14 +2139,16 @@ function Invoke-VpsSshCommand {
         [AllowNull()] [string]$InputText,
         [int]$TimeoutSeconds = 120,
         [switch]$AllowFailure,
-        [switch]$SensitiveOutput
+        [switch]$SensitiveOutput,
+        [string]$ProgressActivity
     )
 
     $ssh = Get-VpsCommandPath 'ssh.exe'
     $arguments = [Collections.Generic.List[string]]::new()
     foreach ($item in (Get-VpsSshArguments -Context $Context -Port $Port -User $User)) { $arguments.Add($item) }
     $arguments.Add($Command)
-    $result = Invoke-VpsProcess -FilePath $ssh -ArgumentList $arguments.ToArray() -InputText $InputText -TimeoutSeconds $TimeoutSeconds
+    $result = Invoke-VpsProcess -FilePath $ssh -ArgumentList $arguments.ToArray() -InputText $InputText `
+        -TimeoutSeconds $TimeoutSeconds -ProgressActivity $ProgressActivity
     if (-not $SensitiveOutput) {
         Write-VpsLog -Context $Context -Message "SSH $User port=$Port exit=$($result.ExitCode)"
     }
@@ -2048,25 +2205,31 @@ function Invoke-VpsRemoteScript {
         [string]$User = 'root',
         [int]$TimeoutSeconds = 600,
         [switch]$AllowFailure,
-        [switch]$SensitiveOutput
+        [switch]$SensitiveOutput,
+        [string]$ProgressActivity
     )
 
     if (-not $Port) { $Port = [int]$Context.State.CurrentManagementPort }
     $script = New-VpsRemoteScriptPayload -Context $Context -Asset $Asset -Parameters $Parameters
+    if ([string]::IsNullOrWhiteSpace($ProgressActivity)) {
+        $ProgressActivity = "远程步骤执行中：$Asset"
+    }
     return Invoke-VpsSshCommand -Context $Context -User $User -Port $Port -Command 'bash -s' `
-        -InputText $script -TimeoutSeconds $TimeoutSeconds -AllowFailure:$AllowFailure -SensitiveOutput:$SensitiveOutput
+        -InputText $script -TimeoutSeconds $TimeoutSeconds -AllowFailure:$AllowFailure `
+        -SensitiveOutput:$SensitiveOutput -ProgressActivity $ProgressActivity
 }
 
 function Get-VpsMarkerValue {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)] [string]$Text,
+        [Parameter(Mandatory)] [AllowNull()] [AllowEmptyString()] [string]$Text,
         [Parameter(Mandatory)] [string]$Name,
         [switch]$Required
     )
 
     if ($Name -notmatch '^[A-Z][A-Z0-9_]*$') { throw "标记名称无效：$Name" }
-    $match = [regex]::Match($Text, "(?m)^VPSDEPLOY_$([regex]::Escape($Name))_B64=([A-Za-z0-9+/=]*)$")
+    $markerText = if ($null -eq $Text) { '' } else { $Text }
+    $match = [regex]::Match($markerText, "(?m)^VPSDEPLOY_$([regex]::Escape($Name))_B64=([A-Za-z0-9+/=]*)$")
     if (-not $match.Success) {
         if ($Required) { throw "远端结果缺少标记：$Name" }
         return $null
@@ -2106,7 +2269,8 @@ function Invoke-VpsScpDownload {
         [Parameter(Mandatory)] $Context,
         [Parameter(Mandatory)] [string]$RemotePath,
         [Parameter(Mandatory)] [string]$LocalPath,
-        [int]$Port
+        [int]$Port,
+        [string]$ProgressActivity
     )
 
     if (-not $Port) { $Port = [int]$Context.State.CurrentManagementPort }
@@ -2117,7 +2281,7 @@ function Invoke-VpsScpDownload {
         '-i', (Get-VpsSshKeyPath $Context), '-P', $Port.ToString(),
         "root@$($Context.Plan.Server.IPv4):$RemotePath", $LocalPath
     )
-    $result = Invoke-VpsProcess -FilePath $scp -ArgumentList $args -TimeoutSeconds 180
+    $result = Invoke-VpsProcess -FilePath $scp -ArgumentList $args -TimeoutSeconds 180 -ProgressActivity $ProgressActivity
     if ($result.ExitCode -ne 0) { throw "下载远端配置失败：$RemotePath" }
     Protect-VpsPrivateFile -Path $LocalPath
 }
@@ -2363,7 +2527,8 @@ function New-MxhAnyTlsMihomoProfileText {
     )
     $server = if ($AddressFamily -eq 'IPv6') { [string]$Context.Plan.Server.IPv6 } else { [string]$Context.Plan.Server.IPv4 }
     if ([string]::IsNullOrWhiteSpace($server)) { throw "计划未配置 $AddressFamily 地址。" }
-    $nodeName = "$($Context.Plan.NodeName)-AnyTLS-$AddressFamily"
+    $nodeName = Get-MxhAddressFamilyNodeName -BaseName ([string]$Context.Plan.NodeName) `
+        -AddressFamily $AddressFamily -DualStack ([bool]$Context.Plan.Server.IPv6)
     $lines = [Collections.Generic.List[string]]::new()
     foreach ($line in @(
             "mixed-port: $MixedPort", 'allow-lan: false', 'bind-address: 127.0.0.1',
@@ -2478,7 +2643,8 @@ function New-MxhMihomoProfileText {
     $s = $Context.Secrets.Xray
     $realityTarget = Get-MxhRealityTargetSettings -Plan $Context.Plan
     $nodeBase = [string]$Context.Plan.NodeName
-    $node4 = "$nodeBase-IPv4"
+    $dualStack = [bool]$Context.Plan.Server.IPv6
+    $node4 = Get-MxhAddressFamilyNodeName -BaseName $nodeBase -AddressFamily IPv4 -DualStack $dualStack
     $lines = [Collections.Generic.List[string]]::new()
     foreach ($line in @(
             "mixed-port: $MixedPort", 'allow-lan: false', 'bind-address: 127.0.0.1',
@@ -2509,7 +2675,7 @@ function New-MxhMihomoProfileText {
     }
     if ($AddressFamily -in @('IPv6', 'Dual')) {
         if (-not $Context.Plan.Server.IPv6) { throw '计划未配置 IPv6，不能生成 IPv6 Reality 验收配置。' }
-        $node6 = "$nodeBase-IPv6"
+        $node6 = Get-MxhAddressFamilyNodeName -BaseName $nodeBase -AddressFamily IPv6 -DualStack $dualStack
         Add-MxhNode $node6 ([string]$Context.Plan.Server.IPv6)
         $nodes.Add($node6)
     }
@@ -2606,12 +2772,13 @@ function New-MxhLandingMihomoProfileText {
         $lines.Add("    dialer-proxy: $(ConvertTo-MxhYamlString $transitTag)")
     }
 
-    $primaryName = "$($Context.Plan.NodeName)-IPv4"
+    $dualStack = [bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled
+    $primaryName = Get-MxhAddressFamilyNodeName -BaseName ([string]$Context.Plan.NodeName) -AddressFamily IPv4 -DualStack $dualStack
     Add-MxhLandingNode $primaryName ([string]$credentials.PrimaryUserKey)
     $nodes = [Collections.Generic.List[string]]::new()
     $nodes.Add($primaryName)
     if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
-        $secondaryName = "$($Context.Plan.NodeName)-IPv6"
+        $secondaryName = Get-MxhAddressFamilyNodeName -BaseName ([string]$Context.Plan.NodeName) -AddressFamily IPv6 -DualStack $dualStack
         Add-MxhLandingNode $secondaryName ([string]$credentials.SecondaryUserKey)
         $nodes.Add($secondaryName)
     }
@@ -2753,7 +2920,7 @@ function Invoke-MxhProxyAcceptanceRequests {
     $httpsErrors = [Collections.Generic.List[string]]::new()
     foreach ($uri in @('https://www.gstatic.com/generate_204', 'https://cp.cloudflare.com/generate_204')) {
         try {
-            $response = Invoke-WebRequest -Uri $uri -Proxy $Proxy -TimeoutSec 25
+            $response = Invoke-WebRequest -Uri $uri -Proxy $Proxy -TimeoutSec 25 -ProgressAction SilentlyContinue
             if ($response.StatusCode -ne 204) { throw "HTTP $($response.StatusCode)" }
             $httpsEndpoint = $uri
             break
@@ -2767,7 +2934,7 @@ function Invoke-MxhProxyAcceptanceRequests {
     $ipErrors = [Collections.Generic.List[string]]::new()
     foreach ($uri in @('https://api64.ipify.org', 'https://icanhazip.com')) {
         try {
-            $candidate = ([string](Invoke-RestMethod -Uri $uri -Proxy $Proxy -TimeoutSec 25)).Trim()
+            $candidate = ([string](Invoke-RestMethod -Uri $uri -Proxy $Proxy -TimeoutSec 25 -ProgressAction SilentlyContinue)).Trim()
             $parsed = $null
             if (-not [Net.IPAddress]::TryParse($candidate, [ref]$parsed)) { throw '返回内容不是 IP 地址' }
             $egress = $candidate
@@ -2881,6 +3048,218 @@ function Invoke-MxhSingBoxEgressTest {
     }
 }
 
+function Test-MxhPublicIpv6SourceAddress {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [Net.IPAddress]$Address)
+
+    if ($Address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetworkV6) { return $false }
+    if ([Net.IPAddress]::IsLoopback($Address) -or $Address.IsIPv6LinkLocal -or $Address.IsIPv6Multicast -or $Address.IsIPv6SiteLocal) { return $false }
+    $bytes = $Address.GetAddressBytes()
+    # fc00::/7 is commonly used by TUN adapters. A connection sourced from it
+    # does not prove that the Windows host has a usable native/public IPv6 path.
+    return (($bytes[0] -band 0xfe) -ne 0xfc)
+}
+
+function Test-MxhControllerValidationPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] $Target,
+        [Parameter(Mandatory)] [ValidateSet('Reality', 'AnyTLS')] [string]$Protocol
+    )
+
+    $metadata = Get-MxhValidationTargetMetadata -Target $Target -Protocol $Protocol -Plan $Context.Plan
+    if ($metadata.AddressFamily -eq 'IPv4') {
+        return [ordered]@{ Usable = $true; AddressFamily = 'IPv4'; Reason = 'IPv4LocalValidation' }
+    }
+    $serverText = ([string]$Context.Plan.Server.IPv6).Split('/')[0].Trim('[', ']')
+    $serverAddress = $null
+    if (-not [Net.IPAddress]::TryParse($serverText, [ref]$serverAddress) -or
+        $serverAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetworkV6) {
+        return [ordered]@{ Usable = $false; AddressFamily = 'IPv6'; Reason = '计划中的 IPv6 地址无效。' }
+    }
+    $client = [Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::InterNetworkV6)
+    try {
+        $connect = $client.ConnectAsync($serverAddress, [int]$metadata.ServerPort)
+        if (-not $connect.Wait([TimeSpan]::FromSeconds(12))) {
+            return [ordered]@{ Usable = $false; AddressFamily = 'IPv6'; Reason = '本机到目标 IPv6 的 TCP 连接超时。' }
+        }
+        $local = ([Net.IPEndPoint]$client.Client.LocalEndPoint).Address
+        if (-not (Test-MxhPublicIpv6SourceAddress -Address $local)) {
+            return [ordered]@{ Usable = $false; AddressFamily = 'IPv6'; Reason = '连接使用了回环、链路本地或 TUN ULA 源地址，不能作为原生 IPv6 验收。' }
+        }
+        return [ordered]@{ Usable = $true; AddressFamily = 'IPv6'; Reason = 'PublicIpv6Source'; LocalAddress = $local.ToString() }
+    }
+    catch {
+        return [ordered]@{ Usable = $false; AddressFamily = 'IPv6'; Reason = "本机 IPv6 路径不可用：$($_.Exception.Message)" }
+    }
+    finally { $client.Dispose() }
+}
+
+function Get-MxhManagedValidationProbePlans {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Context)
+
+    $instanceRoot = $null
+    if ($Context.Plan.Contains('Paths') -and $Context.Plan.Paths.Contains('InstanceDirectory') -and $Context.Plan.Paths.InstanceDirectory) {
+        $providerDirectory = Split-Path -Parent ([string]$Context.Plan.Paths.InstanceDirectory)
+        $instanceRoot = Split-Path -Parent $providerDirectory
+    }
+    if (-not $instanceRoot -or -not (Test-Path -LiteralPath $instanceRoot -PathType Container)) {
+        $archiveDirectory = Split-Path -Parent $Context.PlanPath
+        $instanceDirectory = Split-Path -Parent $archiveDirectory
+        $providerDirectory = Split-Path -Parent $instanceDirectory
+        $instanceRoot = Split-Path -Parent $providerDirectory
+    }
+    if (-not $instanceRoot -or -not (Test-Path -LiteralPath $instanceRoot -PathType Container)) { return @() }
+    $current = [IO.Path]::GetFullPath($Context.PlanPath)
+    $candidates = [Collections.Generic.List[object]]::new()
+    foreach ($file in @(Get-ChildItem -LiteralPath $instanceRoot -Filter 'deployment-plan.json' -File -Recurse -ErrorAction SilentlyContinue)) {
+        if ([IO.Path]::GetFullPath($file.FullName).Equals($current, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        try {
+            $plan = ConvertTo-MxhCompatiblePlan -Plan (Read-VpsJsonHashtable -Path $file.FullName)
+            $canonicalPlanPath = Join-Path ([string]$plan.Paths.Archive) 'deployment-plan.json'
+            if (-not [IO.Path]::GetFullPath($file.FullName).Equals([IO.Path]::GetFullPath($canonicalPlanPath), [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $statePath = Join-Path ([string]$plan.Paths.Archive) 'deployment-state.json'
+            if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { continue }
+            $state = Read-VpsJsonHashtable -Path $statePath
+            if (-not $state.Contains('CurrentManagementPort')) { continue }
+            $instanceLabel = if ($plan.Contains('InstanceName')) { [string]$plan.InstanceName } else { [string]$plan.Instance }
+            $label = "$([string]$plan.Provider) / $instanceLabel / $([string]$plan.NodeName)"
+            $candidates.Add([pscustomobject]@{ Label = $label; PlanPath = $file.FullName })
+        }
+        catch { }
+    }
+    return $candidates.ToArray()
+}
+
+function Test-MxhExternalProbeIpv6Connectivity {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $ProbeContext)
+
+    $python = @'
+import socket
+s=socket.socket(socket.AF_INET6,socket.SOCK_STREAM)
+s.settimeout(12)
+s.connect(("2606:4700:4700::1111",443,0,0))
+s.close()
+print("VPSDEPLOY_PROBE_IPV6_OK")
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($python.Replace("`r`n", "`n")))
+    $result = Invoke-VpsSshCommand -Context $ProbeContext -User root -Port ([int]$ProbeContext.State.CurrentManagementPort) `
+        -Command "printf '%s' '$encoded' | base64 -d | python3" -TimeoutSeconds 45 -AllowFailure
+    return $result.ExitCode -eq 0 -and $result.StdOut -match 'VPSDEPLOY_PROBE_IPV6_OK'
+}
+
+function Resolve-MxhExternalValidationProbeContext {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] $Context)
+
+    $savedPath = $null
+    if ($Context.State.Contains('ClientValidation') -and $Context.State.ClientValidation.Contains('ExternalProbePlanPath')) {
+        $savedPath = [string]$Context.State.ClientValidation.ExternalProbePlanPath
+    }
+    $candidates = @(Get-MxhManagedValidationProbePlans -Context $Context)
+    $selectedPath = $null
+    if ($savedPath -and (Test-Path -LiteralPath $savedPath -PathType Leaf)) {
+        $selectedPath = $savedPath
+    }
+    elseif ($Context.NonInteractive) {
+        throw '本机 IPv6 路径不可用，且没有预先选择外部受管 VPS 验收计划。请以交互模式选择一台可信 VPS。'
+    }
+    else {
+        if (-not $candidates.Count) { throw '本机 IPv6 路径不可用，且没有发现可作为外部验收入口的受管 VPS。' }
+        Write-VpsUi '本机 IPv6 被 TUN/路由截获或不可用；不会改动本机网络。请选择一台可信的受管 VPS 临时执行 IPv6 客户端验收。' Warning
+        $choice = Read-VpsMenu '外部 IPv6 验收入口' @($candidates | ForEach-Object Label) 1 -AllowBack
+        $selectedPath = [string]$candidates[$choice - 1].PlanPath
+    }
+    $probe = New-MxhReadonlyContextFromPlan -ProjectRoot $Context.ProjectRoot -PlanPath $selectedPath
+    $probe.DryRun = $false
+    $probe.NonInteractive = $true
+    if (-not (Test-MxhExternalProbeIpv6Connectivity -ProbeContext $probe)) {
+        throw '所选受管 VPS 没有可用的原生 IPv6 出口，不能承担 IPv6 客户端验收。'
+    }
+    if (-not $Context.State.Contains('ClientValidation')) { $Context.State.ClientValidation = [ordered]@{} }
+    $Context.State.ClientValidation.ExternalProbePlanPath = $selectedPath
+    $Context.State.ClientValidation.ExternalProbeNode = [string]$probe.Plan.NodeName
+    Save-VpsContext -Context $Context
+    return $probe
+}
+
+function Invoke-MxhExternalValidationTarget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] $ProbeContext,
+        [Parameter(Mandatory)] $Target,
+        [Parameter(Mandatory)] [ValidateSet('Reality', 'AnyTLS')] [string]$Protocol
+    )
+
+    $probeArchitecture = Get-VpsSupportedAssetArchitecture -Architecture ([string]$ProbeContext.State.Audit.Architecture)
+    $mihomoAsset = $Context.Versions.mihomo.assets.$probeArchitecture
+    $singBoxAsset = $Context.Versions.sing_box.assets.$probeArchitecture
+    if (-not $mihomoAsset -or -not $singBoxAsset) { throw "外部验收入口架构没有固定核心资产：$probeArchitecture" }
+    $mihomoProfile = [IO.File]::ReadAllText([string]$Target.MihomoProfile, [Text.Encoding]::UTF8)
+    $singBoxProfile = [IO.File]::ReadAllText([string]$Target.SingBoxProfile, [Text.Encoding]::UTF8)
+    $result = Invoke-VpsRemoteScript -Context $ProbeContext -Asset 'reality-anytls-external-probe.sh' -Parameters @{
+        MIHOMO_VERSION = [string]$Context.Versions.mihomo.version
+        MIHOMO_ASSET_NAME = [string]$mihomoAsset.name
+        MIHOMO_SHA256 = [string]$mihomoAsset.sha256
+        SING_BOX_VERSION = [string]$Context.Versions.sing_box.version
+        SING_BOX_ASSET_NAME = [string]$singBoxAsset.name
+        SING_BOX_SHA256 = [string]$singBoxAsset.sha256
+        MIHOMO_PROFILE_B64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($mihomoProfile))
+        SING_BOX_PROFILE_B64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($singBoxProfile))
+        MIHOMO_PORT = [string]$Target.MixedPort
+        SING_BOX_PORT = [string]$Target.MixedPort
+    } -TimeoutSeconds 1200 -SensitiveOutput -ProgressActivity "外部受管 VPS 正在执行 $Protocol IPv6 双核心真实验收"
+    if ($result.StdOut -notmatch 'VPSDEPLOY_EXTERNAL_ACCEPTANCE_OK') { throw '外部受管 VPS 未确认真实协议验收完成。' }
+    return (Get-VpsMarkerValue -Text $result.StdOut -Name EXTERNAL_ACCEPTANCE -Required) | ConvertFrom-Json -AsHashtable
+}
+
+function Get-MxhValidationTargetMetadata {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Target,
+        [Parameter(Mandatory)] [ValidateSet('Reality', 'AnyTLS')] [string]$Protocol,
+        [Parameter(Mandatory)] [Collections.IDictionary]$Plan
+    )
+
+    $readOptional = {
+        param($Object, [string]$Name, $Default)
+        $found = $false
+        $value = $null
+        if ($Object -is [Collections.IDictionary]) {
+            if ($Object.Contains($Name)) {
+                $found = $true
+                $value = $Object[$Name]
+            }
+        }
+        else {
+            $property = $Object.PSObject.Properties[$Name]
+            if ($null -ne $property) {
+                $found = $true
+                $value = $property.Value
+            }
+        }
+        if (-not $found -or $null -eq $value -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) {
+            return $Default
+        }
+        return $value
+    }
+
+    $addressFamily = [string](& $readOptional $Target 'AddressFamily' '')
+    if ($addressFamily -notin @('IPv4', 'IPv6')) {
+        throw "$Protocol 客户端验收目标缺少有效 AddressFamily。"
+    }
+    $defaultPort = if ($Protocol -eq 'Reality') { [int]$Plan.Ports.XrayPrimary } else { [int]$Plan.Ports.AnyTlsPrimary }
+    return [ordered]@{
+        Entry = [string](& $readOptional $Target 'Entry' 'primary')
+        AddressFamily = $addressFamily
+        ServerPort = [int](& $readOptional $Target 'ServerPort' $defaultPort)
+    }
+}
+
 function Invoke-MxhRealClientValidation {
     [CmdletBinding()]
     param(
@@ -2891,6 +3270,16 @@ function Invoke-MxhRealClientValidation {
     if (-not $exports -or -not $exports.ValidationTargets) { throw "$Protocol 缺少逐地址族客户端验收配置，请先重新生成客户端导出。" }
     $coreStates = if ($exports.CoreValidation) { $exports.CoreValidation } else { [ordered]@{} }
     $results = [Collections.Generic.List[object]]::new()
+    $localTargets = [Collections.Generic.List[object]]::new()
+    $externalTargets = [Collections.Generic.List[object]]::new()
+    $probeContext = $null
+    foreach ($target in @($exports.ValidationTargets)) {
+        $path = Test-MxhControllerValidationPath -Context $Context -Target $target -Protocol $Protocol
+        if ($path.Usable) { $localTargets.Add($target); continue }
+        Write-VpsUi "$Protocol 的 IPv6 本机验收路径不可用：$($path.Reason)" Warning
+        if (-not $probeContext) { $probeContext = Resolve-MxhExternalValidationProbeContext -Context $Context }
+        $externalTargets.Add($target)
+    }
     foreach ($coreName in @('mihomo', 'sing-box')) {
         $coreState = if ($coreStates.Contains($coreName)) { $coreStates[$coreName] } else { Resolve-VpsClientValidationCore -Context $Context -Core $coreName }
         if ($coreState.Status -eq 'SkippedByUser') {
@@ -2898,9 +3287,10 @@ function Invoke-MxhRealClientValidation {
             continue
         }
         if (-not (Test-Path -LiteralPath $coreState.Path -PathType Leaf)) { $coreState = Resolve-VpsClientValidationCore -Context $Context -Core $coreName }
-        foreach ($target in @($exports.ValidationTargets)) {
-            $entryName = if ($target.Entry) { [string]$target.Entry } else { 'primary' }
-            $label = "$($Protocol.ToLowerInvariant())-$coreName-$entryName-$([string]$target.AddressFamily)"
+        foreach ($target in $localTargets) {
+            $metadata = Get-MxhValidationTargetMetadata -Target $target -Protocol $Protocol -Plan $Context.Plan
+            $entryName = [string]$metadata.Entry
+            $label = "$($Protocol.ToLowerInvariant())-$coreName-$entryName-$([string]$metadata.AddressFamily)"
             $acceptance = if ($coreName -eq 'mihomo') {
                 Invoke-MxhMihomoEgressTest -Context $Context -CorePath $coreState.Path -ProfilePath $target.MihomoProfile `
                     -MixedPort ([int]$target.MixedPort) -Label $label -Detailed
@@ -2912,13 +3302,34 @@ function Invoke-MxhRealClientValidation {
             $results.Add([ordered]@{
                     Core = $coreName
                     Entry = $entryName
-                    AddressFamily = [string]$target.AddressFamily
-                    ServerPort = if ($target.ServerPort) { [int]$target.ServerPort } else { [int]$Context.Plan.Ports.AnyTlsPrimary }
+                    AddressFamily = [string]$metadata.AddressFamily
+                    ServerPort = [int]$metadata.ServerPort
                     Status = 'Passed'
                     Egress = [string]$acceptance.Egress
                     HttpsEndpoint = [string]$acceptance.HttpsEndpoint
                     IpEndpoint = [string]$acceptance.IpEndpoint
                     UdpDnsEndpoint = [string]$acceptance.UdpDnsEndpoint
+                    TestedAt = (Get-Date).ToString('o')
+                })
+        }
+    }
+    foreach ($target in $externalTargets) {
+        $metadata = Get-MxhValidationTargetMetadata -Target $target -Protocol $Protocol -Plan $Context.Plan
+        $entryName = [string]$metadata.Entry
+        $external = Invoke-MxhExternalValidationTarget -Context $Context -ProbeContext $probeContext -Target $target -Protocol $Protocol
+        foreach ($item in @($external.results)) {
+            $results.Add([ordered]@{
+                    Core = [string]$item.core
+                    Entry = $entryName
+                    AddressFamily = [string]$metadata.AddressFamily
+                    ServerPort = [int]$metadata.ServerPort
+                    Status = 'Passed'
+                    ValidationOrigin = "ManagedVps:$([string]$probeContext.Plan.NodeName)"
+                    Egress = [string]$item.egress
+                    EgressFamily = [string]$item.egress_family
+                    HttpsEndpoint = [string]$item.https_endpoint
+                    IpEndpoint = 'https://api64.ipify.org'
+                    UdpDnsEndpoint = '1.1.1.1'
                     TestedAt = (Get-Date).ToString('o')
                 })
         }
@@ -2998,6 +3409,17 @@ function Get-VpsModules {
     return $ordered
 }
 
+function Format-VpsModulePlanLines {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [object[]]$Modules)
+
+    if ($Modules.Count -eq 0) { return @() }
+    $idWidth = [int](($Modules | ForEach-Object { ([string]$_.Id).Length } | Measure-Object -Maximum).Maximum)
+    return @($Modules | ForEach-Object {
+        '  {0,3}  {1}  {2}' -f $_.Order, ([string]$_.Id).PadRight($idWidth), $_.Name
+    })
+}
+
 function Invoke-VpsModulePipeline {
     [CmdletBinding()]
     param(
@@ -3006,31 +3428,33 @@ function Invoke-VpsModulePipeline {
     )
 
     $modules = Get-VpsModules -ProjectRoot $Context.ProjectRoot
-    $selected = @($modules | Where-Object {
+    $eligible = @($modules | Where-Object {
             $Context.Plan.Role -in @($_.Roles) -and (& $_.IsEnabled $Context)
         })
-    if ($Context.Plan.Contains('Migration') -and [bool]$Context.Plan.Migration.Enabled) {
+    $selected = @($eligible)
+    if (-not $OnlyModule -and $Context.Plan.Contains('Migration') -and [bool]$Context.Plan.Migration.Enabled) {
         $migrationIds = @($Context.Plan.Migration.ModuleIds | ForEach-Object { [string]$_ })
         $selected = @($selected | Where-Object Id -in $migrationIds)
     }
     if ($OnlyModule) {
         $missing = @($OnlyModule | Where-Object { $_ -notin @($modules.Id) })
         if ($missing) { throw "未知模块：$($missing -join ', ')" }
-        $selected = @($selected | Where-Object Id -in $OnlyModule)
+        $selected = @($eligible | Where-Object Id -in $OnlyModule)
+        $unavailable = @($OnlyModule | Where-Object { $_ -notin @($selected.Id) })
+        if ($unavailable) { throw "显式模块在当前角色或状态不可用：$($unavailable -join ', ')" }
         Write-VpsUi '维护模式只运行显式模块，不会自动补跑缺失依赖。' Warning
     }
+    if ($selected.Count -eq 0) { throw '本次没有可运行模块；请检查计划角色、协议变更状态或显式模块选择。' }
 
     Write-Host ''
     Write-Host '本次模块计划：' -ForegroundColor Cyan
-    foreach ($module in $selected) {
-        Write-Host ("  {0,3}  {1,-24} {2}" -f $module.Order, $module.Id, $module.Name)
-    }
+    foreach ($line in (Format-VpsModulePlanLines -Modules $selected)) { Write-Host $line }
     if ($Context.DryRun) {
         Write-VpsUi 'DryRun：只显示计划，不连接服务器、不生成凭据、不改文件。' Success
         return
     }
     if (-not $Context.NonInteractive) {
-        Write-VpsUi '此处返回或取消不会连接 VPS；已确认的本地计划会保留，可稍后 Resume。' Muted
+        Write-VpsUi '此处返回或取消不会连接 VPS；已确认的本地计划会保留，可稍后选择【继续未完成部署】。' Muted
         if (-not (Read-VpsYesNo '确认按以上顺序开始？' $true -AllowBack)) {
             throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)
         }
@@ -3063,10 +3487,10 @@ function Invoke-VpsModulePipeline {
             Write-VpsUi "$($module.Name) 失败：$safeMessage" Error
             if ($Context.Plan.Contains('Migration') -and [bool]$Context.Plan.Migration.Enabled) {
                 Invoke-MxhProtocolMigrationRollback -Context $Context -Reason $safeMessage
-                Write-VpsUi '协议变更后续模块已停止；请确认变更前状态已经恢复，再使用继续模式。' Warning
+                Write-VpsUi '协议变更后续模块已停止；请确认变更前状态已经恢复，再选择【继续未完成部署】。' Warning
             }
             else {
-                Write-VpsUi '后续模块已停止；旧 SSH 入口不会由核心自动关闭。修复后使用继续模式。' Warning
+                Write-VpsUi '后续模块已停止；旧 SSH 入口不会由核心自动关闭。修复后选择【继续未完成部署】。' Warning
             }
             throw
         }
@@ -3176,11 +3600,266 @@ function Show-VpsPlanSummary {
     }
 }
 
+function Write-VpsAbandonedTransactionRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ArchivePath,
+        [Parameter(Mandatory)] [string]$Kind,
+        [Parameter(Mandatory)] [string]$PlanPath,
+        [Parameter(Mandatory)] [string]$StatePath,
+        [Parameter(Mandatory)] [string]$RecordId,
+        [int]$PreservedPackageCount = 0,
+        [bool]$SnapshotDeleted = $true,
+        [string]$PlanSha256,
+        [string]$StateSha256
+    )
+
+    if ($RecordId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$') { throw '放弃事务记录 ID 非法。' }
+    $history = Join-Path $ArchivePath 'abandoned-transactions'
+    [IO.Directory]::CreateDirectory($history) | Out-Null
+    $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+    $recordPath = Join-Path $history "$RecordId.json"
+    if (Test-Path -LiteralPath $recordPath -PathType Leaf) { return }
+    $record = [ordered]@{
+        SchemaVersion = 1
+        Kind = $Kind
+        Status = 'RolledBackAndAbandoned'
+        AbandonedAt = (Get-Date).ToString('o')
+        PlanSha256 = if ($PlanSha256) { $PlanSha256 } elseif (Test-Path -LiteralPath $PlanPath -PathType Leaf) { (Get-FileHash -LiteralPath $PlanPath -Algorithm SHA256).Hash } else { $null }
+        StateSha256 = if ($StateSha256) { $StateSha256 } elseif (Test-Path -LiteralPath $StatePath -PathType Leaf) { (Get-FileHash -LiteralPath $StatePath -Algorithm SHA256).Hash } else { $null }
+        RecoveryKeyPreserved = $true
+        PreservedPackageCount = $PreservedPackageCount
+        SnapshotDeleted = $SnapshotDeleted
+    }
+    Save-VpsJson -Value $record -Path $recordPath -Private
+    $logPath = Join-Path $ArchivePath 'deployment.log'
+    if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+        Move-Item -LiteralPath $logPath -Destination (Join-Path $history "$RecordId-$stamp.log") -Force
+    }
+}
+
+function Clear-VpsIncompleteLocalArtifacts {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string]$ArchivePath)
+
+    $archive = [IO.Path]::GetFullPath($ArchivePath).TrimEnd('\', '/')
+    $root = [IO.Path]::GetPathRoot($archive).TrimEnd('\', '/')
+    if ($archive.Equals($root, [StringComparison]::OrdinalIgnoreCase)) { throw '拒绝清理磁盘根目录。' }
+    foreach ($directoryName in @('server-configs', 'client-exports')) {
+        $target = Join-Path $archive $directoryName
+        if (Test-Path -LiteralPath $target -PathType Container) { Remove-Item -LiteralPath $target -Recurse -Force }
+    }
+    foreach ($name in @('deployment-plan.json', 'deployment-state.json', 'deployment-secrets.private.json', 'SHA256SUMS-private.txt')) {
+        $target = Join-Path $archive $name
+        if (Test-Path -LiteralPath $target -PathType Leaf) { Remove-Item -LiteralPath $target -Force }
+    }
+    foreach ($file in @(Get-ChildItem -LiteralPath $archive -Filter '*-final-archive.txt' -File -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $file.FullName -Force
+    }
+}
+
+function Restore-VpsAbandonedMigrationLocalSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ArchivePath,
+        [Parameter(Mandatory)] [string]$BackupDirectory
+    )
+
+    $archive = [IO.Path]::GetFullPath($ArchivePath).TrimEnd('\', '/')
+    $backup = [IO.Path]::GetFullPath($BackupDirectory).TrimEnd('\', '/')
+    $allowedRoot = [IO.Path]::GetFullPath((Join-Path $archive 'migration-backups')).TrimEnd('\', '/')
+    $allowedPrefix = $allowedRoot + [IO.Path]::DirectorySeparatorChar
+    if (-not $backup.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw '协议变更本地快照不在实例 migration-backups 目录内，拒绝恢复。'
+    }
+    foreach ($name in @('deployment-plan.json', 'deployment-state.json', 'deployment-secrets.private.json')) {
+        $source = Join-Path $backup $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "协议变更本地快照缺少 $name。" }
+        [void](Read-VpsJsonHashtable -Path $source)
+    }
+    foreach ($directoryName in @('server-configs', 'client-exports')) {
+        $current = Join-Path $archive $directoryName
+        if (Test-Path -LiteralPath $current -PathType Container) { Remove-Item -LiteralPath $current -Recurse -Force }
+        $source = Join-Path $backup $directoryName
+        if (Test-Path -LiteralPath $source -PathType Container) { Copy-Item -LiteralPath $source -Destination $current -Recurse }
+    }
+    foreach ($file in @(Get-ChildItem -LiteralPath $archive -Filter '*-final-archive.txt' -File -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $file.FullName -Force
+    }
+    foreach ($file in @(Get-ChildItem -LiteralPath $backup -Filter '*-final-archive.txt' -File -ErrorAction SilentlyContinue)) {
+        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $archive $file.Name) -Force
+    }
+    foreach ($name in @('deployment-plan.json', 'deployment-state.json', 'deployment-secrets.private.json')) {
+        Copy-Item -LiteralPath (Join-Path $backup $name) -Destination (Join-Path $archive $name) -Force
+    }
+}
+
+function Invoke-VpsAbandonIncompletePlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$ProjectRoot,
+        [Parameter(Mandatory)] [string]$PlanPath,
+        [switch]$DryRun
+    )
+
+    $resolvedPlan = (Resolve-Path -LiteralPath $PlanPath).Path
+    $plan = Read-VpsJsonHashtable -Path $resolvedPlan
+    $archive = [IO.Path]::GetFullPath([string]$plan.Paths.Archive).TrimEnd('\', '/')
+    if (-not ([IO.Path]::GetFullPath((Split-Path -Parent $resolvedPlan)).TrimEnd('\', '/')).Equals($archive, [StringComparison]::OrdinalIgnoreCase)) {
+        throw '计划文件不在其声明的实例归档目录内，拒绝放弃。'
+    }
+    $statePath = Join-Path $archive 'deployment-state.json'
+    $secretsPath = Join-Path $archive 'deployment-secrets.private.json'
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { throw '未完成计划缺少 deployment-state.json。' }
+    $state = Read-VpsJsonHashtable -Path $statePath
+    $planHash = (Get-FileHash -LiteralPath $resolvedPlan -Algorithm SHA256).Hash
+    $stateHash = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+    if ($DryRun) {
+        Write-VpsUi 'DryRun：将验证回滚快照、恢复服务器受管状态、确认恢复 SSH、删除远端快照，并清理未完成本地计划；当前未执行。' Success
+        return
+    }
+
+    $isMigration = $plan.Contains('Migration') -and [bool]$plan.Migration.Enabled
+    if ($isMigration) {
+        if (-not $state.Contains('Migration')) { throw '协议变更状态缺失，不能安全放弃。' }
+        $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan
+        $status = [string]$context.State.Migration.Status
+        $capturedBeforeMutations = $context.State.Migration.Contains('BaselineCapturedBeforeMutations') -and
+            [bool]$context.State.Migration.BaselineCapturedBeforeMutations
+        $hasRemoteMutationState = [bool]$context.State.Migration.RollbackArmed -or
+            $status -notin @('Planned') -or
+            ($context.State.Migration.Contains('RemoteBackupDirectory') -and
+                -not [string]::IsNullOrWhiteSpace([string]$context.State.Migration.RemoteBackupDirectory))
+        if ($hasRemoteMutationState -and -not $capturedBeforeMutations) {
+            throw '该旧版协议变更没有“修改前已建立快照”的可验证标记，不能自动删除快照并宣称干净回滚；请继续完成当前变更，或人工核对后使用运维中心恢复。'
+        }
+        if ([bool]$context.State.Migration.RollbackArmed -and -not [bool]$context.State.Migration.Committed) {
+            Invoke-MxhProtocolMigrationRollback -Context $context -Reason '用户选择放弃未完成协议变更。'
+            $status = [string]$context.State.Migration.Status
+        }
+        if ($status -notin @('Planned', 'RolledBack')) {
+            throw "协议变更当前状态为 $status；只有尚未修改服务器或已经确认回滚时才能放弃。"
+        }
+        $localBackup = [string]$context.State.Migration.LocalBackupDirectory
+        if ([string]::IsNullOrWhiteSpace($localBackup)) { $localBackup = [string]$plan.Migration.LocalBackupDirectory }
+        if ([string]::IsNullOrWhiteSpace($localBackup)) { throw '协议变更缺少变更前本地快照。' }
+        $remoteBackup = if ($context.State.Migration.Contains('RemoteBackupDirectory')) { [string]$context.State.Migration.RemoteBackupDirectory } else { '' }
+        $remoteSnapshotDeleted = $context.State.Migration.Contains('RemoteSnapshotDeleted') -and [bool]$context.State.Migration.RemoteSnapshotDeleted
+        if ($remoteBackup -and -not $remoteSnapshotDeleted) {
+            if ($status -ne 'RolledBack') { throw '远端协议快照存在但尚未确认回滚，拒绝删除快照。' }
+            $managementPort = [int]$context.State.CurrentManagementPort
+            if (-not (Test-VpsSshConnection -Context $context -User root -Port $managementPort)) {
+                throw '协议状态已回滚，但管理 SSH 复验失败；远端及本地快照均保留。'
+            }
+            $delete = Invoke-VpsRemoteScript -Context $context -Asset 'deployment-snapshot-delete.sh' -Parameters @{
+                SNAPSHOT_DIR = $remoteBackup
+                KIND = 'protocol-rolled-back'
+            } -TimeoutSeconds 180 -SensitiveOutput -ProgressActivity '删除已完成回滚的协议快照'
+            if ($delete.StdOut -notmatch 'VPSDEPLOY_SNAPSHOT_DELETE_OK') { throw '协议已回滚，但远端快照删除未确认；本地快照和计划均已保留。' }
+            $context.State.Migration.RemoteSnapshotDeleted = $true
+            Save-VpsContext -Context $context
+        }
+        Restore-VpsAbandonedMigrationLocalSnapshot -ArchivePath $archive -BackupDirectory $localBackup
+        Remove-Item -LiteralPath $localBackup -Recurse -Force
+        $recordId = 'migration-' + $planHash.Substring(0, 24).ToLowerInvariant()
+        Write-VpsAbandonedTransactionRecord -ArchivePath $archive -Kind 'ProtocolMigration' -PlanPath $resolvedPlan -StatePath $statePath `
+            -RecordId $recordId -SnapshotDeleted:([bool]$remoteBackup) -PlanSha256 $planHash -StateSha256 $stateHash
+        $migrationResultText = if ($remoteBackup) { '服务器与本地计划均恢复到变更前，远端及本次本地快照已删除。' } else { '尚未修改服务器；本地计划已恢复到变更前，本次本地快照已删除。' }
+        Write-VpsUi "未完成协议变更已放弃；$migrationResultText" Success
+        return
+    }
+
+    $moduleCount = if ($state.Contains('Modules')) { @($state.Modules.Keys).Count } else { 0 }
+    if (-not $state.Contains('DeploymentTransaction')) {
+        if ($moduleCount -eq 0) {
+            $recordId = 'local-' + $planHash.Substring(0, 24).ToLowerInvariant()
+            Write-VpsAbandonedTransactionRecord -ArchivePath $archive -Kind 'LocalPlanOnly' -PlanPath $resolvedPlan -StatePath $statePath `
+                -RecordId $recordId -SnapshotDeleted:$false -PlanSha256 $planHash -StateSha256 $stateHash
+            Clear-VpsIncompleteLocalArtifacts -ArchivePath $archive
+            Write-VpsUi '尚未连接服务器的本地计划已放弃；SSH 密钥和外部 Token 文件均保留，可重新新建部署。' Success
+            return
+        }
+        $moduleIds = @($state.Modules.Keys | ForEach-Object { [string]$_ })
+        $onlyBootstrapStage = $plan.Contains('DeploymentTransaction') -and
+            @($moduleIds | Where-Object { $_ -notin @('bootstrap-access', 'deployment-baseline') }).Count -eq 0 -and
+            $state.Modules.Contains('bootstrap-access') -and
+            [string]$state.Modules['bootstrap-access'].Status -eq 'Success'
+        if ($onlyBootstrapStage) {
+            $transactionId = [string]$plan.DeploymentTransaction.Id
+            if ($transactionId -notmatch '^[a-f0-9]{32}$') { throw '部署事务 ID 非法，拒绝清理远端基线。' }
+            $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan
+            $bootstrapPort = [int]$plan.Server.BootstrapSshPort
+            if (-not (Test-VpsSshConnection -Context $context -User root -Port $bootstrapPort)) {
+                throw '只有恢复公钥阶段已完成，但初始 SSH 复验失败；本地计划和可能存在的远端半成品基线均保留。'
+            }
+            $delete = Invoke-VpsRemoteScript -Context $context -Asset 'deployment-snapshot-delete.sh' -Parameters @{
+                SNAPSHOT_DIR = "/root/vps-deploy-transaction-baselines/$transactionId"
+                KIND = 'deployment-aborted-before-mutations'
+            } -Port $bootstrapPort -TimeoutSeconds 180 -SensitiveOutput -ProgressActivity '清理尚未进入修改阶段的部署基线'
+            if ($delete.StdOut -notmatch 'VPSDEPLOY_SNAPSHOT_DELETE_OK') { throw '远端半成品基线清理未确认；本地计划保留。' }
+            Write-VpsAbandonedTransactionRecord -ArchivePath $archive -Kind 'BootstrapOnly' -PlanPath $resolvedPlan -StatePath $statePath `
+                -RecordId "deployment-$transactionId" -PlanSha256 $planHash -StateSha256 $stateHash
+            Clear-VpsIncompleteLocalArtifacts -ArchivePath $archive
+            Write-VpsUi '部署在其他修改开始前已放弃；恢复公钥保留，远端半成品基线和本地未完成计划已清理。' Success
+            return
+        }
+        throw '该旧计划创建时尚无统一部署前快照，且已经运行过远端模块；不能伪装成干净回滚。请继续完成部署，或先由服务商重置 VPS。'
+    }
+    $transaction = $state.DeploymentTransaction
+    $privateArchiveSucceeded = $state.Contains('Modules') -and $state.Modules.Contains('private-archive') -and
+        [string]$state.Modules['private-archive'].Status -eq 'Success'
+    if ([string]$transaction.Status -eq 'Committed' -or $privateArchiveSucceeded) {
+        throw '该部署已经提交完成，不属于未完成计划；如需移除，请使用现有 VPS 运维中心的完整退役。'
+    }
+    if ([string]$transaction.Status -notin @('Armed', 'RolledBackAwaitingSnapshotCleanup', 'SnapshotDeletedAwaitingLocalCleanup')) {
+        throw "统一部署事务状态为 $($transaction.Status)，不能确认可回滚基线。"
+    }
+    $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan
+    $remoteBaseline = if ($context.State.DeploymentTransaction.Contains('RemoteBaselineDirectory')) { [string]$context.State.DeploymentTransaction.RemoteBaselineDirectory } else { '' }
+    $packageResidue = if ($context.State.DeploymentTransaction.Contains('PreservedPackageCount')) { [int]$context.State.DeploymentTransaction.PreservedPackageCount } else { 0 }
+    if ([string]$context.State.DeploymentTransaction.Status -eq 'Armed') {
+        $rollback = Invoke-VpsRemoteScript -Context $context -Asset 'deployment-baseline-rollback.sh' -Parameters @{
+            BASELINE_DIR = $remoteBaseline
+            ADMIN_USER = [string]$plan.AdminUser
+        } -TimeoutSeconds 900 -SensitiveOutput -ProgressActivity '放弃未完成部署并恢复部署前状态'
+        if ($rollback.StdOut -notmatch 'VPSDEPLOY_DEPLOYMENT_ROLLBACK_OK') { throw '统一回滚未返回成功标记；快照和本地计划均已保留。' }
+        $packageResidueText = Get-VpsMarkerValue $rollback.StdOut PACKAGE_RESIDUE_COUNT
+        if ($packageResidueText -match '^\d+$') { $packageResidue = [int]$packageResidueText }
+        $context.State.DeploymentTransaction.Status = 'RolledBackAwaitingSnapshotCleanup'
+        $context.State.DeploymentTransaction.PreservedPackageCount = $packageResidue
+        $context.State.CurrentManagementPort = [int]$plan.Server.BootstrapSshPort
+        Save-VpsContext -Context $context
+    }
+    if ([string]$context.State.DeploymentTransaction.Status -ne 'SnapshotDeletedAwaitingLocalCleanup') {
+        $bootstrapPort = [int]$plan.Server.BootstrapSshPort
+        if (-not (Test-VpsSshConnection -Context $context -User root -Port $bootstrapPort)) {
+            throw '服务器受管状态已恢复，但初始 SSH 端口复验失败；远端快照和本地计划均保留，请先恢复访问。'
+        }
+        $delete = Invoke-VpsRemoteScript -Context $context -Asset 'deployment-snapshot-delete.sh' -Parameters @{
+            SNAPSHOT_DIR = $remoteBaseline
+            KIND = 'deployment-rolled-back'
+        } -Port $bootstrapPort -TimeoutSeconds 180 -SensitiveOutput -ProgressActivity '删除已完成回滚的部署快照'
+        if ($delete.StdOut -notmatch 'VPSDEPLOY_SNAPSHOT_DELETE_OK') { throw '服务器已恢复且 SSH 已确认，但远端快照删除失败；本地计划保留，可再次执行放弃操作。' }
+        $context.State.DeploymentTransaction.Status = 'SnapshotDeletedAwaitingLocalCleanup'
+        $context.State.DeploymentTransaction.RemoteBaselineDirectory = $null
+        $context.State.DeploymentTransaction.SnapshotDeletedAt = (Get-Date).ToString('o')
+        Save-VpsContext -Context $context
+    }
+    $transactionId = [string]$context.State.DeploymentTransaction.Id
+    Write-VpsAbandonedTransactionRecord -ArchivePath $archive -Kind 'InitialDeployment' -PlanPath $resolvedPlan -StatePath $statePath `
+        -RecordId "deployment-$transactionId" -PreservedPackageCount $packageResidue -PlanSha256 $planHash -StateSha256 $stateHash
+    Clear-VpsIncompleteLocalArtifacts -ArchivePath $archive
+    Write-VpsUi '未完成部署已放弃；服务器受管状态已恢复、SSH 已复验、远端快照已删除，本地 SSH 密钥和 Token 文件保留。' Success
+    if ($packageResidue -gt 0) { Write-VpsUi "为避免 apt 级联卸载，保留了 $packageResidue 个部署期间新增的软件包；服务、配置、用户、SSH、防火墙和 sysctl 已回滚。" Warning }
+}
+
 function Read-VpsResumePlan {
     [CmdletBinding()]
     param(
+        [Parameter(Mandatory)] [string]$ProjectRoot,
         [string]$PlanPath,
-        [switch]$NonInteractive
+        [switch]$NonInteractive,
+        [switch]$DryRun
     )
 
     $candidatePath = $PlanPath
@@ -3233,6 +3912,7 @@ function Read-VpsResumePlan {
         try {
             $choice = Read-VpsMenu '继续部署前请核对计划' @(
                 '使用此计划继续',
+                '放弃未完成计划并回滚到部署前',
                 '取消并返回主菜单'
             ) 1 -AllowBack
         }
@@ -3242,6 +3922,15 @@ function Read-VpsResumePlan {
         }
         if ($choice -eq 1) { return $plan }
         if ($choice -eq 2) {
+            $confirmation = Read-VpsText '输入 ABANDON-AND-ROLLBACK 确认放弃计划并恢复服务器' -AllowBack
+            if ($confirmation -cne 'ABANDON-AND-ROLLBACK') {
+                Write-VpsUi '确认短语不匹配，未修改服务器或本地计划。' Warning
+                continue
+            }
+            Invoke-VpsAbandonIncompletePlan -ProjectRoot $ProjectRoot -PlanPath $candidatePath -DryRun:$DryRun
+            throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)
+        }
+        if ($choice -eq 3) {
             throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)
         }
         $candidatePath = $null
@@ -3293,15 +3982,28 @@ function Invoke-VpsDeploymentSession {
             -DryRun:$DryRun -NonInteractive:$NonInteractive
     }
     else {
-        $plan = Read-VpsResumePlan -PlanPath $PlanPath -NonInteractive:$NonInteractive
+        $plan = Read-VpsResumePlan -ProjectRoot $ProjectRoot -PlanPath $PlanPath -NonInteractive:$NonInteractive -DryRun:$DryRun
         $context = Initialize-VpsContext -ProjectRoot $ProjectRoot -Plan $plan -DryRun:$DryRun -NonInteractive:$NonInteractive
     }
     try {
         Invoke-VpsModulePipeline -Context $context -OnlyModule $OnlyModule
         if (-not $DryRun) {
             Write-Host ''
-            Write-VpsUi "部署流程完成。私有归档：$($context.ArchivePath)" Success
-            Write-VpsUi '最后请在服务商安全组删除初始 SSH 端口，并按归档中的客户端步骤完成真实出口测试。' Warning
+            if ($OnlyModule) {
+                Write-VpsUi "显式模块执行完成：$($OnlyModule -join ', ')。" Success
+                $deploymentStillArmed = $context.State.Contains('DeploymentTransaction') -and
+                    [string]$context.State.DeploymentTransaction.Status -eq 'Armed'
+                if ($deploymentStillArmed) {
+                    Write-VpsUi '统一部署事务仍未完成；请从主菜单选择【继续未完成部署】完成剩余模块，或选择放弃计划并回滚到部署前。' Warning
+                }
+                else {
+                    Write-VpsUi '本次只运行了显式模块，未据此宣称整套部署流程完成。' Muted
+                }
+            }
+            else {
+                Write-VpsUi "部署流程完成。私有归档：$($context.ArchivePath)" Success
+                Write-VpsUi '最后请在服务商安全组删除初始 SSH 端口，并按归档中的客户端步骤完成真实出口测试。' Warning
+            }
         }
     }
     finally {
@@ -3385,8 +4087,14 @@ function Start-VpsDeploy {
                 continue
             }
             catch {
-                if (-not (Test-VpsNavigationError $_)) { throw }
-                Write-VpsUi (Get-VpsNavigationMessage $_) Info
+                if (Test-VpsNavigationError $_) {
+                    Write-VpsUi (Get-VpsNavigationMessage $_) Info
+                }
+                elseif ($NonInteractive) { throw }
+                else {
+                    Write-VpsUi '当前操作失败；计划和状态已经保留，可从主菜单选择继续未完成部署。' Warning
+                    Wait-VpsReturnToMainMenu
+                }
                 $PlanPath = $null
                 continue
             }

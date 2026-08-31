@@ -203,7 +203,7 @@ function New-MxhExistingImportPlanInteractive {
         $plan = & $buildPlan
         $existingPlan = Get-VpsExistingPlanPath -InstanceDirectory ([string]$plan.Paths.InstanceDirectory)
         if ($existingPlan) {
-            Write-VpsUi '目标实例目录已经存在 deployment-plan.json；请使用现有 VPS 协议管理或 Resume，不能重复导入。' Warning
+            Write-VpsUi '目标实例目录已经存在 deployment-plan.json；请使用现有 VPS 协议管理或【继续未完成部署】，不能重复导入。' Warning
             $index = 2
             continue
         }

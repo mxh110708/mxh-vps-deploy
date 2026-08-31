@@ -34,12 +34,12 @@ curl -4sS --connect-timeout 10 --max-time 20 -D "$work/headers.txt" -o /dev/null
   -w '%{http_code}\t%{http_version}\t%{remote_ip}\t%{url_effective}\n' \
   "https://${target}/" > "$work/http.txt" || true
 
-: > "$work/times.txt"
+: > "$work/timings.tsv"
 failures=0
 for ((i=1; i<=samples; i++)); do
   if value="$(curl -4sS -o /dev/null --connect-timeout 10 --max-time 20 \
-      -w '%{time_appconnect}' "https://${target}/")"; then
-    printf '%s\n' "$value" >> "$work/times.txt"
+      -w '%{time_namelookup}\t%{time_connect}\t%{time_appconnect}' "https://${target}/")"; then
+    printf '%s\n' "$value" >> "$work/timings.tsv"
   else
     failures=$((failures + 1))
   fi
@@ -56,8 +56,21 @@ from urllib.parse import urljoin, urlparse
 
 target, samples, failures, max_median, tls_command_ok, tls13, alpn_h2, verify_ok, work = sys.argv[1:]
 root = Path(work)
-times = [float(value) * 1000 for value in root.joinpath("times.txt").read_text().split()]
-times.sort()
+timings = []
+for line in root.joinpath("timings.tsv").read_text().splitlines():
+    parts = line.split("\t")
+    if len(parts) != 3:
+        continue
+    name_lookup, tcp_connected, tls_connected = map(float, parts)
+    timings.append({
+        "dns": max(0.0, name_lookup * 1000),
+        "tcp": max(0.0, (tcp_connected - name_lookup) * 1000),
+        "tls": max(0.0, tls_connected * 1000),
+    })
+
+dns_times = sorted(item["dns"] for item in timings)
+tcp_times = sorted(item["tcp"] for item in timings)
+tls_times = sorted(item["tls"] for item in timings)
 
 def percentile(values, fraction):
     if not values:
@@ -88,16 +101,27 @@ cross_host_redirect = bool(
     (effective_host and effective_host.lower() != target.lower()) or
     (location_host and location_host.lower() != target.lower())
 )
-median = round(statistics.median(times), 2) if times else None
+def median(values):
+    return round(statistics.median(values), 2) if values else None
+
+tcp_median = median(tcp_times)
 
 result = {
     "target": target,
     "sample_count": int(samples),
-    "success_count": len(times),
+    "success_count": len(timings),
     "failure_count": int(failures),
-    "median_ms": median,
-    "p95_ms": percentile(times, 0.95),
-    "max_ms": round(max(times), 2) if times else None,
+    "latency_gate_metric": "tcp_connect_excluding_dns",
+    "median_ms": tcp_median,
+    "p95_ms": percentile(tcp_times, 0.95),
+    "max_ms": round(max(tcp_times), 2) if tcp_times else None,
+    "dns_median_ms": median(dns_times),
+    "tcp_connect_median_ms": tcp_median,
+    "tcp_connect_p95_ms": percentile(tcp_times, 0.95),
+    "tcp_connect_max_ms": round(max(tcp_times), 2) if tcp_times else None,
+    "tls_appconnect_median_ms": median(tls_times),
+    "tls_appconnect_p95_ms": percentile(tls_times, 0.95),
+    "tls_appconnect_max_ms": round(max(tls_times), 2) if tls_times else None,
     "tls_command_ok": tls_command_ok == "true",
     "tls13": tls13 == "true",
     "alpn_h2": alpn_h2 == "true",
@@ -116,8 +140,8 @@ result["automatic_pass"] = all([
     result["tls_command_ok"], result["tls13"], result["alpn_h2"],
     result["certificate_verify_ok"], 200 <= result["http_code"] < 400,
     not result["cross_host_redirect"], not cdn_hits,
-    result["failure_count"] == 0, median is not None,
-    median <= int(max_median),
+    result["failure_count"] == 0, tcp_median is not None,
+    tcp_median <= int(max_median),
 ])
 payload = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
 print("VPSDEPLOY_TARGET_JSON_B64=" + base64.b64encode(payload).decode())

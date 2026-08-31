@@ -214,6 +214,9 @@ function Get-MxhMigrationModuleIds {
     elseif ($Operation -in @('Enable', 'Disable')) {
         $ids.Add('migration-arm-rollback')
         $ids.Add('protocol-lifecycle-state')
+        if ($Operation -eq 'Enable' -and $TargetRole -eq 'ShadowsocksLanding') {
+            $ids.Add('migration-shadowsocks-probe')
+        }
     }
     elseif ($Operation -eq 'Uninstall') {
         $ids.Add('migration-arm-rollback')
@@ -533,6 +536,7 @@ function New-MxhProtocolMigrationPlan {
         $plan.Shadowsocks.TrustedEntryIPv4s = @($TrustedEntryIps.IPv4)
         $plan.Shadowsocks.TrustedEntryIPv6s = @($TrustedEntryIps.IPv6)
         $plan.Shadowsocks.ClientTransitTag = $ClientTransitTag
+        $plan.Shadowsocks['ValidationEntryPlanPath'] = $ValidationEntryPlanPath
         $plan.Shadowsocks.SecondaryIpv6Enabled = $SecondaryIpv6Enabled
         $plan.Shadowsocks.SecondaryIpv6Address = $SecondaryIpv6Address
         $plan.Shadowsocks.SecondaryBindInterface = $SecondaryBindInterface
@@ -679,7 +683,16 @@ function New-MxhProtocolLifecyclePlan {
         TargetService = Get-MxhProtocolServiceName -Role $TargetRole
         SourcePrimaryPort = $sourcePort
         TargetPrimaryPort = $targetPort
-        ValidationEntryPlanPath = $null
+        ValidationEntryPlanPath = if ($TargetRole -eq 'ShadowsocksLanding') {
+            if ($SourcePlan.Shadowsocks.Contains('ValidationEntryPlanPath') -and $SourcePlan.Shadowsocks.ValidationEntryPlanPath) {
+                [string]$SourcePlan.Shadowsocks.ValidationEntryPlanPath
+            }
+            elseif ($SourcePlan.Contains('Migration') -and $SourcePlan.Migration.Contains('ValidationEntryPlanPath')) {
+                [string]$SourcePlan.Migration.ValidationEntryPlanPath
+            }
+            else { $null }
+        }
+        else { $null }
         SourcePlanPath = (Resolve-Path -LiteralPath $SourcePlanPath).Path
         SourcePlanSha256 = (Get-FileHash -LiteralPath $SourcePlanPath -Algorithm SHA256).Hash
         RollbackTimeoutMinutes = 20
@@ -911,11 +924,8 @@ function New-MxhProtocolMigrationDetails {
                 ) $default -AllowBack
                 $wizard.XrayVersionChannel = if ($choice -eq 2) { 'LatestStable' } else { 'FixedVerified' }
                 $wizard.XrayVersion = Resolve-VpsXrayVersion -ProjectRoot $ProjectRoot -Channel $wizard.XrayVersionChannel
-                if ($wizard.XrayVersionChannel -eq 'LatestStable') {
-                    $sameVersion = if ($wizard.XrayVersion -eq [string]$versions.xray.version) { '；当前恰好与固定验证版相同' } else { '' }
-                    Write-VpsUi "已选择官方最新稳定版通道；当前在线解析为 Xray $($wizard.XrayVersion)$sameVersion。部署计划仍记录 LatestStable。" Info
-                }
-                else { Write-VpsUi "已选择固定验证版通道：Xray $($wizard.XrayVersion)。" Info }
+                Show-VpsXrayVersionSelection -Channel $wizard.XrayVersionChannel `
+                    -ResolvedVersion $wizard.XrayVersion -FixedVersion ([string]$versions.xray.version) -Action '部署'
             }
         },
         [pscustomobject]@{
@@ -1529,7 +1539,7 @@ function Invoke-MxhProtocolMigrationRollback {
         $Context.State.Migration.RolledBackAt = (Get-Date).ToString('o')
         $Context.State.Migration.LastError = $Reason
         $Context.Plan.Migration.Status = 'RolledBack'
-        Write-VpsUi '变更前的协议状态和旧防火墙已恢复。可修复原因后使用 Resume 重试。' Success
+        Write-VpsUi '变更前的协议状态和旧防火墙已恢复。修复原因后可选择【继续未完成部署】重试。' Success
     }
     catch {
         $Context.State.Migration.Status = 'RollbackPending'
@@ -1541,7 +1551,7 @@ function Invoke-MxhProtocolMigrationRollback {
     finally {
         $modules = @(Get-VpsModules -ProjectRoot $Context.ProjectRoot)
         foreach ($module in $modules) {
-            if ($module.Id -eq 'migration-preflight' -or ([int]$module.Order -ge 49 -and $module.Id -in @($Context.Plan.Migration.ModuleIds))) {
+            if ($module.Id -in @($Context.Plan.Migration.ModuleIds)) {
                 if ($Context.State.Modules.Contains([string]$module.Id)) { $Context.State.Modules.Remove([string]$module.Id) }
             }
         }

@@ -78,6 +78,15 @@ if (-not (Get-Command Get-VpsModules -ErrorAction SilentlyContinue)) {
 }
 $coreModule = Get-Module VpsDeploy.Core
 $modules = @(Get-VpsModules -ProjectRoot $ProjectRoot)
+Assert-True ($null -eq (Get-VpsMarkerValue -Text '' -Name OPTIONAL_EMPTY)) 'optional marker parser accepts empty remote stdout'
+Assert-True ($null -eq (Get-VpsMarkerValue -Text $null -Name OPTIONAL_NULL)) 'optional marker parser accepts null remote stdout'
+$pwshUtf8 = (Get-Command pwsh -ErrorAction Stop).Source
+$utf8RoundTripText = 'ASCII-中文-✓'
+$utf8RoundTrip = Invoke-VpsProcess -FilePath $pwshUtf8 -ArgumentList @(
+    '-NoLogo', '-NoProfile', '-Command',
+    '[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::Out.Write([Console]::In.ReadToEnd())'
+) -InputText $utf8RoundTripText -TimeoutSeconds 30
+Assert-True ($utf8RoundTrip.ExitCode -eq 0 -and $utf8RoundTrip.StdOut -eq $utf8RoundTripText) 'process stdin uses explicit UTF-8 for remote scripts and Unicode data'
 Assert-True ($modules.Count -ge 10) 'module count'
 Assert-True (($modules.Id | Sort-Object -Unique).Count -eq $modules.Count) 'module IDs unique'
 Assert-True ($modules[0].Id -eq 'bootstrap-access') 'bootstrap first'
@@ -93,11 +102,45 @@ Assert-True ('migration-preflight' -in $modules.Id) 'protocol migration prefligh
 Assert-True ('migration-arm-rollback' -in $modules.Id) 'protocol migration rollback timer module exists'
 Assert-True ('migration-commit' -in $modules.Id) 'protocol migration commit module exists'
 Assert-True ('migration-shadowsocks-probe' -in $modules.Id) 'trusted-entry Shadowsocks migration probe module exists'
+Assert-True ('deployment-baseline' -in $modules.Id -and 'deployment-baseline-commit' -in $modules.Id) 'new deployments have a unified rollback baseline and commit module'
+$deploymentBaselineModule = $modules | Where-Object Id -eq 'deployment-baseline'
+$deploymentCommitModule = $modules | Where-Object Id -eq 'deployment-baseline-commit'
+$migrationArmModule = $modules | Where-Object Id -eq 'migration-arm-rollback'
+$certbotDnsModule = $modules | Where-Object Id -eq 'certbot-dns'
+Assert-True ($deploymentBaselineModule.Order -eq 5 -and $deploymentBaselineModule.Requires -contains 'bootstrap-access') 'deployment baseline is armed immediately after bootstrap access'
+Assert-True ($deploymentCommitModule.Order -gt ($modules | Where-Object Id -eq 'ssh-cutover').Order -and $deploymentCommitModule.Order -lt ($modules | Where-Object Id -eq 'private-archive').Order) 'deployment baseline is committed after SSH cutover and before final archive'
+Assert-True ($migrationArmModule.Order -lt $certbotDnsModule.Order) 'protocol migration rollback is armed before Certbot or protocol mutations'
+$transactionSelectionPlan = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json') | ConvertFrom-Json -AsHashtable
+$transactionSelectionPlan.DeploymentTransaction = [ordered]@{ SchemaVersion = 1; Id = ('a' * 32); Status = 'Planned'; RollbackScope = 'ManagedStateWithRecoveryKey' }
+$transactionSelectionContext = & $coreModule {
+    param($Root, $Plan)
+    Initialize-VpsContext -ProjectRoot $Root -Plan $Plan -DryRun -NonInteractive
+} $ProjectRoot $transactionSelectionPlan
+$transactionSelection = @($modules | Where-Object { $transactionSelectionContext.Plan.Role -in @($_.Roles) -and (& $_.IsEnabled $transactionSelectionContext) })
+Assert-True ('deployment-baseline' -in $transactionSelection.Id -and 'deployment-baseline-commit' -in $transactionSelection.Id) 'first-run module selection includes both baseline arm and later commit before state is armed'
+$transactionSelectionContext.State.DeploymentTransaction = [ordered]@{ Status = 'Committed' }
+$committedTransactionSelection = @($modules | Where-Object { $transactionSelectionContext.Plan.Role -in @($_.Roles) -and (& $_.IsEnabled $transactionSelectionContext) })
+Assert-True ('deployment-baseline' -notin $committedTransactionSelection.Id -and 'deployment-baseline-commit' -notin $committedTransactionSelection.Id) 'a committed deployment cannot silently recreate or delete a new baseline'
+$layoutFixture = @(
+    [pscustomobject]@{ Order = 42; Id = 'certbot-dns'; Name = 'Certificate step' }
+    [pscustomobject]@{ Order = 114; Id = 'protocol-lifecycle-final-firewall'; Name = 'Firewall step' }
+)
+$layoutLines = @(& $coreModule { param($items) Format-VpsModulePlanLines -Modules $items } $layoutFixture)
+$layoutDescriptionColumns = @($layoutLines[0].IndexOf('Certificate step'), $layoutLines[1].IndexOf('Firewall step'))
+Assert-True ($layoutLines.Count -eq 2 -and $layoutDescriptionColumns[0] -eq $layoutDescriptionColumns[1]) 'module plan dynamically aligns descriptions after the longest module id'
 $legacyCompatibility=&$coreModule{param($plan)$copy=Copy-MxhHashtable $plan;$copy.Remove('NetworkTuning');ConvertTo-MxhCompatiblePlan $copy} (Get-Content -Raw (Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json')|ConvertFrom-Json -AsHashtable)
 Assert-True ($legacyCompatibility.Contains('NetworkTuning') -and [string]$legacyCompatibility.NetworkTuning.Mode -eq 'LegacyBaseline') 'legacy managed plans gain a non-invasive network tuning compatibility section'
 Assert-True ($null -eq $legacyCompatibility.NetworkTuning.BandwidthMbps) 'legacy plan compatibility never invents nominal bandwidth'
 $shadowsocksSelfTest = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\shadowsocks-self-test.sh')
 $coreSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Core.psm1')
+Assert-True ($coreSource -match '显式模块执行完成' -and $coreSource -match '统一部署事务仍未完成' -and $coreSource -match '未据此宣称整套部署流程完成') 'OnlyModule completion never claims that an incomplete deployment is complete'
+$deploymentBaseline = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\deployment-baseline-arm.sh')
+Assert-True ($deploymentBaseline -match 'list-unit-files "\$service" --no-legend 2>/dev/null \|\| true' -and $deploymentBaseline -match 'VPSDEPLOY_BASELINE_FAILURE_PHASE') 'deployment baseline treats absent systemd units as inventory state and reports a sanitized failure phase'
+Assert-True ($coreSource -notmatch 'Write-Progress -Id 4201' -and $coreSource -match 'Write-Host \("`r" \+ \$progressText \+ \$padding\) -NoNewline' -and $coreSource -match '已运行 \$elapsed，任务仍在执行') 'long remote commands use a compact single-line elapsed timer without a progress bar'
+Assert-True ($coreSource -match 'Invoke-WebRequest[^\r\n]+-ProgressAction SilentlyContinue' -and $coreSource -match 'Invoke-RestMethod[^\r\n]+-ProgressAction SilentlyContinue') 'real HTTPS acceptance suppresses the built-in PowerShell transfer progress bar'
+Assert-True ($coreSource -match 'function Invoke-VpsScpDownload[\s\S]*?\[string\]\$ProgressActivity[\s\S]*?-ProgressActivity \$ProgressActivity') 'SCP downloads can reuse the compact elapsed timer'
+$privateArchiveSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\120-PrivateArchive.ps1')
+Assert-True ($privateArchiveSource -match '下载配置并生成最终私有归档可能需要数分钟' -and $privateArchiveSource -match '下载最终私有归档配置' -and $privateArchiveSource -match '服务器配置下载完成（用时') 'final private archive downloads show timing guidance and per-download elapsed status'
 Assert-True ($shadowsocksSelfTest -match 'VPSDEPLOY_UDP_B64') 'Shadowsocks self-test reports functional UDP result'
 Assert-True ($shadowsocksSelfTest -match '"type": "direct"') 'Shadowsocks self-test creates a UDP tunnel inbound'
 Assert-True ($shadowsocksSelfTest -match 'override_address') 'Shadowsocks UDP self-test uses an explicit DNS destination'
@@ -108,7 +151,11 @@ $migrationCommitModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot '
 Assert-True ($migrationCommitModule -match "targetRole -eq 'ShadowsocksLanding'" -and $migrationCommitModule -match '现有 Reality/AnyTLS 入口保持原状态') 'Shadowsocks lifecycle commit message preserves concurrent entry protocol state'
 $externalProbe = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\shadowsocks-external-probe.sh')
 Assert-True ($externalProbe -match 'sha256sum --check --status') 'external Shadowsocks probe verifies pinned core checksum'
-Assert-True ($externalProbe -match 'VPS_PARAM_SELF_TEST_SCRIPT') 'external probe reuses the canonical TCP/UDP self-test'
+Assert-True ($externalProbe -match 'MetaCubeX/mihomo' -and $externalProbe -match 'SagerNet/sing-box' -and $externalProbe -match 'VPSDEPLOY_EXTERNAL_ACCEPTANCE_B64') 'external Shadowsocks probe runs pinned Mihomo and sing-box cores'
+Assert-True ($externalProbe -match 'SOCKS5 UDP associate failed' -and $externalProbe -match 'generate_204' -and $externalProbe -match 'unexpected egress address family') 'external Shadowsocks probe requires client handshake, HTTPS, expected egress family, and UDP'
+$externalProbeModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\95-MigrationShadowsocksProbe.ps1')
+Assert-True ($externalProbeModule -match 'foreach \(\$user in \$users\)' -and $externalProbeModule -match 'mihomoAsset' -and $externalProbeModule -match 'singBoxAsset') 'Shadowsocks migration validates every configured address-family user with both cores'
+Assert-True ($migrationCommitModule -match 'ShadowsocksSelfTest\.Results' -and $migrationCommitModule -match 'MigrationShadowsocksExternalProbe\.Results') 'Shadowsocks commit checks the current structured local and external acceptance results'
 $singBoxInstaller = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\sing-box-install.sh')
 Assert-True ($singBoxInstaller -match 'RestrictAddressFamilies=[^\r\n]*AF_NETLINK') 'sing-box systemd sandbox permits route-update netlink'
 $anyTlsInstaller = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\sing-box-anytls-install.sh')
@@ -122,12 +169,26 @@ Assert-True ($certbotSetup -match 'mxh-certbot-renew\.timer') 'Certbot renewal t
 Assert-True ($certbotSetup -match 'disable --now certbot\.timer') 'distribution Certbot timer is disabled to avoid duplicate renewal owners'
 Assert-True (([regex]::Matches($certbotSetup, '--no-random-sleep-on-renew')).Count -eq 2) 'Certbot deploy validation and timer rely on the systemd schedule instead of hidden random sleeps'
 Assert-True ($certbotSetup -notmatch 'echo\s+.*CLOUDFLARE_TOKEN') 'Certbot setup never prints the Cloudflare token'
+$certbotModuleSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\42-CertbotDns.ps1')
+Assert-True ($certbotSetup -match '%\{local_ip\}' -and $certbotSetup -match 'VPSDEPLOY_CERTBOT_SAFE_ERROR_B64') 'Certbot preflight reports the actual Cloudflare API source address through a sanitized marker'
+Assert-True ($certbotSetup -match 'trap report_failure ERR' -and $certbotSetup -match "phase='certificate-renewal-dry-run'") 'Certbot setup reports a sanitized stage for failures after Cloudflare preflight'
+Assert-True ($certbotModuleSource -match 'SensitiveOutput -AllowFailure' -and $certbotModuleSource -match 'CERTBOT_SAFE_ERROR') 'Certbot module exposes only the sanitized remote stage error'
 $anyTlsApply = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\anytls-apply-config.sh')
 Assert-True ($anyTlsApply -match "rollback_needed='yes'") 'AnyTLS cutover arms automatic rollback'
 Assert-True ($anyTlsApply -match 'systemctl start xray\.service') 'AnyTLS cutover restores an originally active Xray service on failure'
 $migrationArm = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\protocol-migration-arm-rollback.sh')
 Assert-True ($migrationArm -match 'mxh-protocol-migration-rollback\.timer') 'protocol migration installs a VPS-side rollback timer'
 Assert-True ($migrationArm -match 'cp -a /etc/nftables\.conf') 'protocol migration backs up the source firewall'
+$deploymentBaselineArm = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\deployment-baseline-arm.sh')
+$deploymentBaselineRollback = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\deployment-baseline-rollback.sh')
+$deploymentSnapshotDelete = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\deployment-snapshot-delete.sh')
+$deploymentCommitSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\119-DeploymentBaselineCommit.ps1')
+Assert-True ($deploymentBaselineArm -match 'backup-directories\.before' -and $deploymentBaselineArm -match 'packages\.before') 'deployment baseline records pre-existing server backups and packages'
+Assert-True ($deploymentBaselineArm -match 'etc/nginx/sites-enabled/default' -and $deploymentBaselineArm -match 'var/log/xray') 'deployment baseline covers every project-managed nginx and Xray path'
+Assert-True ($deploymentBaselineRollback -match 'rollback\.complete' -and $deploymentBaselineRollback -match 'packages\.preserved') 'deployment rollback records completion and reports intentionally preserved packages'
+Assert-True ($deploymentSnapshotDelete -match 'deployment-rolled-back' -and $deploymentSnapshotDelete -match 'rollback\.complete' -and $deploymentSnapshotDelete -match 'backup-directories\.before') 'rollback snapshot cleanup requires a completed rollback and preserves pre-existing backup directories'
+Assert-True ($deploymentSnapshotDelete -match '\^\[0-9\]\{8\}-\[0-9\]\{6\}\$' -and $deploymentSnapshotDelete -match 'for component in ssh certbot-dns' -and $deploymentSnapshotDelete -notmatch 'rm -rf -- "\$candidate_path"') 'rollback snapshot cleanup deletes only allowlisted components in validated timestamp children, never a whole unrelated backup directory'
+Assert-True ($deploymentCommitSource -match "requiredModule = if .*AuditOnly.*audit.*ssh-cutover" -and $deploymentCommitSource -match "KIND = 'deployment-committed'") 'snapshot commit cannot bypass final audit or SSH cutover even through OnlyModule'
 $migrationCommit = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\protocol-migration-commit.sh')
 Assert-True ($migrationCommit -match 'FINAL_REALITY_ENABLED' -and $migrationCommit -match 'FINAL_ANYTLS_ENABLED') 'lifecycle commit applies explicit final service states'
 Assert-True ($migrationCommit -match 'systemctl stop mxh-protocol-migration-rollback\.timer') 'migration commit cancels rollback only after target validation'
@@ -150,10 +211,26 @@ Assert-True ($coreSource -notmatch 'icacls\.exe' -and $coreSource -notmatch 'MXH
 $operationsSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Operations.ps1')
 Assert-True ($operationsSource -match 'Invoke-MxhRealClientValidation.+Reality' -and $operationsSource -match 'Invoke-MxhShadowsocksRealValidation') 'controlled upgrades reuse full real-protocol validation'
 Assert-True (([regex]::Matches($operationsSource, 'Invoke-MxhRealClientValidation -Context \$(?:candidate|Context) -Protocol (?:Reality|AnyTLS)')).Count -ge 4 -and ([regex]::Matches($operationsSource, 'Invoke-MxhShadowsocksRealValidation -Context \$(?:candidate|Context)')).Count -ge 2) 'credential rotation and controlled upgrades share the complete Reality, AnyTLS, and Shadowsocks validation helpers'
-Assert-True ($coreSource -match '直接回车使用默认值') 'text prompts explicitly explain how to accept a default value'
+$migrationSourceText = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Migration.ps1')
+Assert-True ($migrationSourceText -match 'if \(\$module\.Id -in @\(\$Context\.Plan\.Migration\.ModuleIds\)\)') 'migration rollback resets every selected migration module before a retry'
+Assert-True ($coreSource -match '默认值：\$Default（直接按 Enter/回车采用）' -and $coreSource -match '默认值：\{0\}（直接按 Enter/回车采用）' -and $coreSource -match '默认项：\{0\}（直接按 Enter/回车采用）' -and $coreSource -match "Read-Host '请输入'" -and $coreSource -match "Read-Host '请选择'") 'text, yes/no, and menu inputs render defaults on helper lines and keep the input line short'
+Assert-True ($coreSource -notmatch 'b/back 均按普通内容处理') 'new-user navigation banner does not mention unsupported-looking b/back aliases'
+Assert-True ($coreSource -match 'Wait-VpsReturnToMainMenu' -and $coreSource -match '当前操作失败；计划和状态已经保留，可从主菜单选择继续未完成部署') 'interactive operational failures pause and return to the main menu instead of exiting the process'
+Assert-True ($coreSource -match 'DeploymentTransaction = \[ordered\]@' -and $coreSource -match "RollbackScope = 'ManagedStateWithRecoveryKey'") 'new plans carry a unique unified deployment transaction'
+Assert-True ($coreSource -match '放弃未完成计划并回滚到部署前' -and $coreSource -match 'ABANDON-AND-ROLLBACK') 'resume menu exposes an explicit strongly confirmed abandon and rollback path'
+Assert-True ($coreSource -match 'RolledBackAwaitingSnapshotCleanup' -and $coreSource -match 'SnapshotDeletedAwaitingLocalCleanup') 'abandon transaction can safely resume both remote snapshot deletion and local-only cleanup stages'
+Assert-True ($coreSource -match 'BaselineCapturedBeforeMutations' -and $coreSource -match '该旧版协议变更没有') 'legacy protocol migrations without a verifiable pre-mutation baseline cannot claim a clean rollback'
+Assert-True ($coreSource -match 'Xray 版本来源：XTLS/Xray-core 官方最新稳定版' -and $coreSource -match '本次实际\$\(\$Action\)版本：Xray \$ResolvedVersion' -and $coreSource -match '官方 latest 与项目固定验证版当前同为 Xray \$ResolvedVersion' -and $coreSource -match '官方 latest 为 Xray \$ResolvedVersion，项目固定验证版为 Xray \$FixedVersion') 'Xray selection dynamically compares latest and fixed versions while keeping the selected provenance clear'
+Assert-True ($coreSource -notmatch '这里固定并校验的是 Xray 安装脚本来源' -and $operationsSource -notmatch '安装脚本固定校验不改变核心版本通道') 'Xray selection prompt does not mix installer pinning into core version wording'
 $targetAuditModule = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\40-TargetAudit.ps1')
 Assert-True ($targetAuditModule -match 'ACCEPT-TARGET-RISK' -and $targetAuditModule -match 'manual_override') 'failed target audits support an explicit recorded manual override'
 Assert-True ($targetAuditModule -match 'NonInteractive.*禁止人工覆写') 'noninteractive target audit cannot silently bypass automatic requirements'
+$targetAuditSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\target-audit.sh')
+Assert-True ($targetAuditSource -match '%\{time_namelookup\}.*%\{time_connect\}.*%\{time_appconnect\}') 'target audit captures DNS, TCP, and full TLS timing separately'
+Assert-True ($targetAuditSource -match 'tcp_connected - name_lookup' -and $targetAuditSource -match 'tcp_median <= int\(max_median\)') 'target automatic latency gate uses TCP connect time excluding DNS'
+Assert-True ($targetAuditModule -match 'TCP 建连（不含 DNS，自动门禁）' -and $targetAuditModule -match 'TLS 完成（含 DNS/TCP，仅供参考）') 'target audit UI identifies the gated and informational timing metrics'
+$targetAuditPythonMatch = [regex]::Match($targetAuditSource, "(?s)<<'PY'\n(.+?)\nPY")
+Assert-True $targetAuditPythonMatch.Success 'target audit Python payload is extractable'
 $importAudit = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\existing-vps-import-audit.sh')
 Assert-True ($importAudit -match 'IMPORT_PRIVATE' -and $importAudit -match 'RealityEntry') 'existing VPS import discovers supported protocol state and private configuration'
 $importPythonMatch = [regex]::Match($importAudit, "(?s)python3 <<'PY'\n(.+?)\nPY")
@@ -168,6 +245,33 @@ if ($pythonCommand) {
     ) -TimeoutSeconds 30
     Assert-True ($pythonSyntax.ExitCode -eq 0) 'existing import Python audit parses'
     [IO.File]::Delete($importPythonPath)
+
+    $targetAuditFixtureRoot = Join-Path $ProjectRoot '.test-output\target-audit-metric'
+    if (Test-Path -LiteralPath $targetAuditFixtureRoot) { [IO.Directory]::Delete($targetAuditFixtureRoot, $true) }
+    [IO.Directory]::CreateDirectory($targetAuditFixtureRoot) | Out-Null
+    $targetAuditPythonPath = Join-Path $targetAuditFixtureRoot 'target-audit.py'
+    [IO.File]::WriteAllText($targetAuditPythonPath, $targetAuditPythonMatch.Groups[1].Value, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $targetAuditFixtureRoot 'timings.tsv'), @'
+0.0030	0.0090	0.0730
+0.0040	0.0110	0.0750
+0.0035	0.0105	0.0710
+0.0040	0.0120	0.0740
+0.0030	0.0095	0.0680
+'@.TrimStart(), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $targetAuditFixtureRoot 'http.txt'), "200`t2`t192.0.2.80`thttps://example.edu/`n", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $targetAuditFixtureRoot 'cname.txt'), '', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $targetAuditFixtureRoot 'headers.txt'), '', [Text.UTF8Encoding]::new($false))
+    $targetMetricResult = Invoke-VpsProcess -FilePath $pythonCommand.Source -ArgumentList @(
+        $targetAuditPythonPath, 'example.edu', '5', '0', '15', 'true', 'true', 'true', 'true', $targetAuditFixtureRoot
+    ) -TimeoutSeconds 30
+    Assert-True ($targetMetricResult.ExitCode -eq 0) 'target audit synthetic metric fixture executes'
+    $targetMetricMatch = [regex]::Match($targetMetricResult.StdOut, 'VPSDEPLOY_TARGET_JSON_B64=([A-Za-z0-9+/=]+)')
+    Assert-True $targetMetricMatch.Success 'target audit synthetic metric result is returned'
+    $targetMetric = ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($targetMetricMatch.Groups[1].Value)) | ConvertFrom-Json -AsHashtable)
+    Assert-True ([Math]::Abs([double]$targetMetric.tcp_connect_median_ms - 7.0) -lt 0.01) 'target audit computes TCP connect median after subtracting DNS'
+    Assert-True ([Math]::Abs([double]$targetMetric.tls_appconnect_median_ms - 73.0) -lt 0.01) 'target audit retains full TLS completion time as a separate metric'
+    Assert-True ([bool]$targetMetric.automatic_pass) 'slow TLS completion alone does not reject a nearby low-latency target'
+    [IO.Directory]::Delete($targetAuditFixtureRoot, $true)
 }
 $importSsh = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\existing-vps-import-ssh-keyonly.sh')
 Assert-True ($importSsh -match 'PasswordAuthentication no' -and $importSsh -match 'PubkeyAuthentication yes') 'optional existing-VPS key-only hardening remains available'
@@ -224,6 +328,17 @@ Assert-True ('BatchMode=yes' -notin $providerKeyArgs) 'interactive provider key 
 $passwordArgs = @(Get-VpsSshArguments -Context $sshArgumentContext -Port 22 -User root -Interactive)
 Assert-True ('-i' -notin $passwordArgs) 'password bootstrap does not force an identity file'
 Assert-True ('PubkeyAuthentication=no' -in $passwordArgs) 'password bootstrap does not accidentally reuse an agent key'
+$managedKeyArgs = @(Get-VpsSshArguments -Context $sshArgumentContext -Port 22 -User root)
+Assert-True ('IdentitiesOnly=yes' -in $managedKeyArgs -and 'PreferredAuthentications=publickey' -in $managedKeyArgs) 'managed-key verification explicitly uses only public-key authentication'
+Assert-True ('PasswordAuthentication=no' -in $managedKeyArgs -and 'KbdInteractiveAuthentication=no' -in $managedKeyArgs) 'managed-key verification cannot fall back to password authentication'
+Assert-True ($coreSource -match '密码及粘贴内容不会显示字符或星号' -and $coreSource -match '鼠标右键或 Ctrl\+Shift\+V 粘贴') 'password bootstrap explains hidden Windows Terminal paste behavior'
+Assert-True ($coreSource -match '重新打开 SSH 密码提示' -and $coreSource -match '这不是初始密码错误') 'password bootstrap offers retry while distinguishing later public-key verification failures'
+$bootstrapSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\bootstrap-access.sh')
+Assert-True ($bootstrapSource -match '00-00-mxh-bootstrap-access\.conf' -and $bootstrapSource -match 'VPSDEPLOY_BOOTSTRAP_SSH_CONFIG=updated') 'password bootstrap can enable public-key authentication on provider images that disable it'
+Assert-True ($bootstrapSource -match 'AuthorizedKeysFile \.ssh/authorized_keys' -and $bootstrapSource -match 'AuthenticationMethods any') 'bootstrap drop-in restores a standard root public-key authentication path'
+Assert-True ($bootstrapSource -match 'restore_managed' -and $bootstrapSource -match 'sshd -t' -and $bootstrapSource -match 'systemctl reload ssh\.service') 'bootstrap SSH compatibility change validates and rolls back before continuing'
+$bootstrapCommand = & $coreModule { New-VpsBootstrapAccessCommand -PublicKey 'ssh-ed25519 AAAA fixture' }
+Assert-True ($bootstrapCommand -match "VPS_PARAM_PUBLIC_KEY='ssh-ed25519 AAAA fixture'" -and $bootstrapCommand -match 'base64 -d') 'bootstrap command generator safely injects the quoted public key and encoded script'
 
 $keyReuseRoot = Join-Path $ProjectRoot '.test-output\ssh-key-reuse'
 if (Test-Path -LiteralPath $keyReuseRoot) { [IO.Directory]::Delete($keyReuseRoot, $true) }
@@ -275,6 +390,11 @@ try {
 finally { [Environment]::SetEnvironmentVariable('MXH_VPS_TEST_XRAY_LATEST',$oldLatest) }
 
 Write-Host '== Client export fixture ==' -ForegroundColor Cyan
+$singleStackNodeName = & $coreModule { Get-MxhAddressFamilyNodeName -BaseName 'Example-US.Entry' -AddressFamily IPv4 -DualStack $false }
+$dualStackIpv4Name = & $coreModule { Get-MxhAddressFamilyNodeName -BaseName 'Example-US.Entry' -AddressFamily IPv4 -DualStack $true }
+$dualStackIpv6Name = & $coreModule { Get-MxhAddressFamilyNodeName -BaseName 'Example-US.Entry' -AddressFamily IPv6 -DualStack $true }
+Assert-True ($singleStackNodeName -eq 'Example-US.Entry') 'single-stack client node keeps the exact user-entered name'
+Assert-True ($dualStackIpv4Name -eq 'Example-US.Entry-IPv4' -and $dualStackIpv6Name -eq 'Example-US.Entry-IPv6') 'dual-stack client nodes add explicit IPv4 and IPv6 suffixes'
 $fixtureRoot = Join-Path $ProjectRoot '.test-output\client-export'
 if (Test-Path -LiteralPath $fixtureRoot) {
     $resolved = [IO.Path]::GetFullPath($fixtureRoot)
@@ -311,6 +431,7 @@ $clientModule = $modules | Where-Object Id -eq 'client-export'
 & $clientModule.Invoke $fixtureContext
 $singBoxFixture = Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'client-exports\sing-box-outbounds.private.json') | ConvertFrom-Json
 Assert-True (@($singBoxFixture.outbounds).Count -eq 2) 'sing-box IPv4 and IPv6 outbounds generated'
+Assert-True (@($singBoxFixture.outbounds.tag) -contains 'Example-US.Entry-IPv4' -and @($singBoxFixture.outbounds.tag) -contains 'Example-US.Entry-IPv6') 'dual-stack Reality outbound names expose both address-family suffixes'
 Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $fixtureRoot 'client-exports\mihomo-test-primary.yaml')) -match 'xtls-rprx-vision') 'Mihomo Vision profile generated'
 Assert-True (@($fixtureContext.State.ClientExports.ValidationTargets).Count -eq 4) 'Reality exports cover primary/backup and IPv4/IPv6 independently'
 Assert-True ($fixtureContext.State.ClientExports.CoreValidation.mihomo.Status -eq 'Ready' -and $fixtureContext.State.ClientExports.CoreValidation['sing-box'].Status -eq 'Ready') 'Reality export requires both bundled stable cores'
@@ -344,6 +465,17 @@ Set-MxhRealityExternalTarget -Plan $replacementRealityPlan -Target 'new.example.
 $replacementRealityTarget = Get-MxhRealityTargetSettings -Plan $replacementRealityPlan
 Assert-True ($replacementRealityTarget.ServerName -eq 'new.example.invalid') 'replacement Reality target updates client server name'
 Assert-True ($replacementRealityTarget.TargetAddress -eq 'new.example.invalid:443') 'replacement Reality target updates server destination'
+$singleStackRealityContext = [pscustomobject]@{
+    Plan = [ordered]@{
+        NodeName = 'Example-US.Single'
+        Server = [ordered]@{ IPv4 = '192.0.2.11'; IPv6 = $null }
+        Ports = [ordered]@{ XrayPrimary = 443 }
+        Reality = $fixtureContext.Plan.Reality
+    }
+    Secrets = $fixtureContext.Secrets
+}
+$singleStackRealityProfile = New-MxhMihomoProfileText -Context $singleStackRealityContext -ServerPort 443 -MixedPort 17890 -AddressFamily IPv4
+Assert-True ($singleStackRealityProfile -match "name: 'Example-US.Single'" -and $singleStackRealityProfile -notmatch 'Example-US.Single-IPv4') 'single-stack Reality profile does not append an IPv4 suffix'
 $legacyRealityPlan = [ordered]@{ Reality = [ordered]@{ Target = 'legacy.example.invalid' } }
 Set-MxhRealityExternalTarget -Plan $legacyRealityPlan -Target 'legacy-new.example.invalid'
 $legacyRealityTarget = Get-MxhRealityTargetSettings -Plan $legacyRealityPlan
@@ -396,8 +528,24 @@ $landingExportModule = $modules | Where-Object Id -eq 'landing-client-export'
 & $landingExportModule.Invoke $landingContext
 $landingOutbounds = Get-Content -Raw -LiteralPath (Join-Path $landingFixtureRoot 'client-exports\sing-box-shadowsocks-outbounds.private.json') | ConvertFrom-Json
 Assert-True (@($landingOutbounds.outbounds).Count -eq 2) 'two landing client outbounds generated'
+Assert-True (@($landingOutbounds.outbounds.tag) -contains 'Example-US.Landing-IPv4' -and @($landingOutbounds.outbounds.tag) -contains 'Example-US.Landing-IPv6') 'dual-egress Shadowsocks nodes expose both address-family suffixes'
 Assert-True (($landingOutbounds.outbounds[0].password -split ':').Count -eq 2) 'client password combines server and user keys'
 Assert-True ($landingOutbounds.outbounds[0].detour -eq 'US-West Entry') 'sing-box detour points to transit tag'
+$singleStackLandingContext = [pscustomobject]@{
+    Plan = [ordered]@{
+        NodeName = 'Example-US.SingleLanding'
+        Server = [ordered]@{ IPv4 = '192.0.2.21'; IPv6 = $null }
+        Ports = $landingContext.Plan.Ports
+        Shadowsocks = [ordered]@{
+            Method = [string]$landingContext.Plan.Shadowsocks.Method
+            ClientTransitTag = [string]$landingContext.Plan.Shadowsocks.ClientTransitTag
+            SecondaryIpv6Enabled = $false
+        }
+    }
+    Secrets = $landingContext.Secrets
+}
+$singleStackLandingProfile = New-MxhLandingMihomoProfileText -Context $singleStackLandingContext -MixedPort 17897
+Assert-True ($singleStackLandingProfile -match "name: 'Example-US.SingleLanding'" -and $singleStackLandingProfile -notmatch 'Example-US.SingleLanding-IPv4') 'single-stack Shadowsocks profile does not append an IPv4 suffix'
 [IO.Directory]::Delete($landingFixtureRoot, $true)
 
 Write-Host '== AnyTLS trusted TLS and ECH fixture ==' -ForegroundColor Cyan
@@ -435,6 +583,17 @@ $anyTlsContext = [pscustomobject]@{
         }
     }
 }
+$anyTlsValidationMetadata = & $coreModule {
+    param($target, $plan)
+    Get-MxhValidationTargetMetadata -Target $target -Protocol AnyTLS -Plan $plan
+} ([ordered]@{ AddressFamily = 'IPv4'; MixedPort = 17895 }) $anyTlsContext.Plan
+Assert-True ($anyTlsValidationMetadata.Entry -eq 'primary' -and $anyTlsValidationMetadata.ServerPort -eq 443) 'AnyTLS real validation defaults missing Reality-only Entry and ServerPort fields safely'
+$realityValidationPlan = [ordered]@{ Ports = [ordered]@{ XrayPrimary = 443; AnyTlsPrimary = 8443 } }
+$realityValidationMetadata = & $coreModule {
+    param($target, $plan)
+    Get-MxhValidationTargetMetadata -Target $target -Protocol Reality -Plan $plan
+} ([ordered]@{ Entry = 'backup'; AddressFamily = 'IPv6'; ServerPort = 30443 }) $realityValidationPlan
+Assert-True ($realityValidationMetadata.Entry -eq 'backup' -and $realityValidationMetadata.ServerPort -eq 30443) 'Reality real validation preserves explicit entry and server port metadata'
 $anyTlsServerConfig = New-MxhAnyTlsServerConfig -Context $anyTlsContext
 $anyTlsRoundTrip = $anyTlsServerConfig | ConvertTo-Json -Depth 30 | ConvertFrom-Json
 Assert-True ($anyTlsRoundTrip.inbounds[0].type -eq 'anytls') 'AnyTLS server inbound generated'
@@ -447,8 +606,20 @@ Assert-True ($anyTlsClient.tls.ech.enabled) 'sing-box AnyTLS client ECH enabled'
 Assert-True (-not $anyTlsClient.tls.Contains('insecure')) 'sing-box AnyTLS client does not disable certificate verification'
 $anyTlsMihomo = New-MxhAnyTlsMihomoProfileText -Context $anyTlsContext -MixedPort 17894
 Assert-True ($anyTlsMihomo -match 'type: anytls') 'Mihomo AnyTLS profile generated'
+Assert-True ($anyTlsMihomo -match "name: 'Example-US.AnyTLS-IPv4'" -and $anyTlsMihomo -notmatch 'Example-US.AnyTLS-AnyTLS') 'dual-stack AnyTLS name uses only the address-family suffix'
 Assert-True ($anyTlsMihomo -match 'skip-cert-verify: false') 'Mihomo AnyTLS keeps certificate verification enabled'
 Assert-True ($anyTlsMihomo -match 'ech-opts:') 'Mihomo AnyTLS profile includes ECH'
+$singleStackAnyTlsContext = [pscustomobject]@{
+    Plan = [ordered]@{
+        NodeName = 'Example-US.Single'
+        Server = [ordered]@{ IPv4 = '192.0.2.41'; IPv6 = $null }
+        Ports = $anyTlsContext.Plan.Ports
+        AnyTls = $anyTlsContext.Plan.AnyTls
+    }
+    Secrets = $anyTlsContext.Secrets
+}
+$singleStackAnyTlsProfile = New-MxhAnyTlsMihomoProfileText -Context $singleStackAnyTlsContext -MixedPort 17896 -AddressFamily IPv4
+Assert-True ($singleStackAnyTlsProfile -match "name: 'Example-US.Single'" -and $singleStackAnyTlsProfile -notmatch 'Example-US.Single-(?:AnyTLS|IPv4)') 'single-stack AnyTLS profile keeps the exact user-entered name without protocol or IPv4 suffixes'
 
 Write-Host '== Bidirectional protocol migration planning ==' -ForegroundColor Cyan
 $realitySourcePath = Join-Path $ProjectRoot 'tests\fixtures\dry-run-plan.json'
@@ -647,6 +818,47 @@ Assert-True (-not $migrationContext.State.Modules.Contains('nftables-transition'
 Assert-True ($migrationContext.State.Migration.Status -eq 'Planned' -and -not $migrationContext.State.Migration.RollbackArmed) 'migration context starts before remote rollback is armed'
 [IO.Directory]::Delete($migrationFixtureRoot, $true)
 
+Write-Host '== Abandon incomplete deployment transaction ==' -ForegroundColor Cyan
+$abandonLocalRoot = Join-Path $ProjectRoot '.test-output\abandon-local-plan'
+if (Test-Path -LiteralPath $abandonLocalRoot) { [IO.Directory]::Delete($abandonLocalRoot, $true) }
+[IO.Directory]::CreateDirectory((Join-Path $abandonLocalRoot 'ssh')) | Out-Null
+[IO.Directory]::CreateDirectory((Join-Path $abandonLocalRoot 'server-configs')) | Out-Null
+[IO.Directory]::CreateDirectory((Join-Path $abandonLocalRoot 'client-exports')) | Out-Null
+$abandonPlanPath = Join-Path $abandonLocalRoot 'deployment-plan.json'
+$abandonStatePath = Join-Path $abandonLocalRoot 'deployment-state.json'
+$abandonSecretsPath = Join-Path $abandonLocalRoot 'deployment-secrets.private.json'
+$abandonTokenPath = Join-Path $abandonLocalRoot 'cloudflare-certbot-token.private.txt'
+$abandonKeyPath = Join-Path $abandonLocalRoot 'ssh\id_vps_management'
+$abandonPlan = [ordered]@{ Paths = [ordered]@{ Archive = $abandonLocalRoot } }
+$abandonState = [ordered]@{ Modules = [ordered]@{} }
+Save-VpsJson -Value $abandonPlan -Path $abandonPlanPath -Private
+Save-VpsJson -Value $abandonState -Path $abandonStatePath -Private
+Save-VpsJson -Value ([ordered]@{ Fixture = 'secret-placeholder' }) -Path $abandonSecretsPath -Private
+[IO.File]::WriteAllText($abandonTokenPath, 'fixture-token-placeholder')
+[IO.File]::WriteAllText($abandonKeyPath, 'fixture-key-placeholder')
+[IO.File]::WriteAllText((Join-Path $abandonLocalRoot 'deployment.log'), 'fixture log')
+& $coreModule { param($Root, $Path) Invoke-VpsAbandonIncompletePlan -ProjectRoot $Root -PlanPath $Path } $ProjectRoot $abandonPlanPath 6>$null
+Assert-True (-not (Test-Path -LiteralPath $abandonPlanPath) -and -not (Test-Path -LiteralPath $abandonStatePath) -and -not (Test-Path -LiteralPath $abandonSecretsPath)) 'abandoning an unstarted plan removes only incomplete plan state and secrets'
+Assert-True ((Test-Path -LiteralPath $abandonTokenPath) -and (Test-Path -LiteralPath $abandonKeyPath)) 'abandoning an unstarted plan preserves external token and SSH key files'
+$abandonRecords = @(Get-ChildItem -LiteralPath (Join-Path $abandonLocalRoot 'abandoned-transactions') -Filter '*.json' -File)
+Assert-True ($abandonRecords.Count -eq 1) 'abandoning an unstarted plan leaves one idempotent redacted audit record'
+$abandonRecord = Get-Content -Raw -LiteralPath $abandonRecords[0].FullName | ConvertFrom-Json -AsHashtable
+Assert-True (-not [bool]$abandonRecord.SnapshotDeleted -and [string]$abandonRecord.Kind -eq 'LocalPlanOnly') 'local-only abandon does not falsely claim a remote snapshot was deleted'
+[IO.Directory]::Delete($abandonLocalRoot, $true)
+
+$legacyAbandonRoot = Join-Path $ProjectRoot '.test-output\abandon-legacy-mutated-plan'
+[IO.Directory]::CreateDirectory($legacyAbandonRoot) | Out-Null
+$legacyAbandonPlanPath = Join-Path $legacyAbandonRoot 'deployment-plan.json'
+$legacyAbandonStatePath = Join-Path $legacyAbandonRoot 'deployment-state.json'
+Save-VpsJson -Value ([ordered]@{ Paths = [ordered]@{ Archive = $legacyAbandonRoot } }) -Path $legacyAbandonPlanPath -Private
+Save-VpsJson -Value ([ordered]@{ Modules = [ordered]@{ audit = [ordered]@{ Status = 'Success' } } }) -Path $legacyAbandonStatePath -Private
+$legacyAbandonRejected = $false
+try { & $coreModule { param($Root, $Path) Invoke-VpsAbandonIncompletePlan -ProjectRoot $Root -PlanPath $Path } $ProjectRoot $legacyAbandonPlanPath 6>$null }
+catch { $legacyAbandonRejected = $_.Exception.Message -match '尚无统一部署前快照' }
+Assert-True $legacyAbandonRejected 'legacy remotely mutated plans without a unified baseline refuse fake clean rollback'
+Assert-True ((Test-Path -LiteralPath $legacyAbandonPlanPath) -and (Test-Path -LiteralPath $legacyAbandonStatePath)) 'rejected legacy abandon preserves local recovery material'
+[IO.Directory]::Delete($legacyAbandonRoot, $true)
+
 Write-Host '== Conservative adaptive network planning ==' -ForegroundColor Cyan
 $entrySmall = Get-VpsConservativeNetworkPlan -Role RealityEntry -MemoryKiB 1048576 `
     -Mode AdaptiveConservative -BandwidthMbps 1000 -ReferenceRttMs 160
@@ -706,6 +918,7 @@ foreach ($file in $shellFiles) {
     Assert-True (-not $text.Contains("`r")) "$($file.Name) uses LF"
     Assert-True ($text -notmatch '(?m)^\s*set\s+-[^\n]*x') "$($file.Name) does not enable xtrace"
     Assert-True ($text -notmatch 'nft\s+list\s+ruleset\s*\|\s*grep\s+-[^\s]*q') "$($file.Name) avoids pipefail plus grep-q SIGPIPE checks"
+    Assert-True ($text -notmatch '(?m)^[^#\n]+\|\s*grep\s+-[^\s]*q') "$($file.Name) avoids pipefail plus early-exit grep-q pipelines"
     if ($bash) {
         & $bash -n $file.FullName
         Assert-True ($LASTEXITCODE -eq 0) "$($file.Name) bash -n"
@@ -795,7 +1008,7 @@ Assert-True (-not (Test-Path -LiteralPath $wizardArchive)) 'interactive wizard d
 $reuseWizardRoot = Join-Path $ProjectRoot '.test-output\wizard-existing-key-root'
 $reuseWizardKey = Join-Path $ProjectRoot '.test-output\wizard-existing-provider-key'
 if(Test-Path $reuseWizardRoot){[IO.Directory]::Delete($reuseWizardRoot,$true)}
-foreach($item in @($reuseWizardKey,$reuseWizardKey+'.pub')){if(Test-Path $item){Remove-Item $item -Force}}
+foreach($item in @($reuseWizardKey,($reuseWizardKey+'.pub'))){if(Test-Path $item){Remove-Item $item -Force}}
 $reuseKeygen=Invoke-VpsProcess (Get-Command ssh-keygen.exe).Source @('-t','ed25519','-N','','-C','provider-reuse-wizard','-f',$reuseWizardKey) -TimeoutSeconds 60
 Assert-True ($reuseKeygen.ExitCode -eq 0) 'existing-key wizard fixture key generated'
 $reuseWizardInput=(@('', 'ExampleProvider','ReuseExistingInstance','','192.0.2.63','','','2',$reuseWizardKey,'1','4','','n','n','1')-join[Environment]::NewLine)+[Environment]::NewLine
@@ -804,7 +1017,7 @@ $reuseWizardResult=Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
 ) -InputText $reuseWizardInput -TimeoutSeconds 60
 Assert-True ($reuseWizardResult.ExitCode -eq 0) 'new-deployment wizard accepts provider existing-key reuse without forcing a new public key'
 Assert-True (-not(Test-Path $reuseWizardRoot)) 'existing-key New DryRun creates no instance archive'
-foreach($item in @($reuseWizardKey,$reuseWizardKey+'.pub')){if(Test-Path $item){Remove-Item $item -Force}}
+foreach($item in @($reuseWizardKey,($reuseWizardKey+'.pub'))){if(Test-Path $item){Remove-Item $item -Force}}
 
 $branchResetRoot = Join-Path $ProjectRoot '.test-output\wizard-branch-reset'
 $branchDefaultRoot = Join-Path $ProjectRoot '.test-output\wizard-default-root'
@@ -990,6 +1203,8 @@ foreach ($name in $maintenanceFunctions) {
     $exists = & $coreModule { param($n) [bool](Get-Command $n -ErrorAction SilentlyContinue) } $name
     Assert-True $exists "maintenance function exists: $name"
 }
+$operationsSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'src\VpsDeploy.Operations.ps1')
+Assert-True ($operationsSource -match 'foreach\(\$directory in @\(''client-exports'',''server-configs''\)\)' -and $operationsSource -match 'Remove-Item \$current -Recurse -Force' -and $operationsSource -match 'Copy-Item \$source \$current -Recurse') 'failed maintenance rollback restores generated client and server configuration directories with the state files'
 $healthAuditFixture = [ordered]@{
     SchemaVersion=1;CollectedAt='2026-01-01T00:00:00Z';Ssh=[ordered]@{Valid=$true;Ports=@([int]$realitySource.Ports.SshPrimary,[int]$realitySource.Ports.SshRescue);PasswordAuthentication='no';KbdInteractiveAuthentication='no';PubkeyAuthentication='yes';PermitRootLogin='prohibit-password'}
     Services=[ordered]@{
@@ -1018,6 +1233,13 @@ $maintenanceResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
 ) -InputText $maintenanceInput -TimeoutSeconds 60
 Assert-True ($maintenanceResult.ExitCode -eq 0) 'maintenance center health audit DryRun exits cleanly'
 Assert-True ($maintenanceResult.StdOut -match 'DryRun') 'maintenance center routes to read-only health audit'
+$maintenanceBackInput = (@('1','9','0','0') -join [Environment]::NewLine) + [Environment]::NewLine
+$maintenanceBackResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
+    '-NoProfile','-File',(Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),'-Mode','Maintain','-DryRun','-PlanPath',$maintenancePlan
+) -InputText $maintenanceBackInput -TimeoutSeconds 60
+$maintenanceMenuCount = ([regex]::Matches($maintenanceBackResult.StdOut, '(?m)^\s*10\.')).Count
+Assert-True ($maintenanceBackResult.ExitCode -eq 0) 'maintenance submenu back navigation exits cleanly after returning to the maintenance menu'
+Assert-True ($maintenanceMenuCount -eq 2) 'maintenance submenu 0 redraws the maintenance center directly instead of reselecting the instance'
 
 $candidateRoot = Join-Path $maintenanceRoot 'candidate-fixture'
 $fragmentRoot = Join-Path $candidateRoot 'fragments'
@@ -1300,6 +1522,22 @@ $preExecutionBack = & $coreModule {
 } $preExecutionContext 6>$null
 Assert-True ($preExecutionBack -eq '__MXH_VPS_WIZARD_BACK__') 'final pre-execution confirmation can return before any remote module starts'
 Assert-True ($preExecutionContext.State.Modules.Count -eq 0) 'pre-execution back leaves every module untouched'
+
+$completedMigrationExplicitContext = [pscustomobject]@{
+    ProjectRoot = $ProjectRoot
+    Plan = [ordered]@{
+        Role = 'AuditOnly'
+        Migration = [ordered]@{ Enabled = $true; ModuleIds = @('private-archive'); Status = 'Completed' }
+    }
+    State = [ordered]@{ Modules = @{} }
+    DryRun = $true
+    NonInteractive = $true
+}
+$completedMigrationExplicitOutput = (& $coreModule {
+        param($Context)
+        Invoke-VpsModulePipeline -Context $Context -OnlyModule @('audit')
+    } $completedMigrationExplicitContext 6>&1 | Out-String)
+Assert-True ($completedMigrationExplicitOutput -match 'audit\s+只读审计系统') 'OnlyModule bypasses stale completed-migration ModuleIds and selects the explicitly requested eligible module'
 
 Write-Host '== Final private archive checksum timing ==' -ForegroundColor Cyan
 $checksumFixture = Join-Path $ProjectRoot '.test-output\private-archive-checksum'

@@ -61,7 +61,8 @@ done
 managed=/etc/ssh/sshd_config.d/00-00-local-access.conf
 install -d -m 0755 /etc/ssh/sshd_config.d
 {
-  for port in ${VPS_PARAM_OLD_PORTS//,/ } "$VPS_PARAM_NEW_PRIMARY" "$VPS_PARAM_NEW_RESCUE"; do printf 'Port %s\n' "$port"; done | sort -nu
+  for port in ${VPS_PARAM_OLD_PORTS//,/ } "$VPS_PARAM_NEW_PRIMARY" "$VPS_PARAM_NEW_RESCUE"; do printf '%s\n' "$port"; done |
+    sort -nu | sed 's/^/Port /'
   printf '%s\n' 'PubkeyAuthentication yes' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' 'PermitRootLogin prohibit-password'
 } > "$managed"
 chmod 0644 "$managed"; sshd -t

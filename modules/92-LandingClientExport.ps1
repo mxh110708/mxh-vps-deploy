@@ -16,10 +16,11 @@
         Protect-VpsPrivateFile $mihomoPath
 
         $credentials = $Context.Secrets.Shadowsocks
+        $dualStack = [bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled
         $outbounds = [Collections.Generic.List[object]]::new()
         $outbounds.Add([ordered]@{
                 type = 'shadowsocks'
-                tag = "$($Context.Plan.NodeName)-IPv4"
+                tag = (Get-MxhAddressFamilyNodeName -BaseName ([string]$Context.Plan.NodeName) -AddressFamily IPv4 -DualStack $dualStack)
                 server = [string]$Context.Plan.Server.IPv4
                 server_port = [int]$Context.Plan.Ports.LandingShadowsocks
                 method = [string]$Context.Plan.Shadowsocks.Method
@@ -29,7 +30,7 @@
         if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
             $outbounds.Add([ordered]@{
                     type = 'shadowsocks'
-                    tag = "$($Context.Plan.NodeName)-IPv6"
+                    tag = (Get-MxhAddressFamilyNodeName -BaseName ([string]$Context.Plan.NodeName) -AddressFamily IPv6 -DualStack $dualStack)
                     server = [string]$Context.Plan.Server.IPv4
                     server_port = [int]$Context.Plan.Ports.LandingShadowsocks
                     method = [string]$Context.Plan.Shadowsocks.Method

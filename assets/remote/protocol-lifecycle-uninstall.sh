@@ -13,7 +13,8 @@ remove_xray() {
   rm -f /etc/nginx/sites-enabled/mxh-reality-target /etc/nginx/sites-available/mxh-reality-target
   rm -rf /var/www/mxh-reality-target
   if command -v nginx >/dev/null 2>&1; then
-    if find /etc/nginx/sites-enabled -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+    enabled_site="$(find /etc/nginx/sites-enabled -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
+    if grep -q . <<< "$enabled_site"; then
       nginx -t
       systemctl reload nginx.service >/dev/null 2>&1 || true
     else

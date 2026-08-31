@@ -60,7 +60,7 @@ pwsh -File .\Start-VPSDeploy.ps1
 | 你的目标 | 主菜单 |
 |---|---:|
 | 配置一台新 VPS | 1 |
-| 上次中断后继续执行同一份计划 | 2 |
+| 上次中断后继续执行，或放弃未完成计划并恢复 | 2 |
 | 现有 VPS 已经有 Reality、AnyTLS 或 Shadowsocks，但还没有本工具计划 | 3 |
 | 在已纳管实例上安装备用协议、切换、停用、卸载或清理协议备份 | 4 |
 | 做恢复、审计、凭据轮换、SSH/防火墙维护、升级、Komari 或退役 | 5 |
@@ -68,7 +68,7 @@ pwsh -File .\Start-VPSDeploy.ps1
 | 组合多台入口/落地节点并生成 Clash 与 sing-box 完整配置 | 7 |
 | 只检查项目文件、脚本语法和离线测试 | 8 |
 
-“继续未完成部署”只用于已有 `deployment-plan.json` 且模块未全部完成的任务，不等同于“给现有 VPS 增加协议”。没有计划的现有 VPS 应先纳管；已经纳管的实例应进入协议管理或运维中心。
+“继续未完成部署”只用于已有 `deployment-plan.json` 且模块未全部完成的任务，不等同于“给现有 VPS 增加协议”。进入后可以继续，也可以显式选择“放弃未完成计划并回滚到部署前”。放弃操作只有在可验证快照存在时才会执行：先恢复远端、复验 SSH，再删除本次远端/本地快照和未完成计划；已有管理密钥与外部 Token 文件保留。没有计划的现有 VPS 应先纳管；已经纳管的实例应进入协议管理或运维中心。
 
 ## 当前功能
 
@@ -92,7 +92,7 @@ pwsh -File .\Start-VPSDeploy.ps1
 
 ### Reality、证书与 AnyTLS
 
-- 外部 Reality target 会检查 TCP/443、TLS 1.3、h2、证书、跳转、CDN 特征与多次握手时延；
+- 外部 Reality target 会检查 TCP/443、TLS 1.3、h2、证书、跳转和 CDN 特征；多次采样以扣除 DNS 的 TCP 建连中位数执行邻近性门禁，完整 TLS 建连时间单独展示为参考；
 - 自动门槛不通过时展示非敏感结果，默认要求更换，也允许人工输入确认短语并记录原因后继续；
 - Reality 也可使用自有域名和只监听回环地址的静态 HTTPS target；
 - AnyTLS 使用 DNS-01、Certbot、ECDSA 证书、ECH 和低权限 systemd 服务；
@@ -212,7 +212,7 @@ pwsh -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
 pwsh -File .\Start-VPSDeploy.ps1 -Mode New -DryRun
 ```
 
-`-Mode Migrate` 是为了兼容旧命令保留的名称，实际入口是“现有 VPS 协议管理”。`-OnlyModule` 只面向明确理解依赖关系的维护场景，不应借此跳过首次部署的 SSH、防火墙和最终验收顺序。
+`-Mode Migrate` 是为了兼容旧命令保留的名称，实际入口是“现有 VPS 协议管理”。`-OnlyModule` 只面向明确理解依赖关系的维护场景，不应借此跳过首次部署的 SSH、防火墙和最终验收顺序；它只报告所选模块完成，不会把局部成功误报为整套部署完成。
 
 ## 安全边界
 

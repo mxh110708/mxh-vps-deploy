@@ -7,6 +7,7 @@
     IsEnabled = { param($Context) $true }
     Invoke    = {
         param($Context)
+        Write-VpsUi '下载配置并生成最终私有归档可能需要数分钟；长时间下载会显示已运行时间，请勿关闭窗口。' Info
         $serverDir = Join-Path $Context.ArchivePath 'server-configs'
         $realityInstalled = Test-MxhProtocolInstalled -Plan $Context.Plan -Role 'RealityEntry'
         $anyTlsInstalled = Test-MxhProtocolInstalled -Plan $Context.Plan -Role 'AnyTlsEntry'
@@ -59,9 +60,15 @@
             $downloads['/etc/systemd/system/mxh-certbot-renew.timer'] = Join-Path $serverDir 'mxh-certbot-renew.timer'
             $downloads['/usr/local/libexec/mxh-certbot-deploy'] = Join-Path $serverDir 'mxh-certbot-deploy'
         }
+        $downloadStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $downloadIndex = 0
         foreach ($remote in $downloads.Keys) {
-            Invoke-VpsScpDownload -Context $Context -RemotePath $remote -LocalPath $downloads[$remote]
+            $downloadIndex++
+            Invoke-VpsScpDownload -Context $Context -RemotePath $remote -LocalPath $downloads[$remote] `
+                -ProgressActivity "下载最终私有归档配置（$downloadIndex/$($downloads.Count)）"
         }
+        $downloadStopwatch.Stop()
+        Write-VpsUi "服务器配置下载完成（用时 $($downloadStopwatch.Elapsed.ToString('hh\:mm\:ss'))）；正在生成最终私有归档。" Info
 
         $s = if ($realityInstalled) { $Context.Secrets.Xray } else { $null }
         $archivePath = Join-Path $Context.ArchivePath ($Context.Plan.NodeName + '-final-archive.txt')

@@ -1,7 +1,7 @@
 @{
     Id        = 'migration-arm-rollback'
     Name      = '部署协议生命周期变更独立自动回滚'
-    Order     = 49
+    Order     = 36
     Roles     = @('RealityEntry', 'AnyTlsEntry', 'ShadowsocksLanding', 'MonitorOnly')
     Requires  = @('migration-preflight')
     IsEnabled = {
@@ -24,6 +24,9 @@
         $Context.State.Migration.Status = 'RollbackArmed'
         $Context.State.Migration.RollbackArmed = $true
         $Context.State.Migration.RemoteBackupDirectory = $backup
+        $Context.State.Migration.BaselineSchemaVersion = 1
+        $Context.State.Migration.BaselineCapturedBeforeMutations = $true
+        $Context.State.Migration.BaselineCapturedAt = (Get-Date).ToString('o')
         $Context.State.Migration.RollbackDeadlineMinutes = [int]$Context.Plan.Migration.RollbackTimeoutMinutes
         Save-VpsContext -Context $Context
         Write-VpsUi 'VPS 端独立回滚计时器已启用；后续失败会恢复变更前的全部协议文件、启用状态和旧 nftables。' Success

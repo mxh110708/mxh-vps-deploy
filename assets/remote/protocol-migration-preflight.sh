@@ -22,7 +22,7 @@ done
 systemctl is-active --quiet ssh.service
 sshd -t
 for port in "$VPS_PARAM_SSH_PRIMARY" "$VPS_PARAM_SSH_RESCUE"; do
-  ss -H -lntp "sport = :$port" | grep -Fq sshd || { echo "sshd is not listening on $port" >&2; exit 1; }
+  grep -Fq sshd <<< "$(ss -H -lntp "sport = :$port")" || { echo "sshd is not listening on $port" >&2; exit 1; }
 done
 if command -v nft >/dev/null 2>&1 && [[ -f /etc/nftables.conf ]]; then nft -c -f /etc/nftables.conf; fi
 if systemctl is-active --quiet mxh-protocol-migration-rollback.timer 2>/dev/null; then
@@ -56,18 +56,18 @@ verify_protocol ShadowsocksLanding sing-box.service /usr/local/bin/sing-box /etc
   "$VPS_PARAM_SHADOWSOCKS_INSTALLED" "$VPS_PARAM_SHADOWSOCKS_ENABLED"
 
 if [[ "$VPS_PARAM_REALITY_ENABLED" == 'true' ]]; then
-  ss -H -lntp 'sport = :443' | grep -Fq xray
+  grep -Fq xray <<< "$(ss -H -lntp 'sport = :443')"
   if [[ -n "${VPS_PARAM_XRAY_BACKUP_PORT:-}" ]]; then
-    ss -H -lntp "sport = :${VPS_PARAM_XRAY_BACKUP_PORT}" | grep -Fq xray
+    grep -Fq xray <<< "$(ss -H -lntp "sport = :${VPS_PARAM_XRAY_BACKUP_PORT}")"
   fi
 fi
 if [[ "$VPS_PARAM_ANYTLS_ENABLED" == 'true' ]]; then
-  ss -H -lntp 'sport = :443' | grep -Fq sing-box-anytl
+  grep -Fq sing-box-anytl <<< "$(ss -H -lntp 'sport = :443')"
 fi
 if [[ "$VPS_PARAM_SHADOWSOCKS_ENABLED" == 'true' ]]; then
   [[ -n "${VPS_PARAM_SHADOWSOCKS_PORT:-}" ]]
-  ss -H -lntp "sport = :${VPS_PARAM_SHADOWSOCKS_PORT}" | grep -Fq sing-box
-  ss -H -lnup "sport = :${VPS_PARAM_SHADOWSOCKS_PORT}" | grep -Fq sing-box
+  grep -Fq sing-box <<< "$(ss -H -lntp "sport = :${VPS_PARAM_SHADOWSOCKS_PORT}")"
+  grep -Fq sing-box <<< "$(ss -H -lnup "sport = :${VPS_PARAM_SHADOWSOCKS_PORT}")"
 fi
 
 printf '%s\n' 'VPSDEPLOY_MIGRATION_PREFLIGHT_OK'

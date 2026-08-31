@@ -79,15 +79,15 @@ check_state sing-box-anytls.service "$anytls_enabled"
 check_state sing-box.service "$shadowsocks_enabled"
 
 if [[ "$reality_enabled" == 'true' ]]; then
-  ss -H -lntp 'sport = :443' | grep -Fq xray
-  if [[ -n "$target_aux_port" ]]; then ss -H -lntp "sport = :${target_aux_port}" | grep -Fq xray; fi
+  grep -Fq xray <<< "$(ss -H -lntp 'sport = :443')"
+  if [[ -n "$target_aux_port" ]]; then grep -Fq xray <<< "$(ss -H -lntp "sport = :${target_aux_port}")"; fi
 fi
 if [[ "$anytls_enabled" == 'true' ]]; then
-  ss -H -lntp 'sport = :443' | grep -Fq sing-box-anytl
+  grep -Fq sing-box-anytl <<< "$(ss -H -lntp 'sport = :443')"
 fi
 if [[ "$shadowsocks_enabled" == 'true' ]]; then
-  ss -H -lntp "sport = :${VPS_PARAM_TARGET_PORT}" | grep -Fq sing-box
-  ss -H -lnup "sport = :${VPS_PARAM_TARGET_PORT}" | grep -Fq sing-box
+  grep -Fq sing-box <<< "$(ss -H -lntp "sport = :${VPS_PARAM_TARGET_PORT}")"
+  grep -Fq sing-box <<< "$(ss -H -lnup "sport = :${VPS_PARAM_TARGET_PORT}")"
 fi
 
 case "$remove_role" in

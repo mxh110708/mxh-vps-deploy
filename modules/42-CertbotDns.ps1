@@ -40,7 +40,13 @@
             REALITY_DOMAINS = if ($isLocalReality) { [string]$Context.Plan.Reality.ServerName } else { '' }
         }
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'certbot-dns-setup.sh' `
-            -Parameters $parameters -TimeoutSeconds 1800 -SensitiveOutput
+            -Parameters $parameters -TimeoutSeconds 1800 -SensitiveOutput -AllowFailure `
+            -ProgressActivity '配置 Cloudflare DNS-01 证书与自动续期'
+        if ($result.ExitCode -ne 0) {
+            $safeError = Get-VpsMarkerValue -Text $result.StdOut -Name CERTBOT_SAFE_ERROR
+            if ($safeError) { throw $safeError }
+            throw 'Certbot DNS-01 远程执行失败；敏感输出已隐藏，且远端未返回可公开的阶段错误。'
+        }
         if ($result.StdOut -notmatch 'VPSDEPLOY_CERTBOT_DNS_OK') {
             throw 'Certbot DNS-01 未返回成功标记。'
         }

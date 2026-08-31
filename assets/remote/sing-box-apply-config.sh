@@ -23,11 +23,11 @@ systemctl enable sing-box.service
 systemctl restart sing-box.service
 systemctl is-active --quiet sing-box.service
 sleep 1
-ss -H -lntp "sport = :${VPS_PARAM_LANDING_PORT}" | grep -q sing-box || {
+grep -q sing-box <<< "$(ss -H -lntp "sport = :${VPS_PARAM_LANDING_PORT}")" || {
   echo 'sing-box TCP listener is missing.' >&2
   exit 1
 }
-ss -H -lnup "sport = :${VPS_PARAM_LANDING_PORT}" | grep -q sing-box || {
+grep -q sing-box <<< "$(ss -H -lnup "sport = :${VPS_PARAM_LANDING_PORT}")" || {
   echo 'sing-box UDP listener is missing.' >&2
   exit 1
 }

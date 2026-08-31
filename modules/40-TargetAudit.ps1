@@ -40,7 +40,9 @@
             Write-Host "  最终 URL：$($audit.effective_url)"
             Write-Host "  跨域跳转：$($audit.cross_host_redirect)"
             Write-Host "  握手：$($audit.success_count)/$($audit.sample_count) 成功，失败 $($audit.failure_count)"
-            Write-Host "  时延：中位 $($audit.median_ms) ms / P95 $($audit.p95_ms) ms / 最大 $($audit.max_ms) ms"
+            Write-Host "  DNS 解析：中位 $($audit.dns_median_ms) ms"
+            Write-Host "  TCP 建连（不含 DNS，自动门禁）：中位 $($audit.tcp_connect_median_ms) ms / P95 $($audit.tcp_connect_p95_ms) ms / 最大 $($audit.tcp_connect_max_ms) ms"
+            Write-Host "  TLS 完成（含 DNS/TCP，仅供参考）：中位 $($audit.tls_appconnect_median_ms) ms / P95 $($audit.tls_appconnect_p95_ms) ms / 最大 $($audit.tls_appconnect_max_ms) ms"
             if ($audit.shared_cdn_indicators.Count -gt 0) {
                 Write-VpsUi "共享 CDN 特征：$($audit.shared_cdn_indicators -join ', ')" Warning
             }

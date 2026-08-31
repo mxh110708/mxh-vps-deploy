@@ -105,7 +105,7 @@ EOF
 systemctl daemon-reload
 systemctl enable --now komari-agent.service
 systemctl is-active --quiet komari-agent.service
-if ss -H -lntup 2>/dev/null | grep -q komari-agent; then
+if grep -q komari-agent <<< "$(ss -H -lntup 2>/dev/null)"; then
   echo 'Komari Agent unexpectedly opened a listening port.' >&2
   exit 1
 fi

@@ -33,7 +33,7 @@ sleep 1
 ports=("$VPS_PARAM_PRIMARY_PORT")
 if [[ -n "$backup_port" ]]; then ports+=("$backup_port"); fi
 for port in "${ports[@]}"; do
-  ss -H -lntp "sport = :$port" | grep -q xray || { echo "Xray is not listening on $port" >&2; exit 1; }
+  grep -q xray <<< "$(ss -H -lntp "sport = :$port")" || { echo "Xray is not listening on $port" >&2; exit 1; }
 done
 
 if command -v timeout >/dev/null 2>&1; then

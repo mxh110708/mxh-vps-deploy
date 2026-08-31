@@ -28,7 +28,8 @@ disk_kib="$(df -Pk / | awk 'NR==2 {print $2}')"
 service_candidates=(xray sing-box docker containerd podman nginx apache2 caddy x-ui 3x-ui s-ui)
 existing_services=()
 for service in "${service_candidates[@]}"; do
-  if systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -Eq "^${service}(\.service)?$"; then
+  unit_names="$(systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}')"
+  if grep -Eq "^${service}(\.service)?$" <<< "$unit_names"; then
     existing_services+=("$service")
   fi
 done

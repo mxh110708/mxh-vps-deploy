@@ -44,10 +44,11 @@
 
         $s = $Context.Secrets.Xray
         $realityTarget = Get-MxhRealityTargetSettings -Plan $Context.Plan
+        $dualStack = [bool]$Context.Plan.Server.IPv6
         $outbounds = [Collections.Generic.List[object]]::new()
         foreach ($entry in @(
-                @{ Tag = "$($Context.Plan.NodeName)-IPv4"; Server = [string]$Context.Plan.Server.IPv4 },
-                @{ Tag = "$($Context.Plan.NodeName)-IPv6"; Server = [string]$Context.Plan.Server.IPv6 }
+                @{ Tag = (Get-MxhAddressFamilyNodeName -BaseName ([string]$Context.Plan.NodeName) -AddressFamily IPv4 -DualStack $dualStack); Server = [string]$Context.Plan.Server.IPv4 },
+                @{ Tag = (Get-MxhAddressFamilyNodeName -BaseName ([string]$Context.Plan.NodeName) -AddressFamily IPv6 -DualStack $dualStack); Server = [string]$Context.Plan.Server.IPv6 }
             )) {
             if (-not $entry.Server) { continue }
             $outbounds.Add([ordered]@{

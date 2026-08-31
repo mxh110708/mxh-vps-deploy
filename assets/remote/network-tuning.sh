@@ -51,7 +51,8 @@ fi
 
 if [[ "$check_only" == false ]]; then modprobe tcp_bbr 2>/dev/null || true; fi
 bbr_available=false
-if sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+available_congestion_control="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null)"
+if grep -qw bbr <<< "$available_congestion_control"; then
   bbr_available=true
 fi
 

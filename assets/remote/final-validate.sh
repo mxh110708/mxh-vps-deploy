@@ -38,9 +38,9 @@ if [[ "$VPS_PARAM_REALITY_ENABLED" == 'true' ]]; then
   /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json
   systemctl is-enabled --quiet xray.service
   systemctl is-active --quiet xray.service
-  ss -H -lntp "sport = :${VPS_PARAM_XRAY_PRIMARY}" | grep -q xray
+  grep -q xray <<< "$(ss -H -lntp "sport = :${VPS_PARAM_XRAY_PRIMARY}")"
   if [[ -n "${VPS_PARAM_XRAY_BACKUP:-}" ]]; then
-    ss -H -lntp "sport = :${VPS_PARAM_XRAY_BACKUP}" | grep -q xray
+    grep -q xray <<< "$(ss -H -lntp "sport = :${VPS_PARAM_XRAY_BACKUP}")"
   fi
   if [[ "${VPS_PARAM_REALITY_TARGET_MODE:-ExternalAudited}" == 'LocalOwnedTls' ]]; then
     : "${VPS_PARAM_LOCAL_HTTPS_PORT:?}"
@@ -90,8 +90,8 @@ if [[ "$VPS_PARAM_SHADOWSOCKS_ENABLED" == 'true' ]]; then
   systemctl is-enabled --quiet sing-box.service
   systemctl is-active --quiet sing-box.service
   [[ "$(stat -c '%a' /etc/sing-box/config.json)" == '640' ]]
-  ss -H -lntp "sport = :${VPS_PARAM_LANDING_PORT}" | grep -q sing-box
-  ss -H -lnup "sport = :${VPS_PARAM_LANDING_PORT}" | grep -q sing-box
+  grep -q sing-box <<< "$(ss -H -lntp "sport = :${VPS_PARAM_LANDING_PORT}")"
+  grep -q sing-box <<< "$(ss -H -lnup "sport = :${VPS_PARAM_LANDING_PORT}")"
   if [[ "$firewall_mode" == 'ManagedNftables' ]]; then
     ruleset="$(nft list ruleset)"
     grep -Eq "tcp dport.*${VPS_PARAM_LANDING_PORT}|tcp dport ${VPS_PARAM_LANDING_PORT}" <<<"$ruleset"
@@ -109,7 +109,7 @@ fi
 if [[ "$VPS_PARAM_KOMARI_ENABLED" == 'true' ]]; then
   systemctl is-active --quiet komari-agent.service
   [[ "$(stat -c '%a' /etc/komari-agent/config.json)" == '600' ]]
-  ! ss -H -lntup 2>/dev/null | grep -q komari-agent
+  ! grep -q komari-agent <<< "$(ss -H -lntup 2>/dev/null)"
 fi
 
 time_state="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
