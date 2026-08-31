@@ -43,7 +43,7 @@ case "$VPS_PARAM_KIND" in
             sing-box-anytls-install sing-box-anytls sing-box-install sing-box \
             ssh-cutover xray; do
             [[ -e "$candidate_path/$component" || -L "$candidate_path/$component" ]] || continue
-            rm -rf -- "$candidate_path/$component"
+            rm -rf -- "${candidate_path:?}/${component:?}"
           done
           rmdir -- "$candidate_path" 2>/dev/null || true
         done < <(find /root/vps-deploy-backups -mindepth 1 -maxdepth 1 -type d -printf '%f\n')

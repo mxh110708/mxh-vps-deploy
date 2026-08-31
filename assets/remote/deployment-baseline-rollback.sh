@@ -17,11 +17,11 @@ rm -f /usr/local/sbin/vps-deploy-ssh-rollback /run/vps-deploy-ssh-cutover-ok
 
 while IFS= read -r path; do
   [[ -n "$path" && "$path" != /* && "$path" != *'..'* ]]
-  rm -rf -- "/$path"
+  rm -rf -- "/${path:?}"
 done < "$baseline/paths.list"
 while IFS= read -r path; do
   [[ -n "$path" && "$path" != /* && "$path" != *'..'* ]]
-  rm -rf -- "/$path"
+  rm -rf -- "/${path:?}"
 done < "$baseline/absent.list"
 tar --numeric-owner -xzpf "$baseline/files.tar.gz" -C /
 
