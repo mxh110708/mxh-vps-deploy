@@ -394,12 +394,9 @@ Assert-True (Test-Path -LiteralPath $managedKey -PathType Leaf) 'existing provid
 Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $managedKey).Hash -eq $sourceHash) 'managed key copy preserves the provider private key instead of rotating it'
 Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $sourceKey).Hash -eq $sourceHash) 'provider key source is never renamed or modified'
 if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-    $managedAcl = Get-Acl -LiteralPath $managedKey
-    $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $managedAccess = @($managedAcl.Access)
-    $managedAccessSids = @($managedAccess | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })
-    Assert-True ($managedAcl.Owner -eq $currentIdentity.Name -and $managedAccess.Count -eq 1 -and
-        -not $managedAccess[0].IsInherited -and $managedAccessSids[0] -eq $currentIdentity.User.Value) 'managed OpenSSH private key grants access only to the current Windows user'
+    $managedKeyProbe = Invoke-VpsProcess -FilePath (Get-Command ssh-keygen.exe -ErrorAction Stop).Source `
+        -ArgumentList @('-y','-f',$managedKey) -TimeoutSeconds 60
+    Assert-True ($managedKeyProbe.ExitCode -eq 0) 'managed private key satisfies the authoritative Windows OpenSSH access check'
     Assert-True ((Get-Acl -LiteralPath $sourceKey).Sddl -eq $sourceAclBefore) 'provider source-key ACL is not changed when the managed copy is sufficient'
 }
 Assert-True ((Get-Content -Raw -LiteralPath ($managedKey + '.pub')).Trim() -match '^ssh-ed25519\s+') 'public key is derived from the reused private key'
