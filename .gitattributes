@@ -8,3 +8,4 @@
 *.md text eol=lf
 *.cmd text eol=crlf
 *.zip binary
+vendor/test-cores/windows-amd64/mihomo-geodata/*.dat binary

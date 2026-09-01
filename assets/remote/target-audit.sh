@@ -15,7 +15,7 @@ trap 'rm -rf "$work"' EXIT
 getent ahostsv4 "$target" > "$work/addresses.txt" || true
 dig +short CNAME "$target" > "$work/cname.txt" || true
 
-if ! openssl s_client -connect "${target}:443" -servername "$target" \
+if ! timeout 20 openssl s_client -4 -connect "${target}:443" -servername "$target" \
     -verify_return_error -tls1_3 -alpn h2 </dev/null > "$work/tls.txt" 2>&1; then
   tls_command_ok=false
 else

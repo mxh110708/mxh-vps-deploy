@@ -305,6 +305,39 @@ function Test-MxhClientBuilderRuntime {
     return $python
 }
 
+function Get-MxhClientCoreFailureText {
+    param([Parameter(Mandatory)]$Result)
+    $parts = [Collections.Generic.List[string]]::new()
+    foreach ($value in @([string]$Result.StdErr, [string]$Result.StdOut)) {
+        $trimmed = $value.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($trimmed) -and $trimmed -notin $parts) {
+            $parts.Add($trimmed)
+        }
+    }
+    if (-not $parts.Count) { return "核心退出码 $($Result.ExitCode)，没有提供诊断输出。" }
+    return ($parts -join "`n")
+}
+
+function Invoke-MxhMihomoCandidateCheck {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$CorePath,
+        [Parameter(Mandatory)][string]$DataDirectory,
+        [Parameter(Mandatory)][string]$ConfigPath
+    )
+    Copy-VpsBundledMihomoGeodata -ProjectRoot $ProjectRoot -DestinationDirectory $DataDirectory | Out-Null
+    $result = $null
+    foreach ($attempt in 1..2) {
+        $result = Invoke-VpsProcess $CorePath @('-t', '-d', $DataDirectory, '-f', $ConfigPath) -TimeoutSeconds 180
+        if ($result.ExitCode -eq 0) { return $result }
+        if ($attempt -eq 1) {
+            Write-VpsUi 'Mihomo 首次校验失败；保留隔离数据目录并自动重试一次，以排除 GeoData/规则集首次获取的瞬时失败。' Warning
+            Start-Sleep -Seconds 1
+        }
+    }
+    return $result
+}
+
 function Test-MxhClientAuthorityPair {
     param(
         [Parameter(Mandatory)][string]$ProjectRoot,
@@ -319,8 +352,8 @@ function Test-MxhClientAuthorityPair {
         $data = Join-Path ([IO.Path]::GetTempPath()) ('mxh-mihomo-' + [guid]::NewGuid().ToString('N'))
         [IO.Directory]::CreateDirectory($data) | Out-Null
         try {
-            $test = Invoke-VpsProcess $mihomo.Path @('-t', '-d', $data, '-f', $ClashPath) -TimeoutSeconds 180
-            if ($test.ExitCode -ne 0) { throw "Clash 候选未通过内置稳定 Mihomo：$($test.StdErr.Trim())" }
+            $test = Invoke-MxhMihomoCandidateCheck -ProjectRoot $ProjectRoot -CorePath $mihomo.Path -DataDirectory $data -ConfigPath $ClashPath
+            if ($test.ExitCode -ne 0) { throw "Clash 候选未通过内置稳定 Mihomo：$(Get-MxhClientCoreFailureText $test)" }
         }
         finally { Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue }
     }
@@ -328,14 +361,14 @@ function Test-MxhClientAuthorityPair {
     $states['sing-box'] = $singBox
     if ($singBox.Status -eq 'Ready') {
         $test = Invoke-VpsProcess $singBox.Path @('check', '-c', $SingBoxPath) -TimeoutSeconds 180
-        if ($test.ExitCode -ne 0) { throw "sing-box 候选未通过内置稳定核心：$($test.StdErr.Trim())" }
+        if ($test.ExitCode -ne 0) { throw "sing-box 候选未通过内置稳定核心：$(Get-MxhClientCoreFailureText $test)" }
     }
     foreach ($alpha in @(Get-VpsMihomoCorePaths -ProjectRoot $ProjectRoot | Where-Object { $_ -ne $mihomo.Path })) {
         $data = Join-Path ([IO.Path]::GetTempPath()) ('mxh-mihomo-alpha-' + [guid]::NewGuid().ToString('N'))
         [IO.Directory]::CreateDirectory($data) | Out-Null
         try {
-            $test = Invoke-VpsProcess $alpha @('-t', '-d', $data, '-f', $ClashPath) -TimeoutSeconds 180
-            if ($test.ExitCode -ne 0) { throw "Clash 候选未通过可选 Mihomo alpha：$($test.StdErr.Trim())" }
+            $test = Invoke-MxhMihomoCandidateCheck -ProjectRoot $ProjectRoot -CorePath $alpha -DataDirectory $data -ConfigPath $ClashPath
+            if ($test.ExitCode -ne 0) { throw "Clash 候选未通过可选 Mihomo alpha：$(Get-MxhClientCoreFailureText $test)" }
         }
         finally { Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue }
     }

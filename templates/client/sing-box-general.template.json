@@ -18,6 +18,18 @@
       "tag": "mixed-in",
       "listen": "127.0.0.1",
       "listen_port": 2080
+    },
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "stack": "system",
+      "auto_route": true,
+      "strict_route": true,
+      "dns_mode": "hijack"
     }
   ],
   "outbounds": [
@@ -54,18 +66,19 @@
   "route": {
     "rules": [
       { "action": "sniff" },
-      { "port": [25, 3306], "outbound": "Legacy Ports" },
-      { "network": "udp", "port": 443, "outbound": "QUIC Guard" },
-      { "network": "udp", "port": [3478, 3479, 3480, 3481], "outbound": "WebRTC Guard" },
-      { "domain_suffix": ["openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "perplexity.ai"], "outbound": "AI Services" },
-      { "domain_suffix": ["github.com", "githubusercontent.com", "npmjs.org", "pypi.org", "docker.com", "docker.io"], "outbound": "Developer Tools" },
-      { "domain_suffix": ["arxiv.org", "ieee.org", "springer.com", "nature.com"], "outbound": "Academic Research" },
-      { "domain_suffix": ["microsoft.com", "office.com", "live.com"], "outbound": "Microsoft Services" },
-      { "domain_suffix": ["apple.com", "icloud.com"], "outbound": "Apple Services" },
-      { "domain_suffix": ["xbox.com", "xboxlive.com", "steampowered.com", "steamcommunity.com"], "outbound": "Game Platforms" },
-      { "domain_suffix": ["steamcontent.com"], "outbound": "Game Downloads" },
-      { "domain_suffix": ["telegram.org", "t.me", "twitter.com", "x.com"], "outbound": "Social & Messaging" },
-      { "domain_suffix": ["youtube.com", "netflix.com", "spotify.com"], "outbound": "Streaming Media" }
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "port": [25, 3306], "action": "route", "outbound": "Legacy Ports" },
+      { "network": "udp", "port": 443, "action": "route", "outbound": "QUIC Guard" },
+      { "network": "udp", "port": [3478, 3479, 3480, 3481], "action": "route", "outbound": "WebRTC Guard" },
+      { "domain_suffix": ["openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "perplexity.ai"], "action": "route", "outbound": "AI Services" },
+      { "domain_suffix": ["github.com", "githubusercontent.com", "npmjs.org", "pypi.org", "docker.com", "docker.io"], "action": "route", "outbound": "Developer Tools" },
+      { "domain_suffix": ["arxiv.org", "ieee.org", "springer.com", "nature.com"], "action": "route", "outbound": "Academic Research" },
+      { "domain_suffix": ["microsoft.com", "office.com", "live.com"], "action": "route", "outbound": "Microsoft Services" },
+      { "domain_suffix": ["apple.com", "icloud.com"], "action": "route", "outbound": "Apple Services" },
+      { "domain_suffix": ["xbox.com", "xboxlive.com", "steampowered.com", "steamcommunity.com"], "action": "route", "outbound": "Game Platforms" },
+      { "domain_suffix": ["steamcontent.com"], "action": "route", "outbound": "Game Downloads" },
+      { "domain_suffix": ["telegram.org", "t.me", "twitter.com", "x.com"], "action": "route", "outbound": "Social & Messaging" },
+      { "domain_suffix": ["youtube.com", "netflix.com", "spotify.com"], "action": "route", "outbound": "Streaming Media" }
     ],
     "final": "Catch-All",
     "auto_detect_interface": true

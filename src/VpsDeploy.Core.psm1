@@ -159,6 +159,41 @@ function Get-VpsBundledClientCore {
     return $cached[0].FullName
 }
 
+function Copy-VpsBundledMihomoGeodata {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$DestinationDirectory
+    )
+    $vendorRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot 'vendor\test-cores\windows-amd64'))
+    $manifestPath = Join-Path $vendorRoot 'checksums.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw '内置 Mihomo GeoData checksums.json 缺失。' }
+    $manifest = Read-VpsJsonHashtable -Path $manifestPath
+    $entries = @($manifest.data_files | Where-Object { [string]$_.consumer -eq 'mihomo' })
+    if ($entries.Count -ne 2) { throw '内置 Mihomo GeoData 清单必须同时包含 GeoSite.dat 与 GeoIP.dat。' }
+    [IO.Directory]::CreateDirectory($DestinationDirectory) | Out-Null
+    $copied = [Collections.Generic.List[string]]::new()
+    foreach ($entry in $entries) {
+        $relative = [string]$entry.file
+        if ([IO.Path]::IsPathRooted($relative)) { throw '内置 Mihomo GeoData 清单不能使用绝对路径。' }
+        $source = [IO.Path]::GetFullPath((Join-Path $vendorRoot $relative))
+        if (-not $source.StartsWith($vendorRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw '内置 Mihomo GeoData 路径越出 vendor 目录。'
+        }
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "内置 Mihomo GeoData 缺失：$relative" }
+        $expected = ([string]$entry.sha256).ToLowerInvariant()
+        if ($expected -notmatch '^[0-9a-f]{64}$') { throw "内置 Mihomo GeoData SHA-256 无效：$relative" }
+        $actual = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) { throw "内置 Mihomo GeoData SHA-256 不匹配：$relative" }
+        $leaf = Split-Path -Leaf $source
+        if ($leaf -notin @('GeoSite.dat', 'GeoIP.dat')) { throw "不支持的 Mihomo GeoData 文件名：$leaf" }
+        $target = Join-Path $DestinationDirectory $leaf
+        Copy-Item -LiteralPath $source -Destination $target -Force
+        $copied.Add($target)
+    }
+    return @($copied)
+}
+
 function Resolve-VpsClientValidationCore {
     [CmdletBinding()]
     param(
@@ -1600,6 +1635,37 @@ function Protect-VpsPrivateFile {
     return
 }
 
+function Set-VpsOpenSshPrivateKeyAccess {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string]$Path)
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "待设置 OpenSSH 权限的私钥不存在：$Path"
+    }
+
+    # 先以 OpenSSH 自身作为权威判断。若现有 ACL 已满足运行最低要求，
+    # 不做任何修改；只有实际被拒绝时才收紧这一个私钥文件。
+    $sshKeygen = Get-VpsCommandPath 'ssh-keygen.exe'
+    $probe = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $Path) -TimeoutSeconds 60
+    if ($probe.ExitCode -eq 0) { return }
+
+    # Windows OpenSSH 会拒绝其他账户可读的用户私钥。icacls 仅对明确的
+    # literal 文件移除继承并授予当前用户；不改所有者、不递归、不处理目录。
+    $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $icacls = Get-VpsCommandPath 'icacls.exe'
+    $aclResult = Invoke-VpsProcess -FilePath $icacls -ArgumentList @(
+        $Path, '/inheritance:r', '/grant:r', "${currentIdentity}:(F)"
+    ) -TimeoutSeconds 60
+    if ($aclResult.ExitCode -ne 0) {
+        throw "无法把 OpenSSH 私钥权限收紧到运行最低要求：$($aclResult.StdErr.Trim())"
+    }
+    $verify = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $Path) -TimeoutSeconds 60
+    if ($verify.ExitCode -ne 0) {
+        throw '私钥 ACL 已尝试收紧，但 Windows OpenSSH 仍拒绝读取。'
+    }
+}
+
 function Save-VpsJson {
     [CmdletBinding()]
     param(
@@ -1771,8 +1837,15 @@ function Update-VpsPrivateArchiveChecksums {
         throw '实例私有归档目录不存在，无法生成校验和。'
     }
     $checksumPath = Join-Path $archive 'SHA256SUMS-private.txt'
+    $liveLogPath = Join-Path $archive 'deployment.log'
     $files = Get-ChildItem -LiteralPath $archive -File -Recurse |
-        Where-Object { -not $_.FullName.Equals($checksumPath, [StringComparison]::OrdinalIgnoreCase) }
+        Where-Object {
+            -not $_.FullName.Equals($checksumPath, [StringComparison]::OrdinalIgnoreCase) -and
+            # deployment.log remains append-only during later read-only audits and
+            # maintenance. Including that live file would make a completed archive
+            # fail verification as soon as the next legitimate operation is logged.
+            -not $_.FullName.Equals($liveLogPath, [StringComparison]::OrdinalIgnoreCase)
+        }
     $lines = foreach ($file in $files) {
         $relative = [IO.Path]::GetRelativePath($archive, $file.FullName).Replace('\', '/')
         try {
@@ -1834,8 +1907,21 @@ function Invoke-VpsProcess {
     $lastProgressLength = 0
     $lastProgressElapsed = ''
     if ($null -ne $InputText) {
-        $process.StandardInput.Write($InputText)
-        $process.StandardInput.Close()
+        try {
+            $process.StandardInput.Write($InputText)
+        }
+        catch {
+            $inner=$_.Exception.InnerException
+            if($_.Exception -isnot [IO.IOException] -and $_.Exception -isnot [ObjectDisposedException] -and
+                $inner -isnot [IO.IOException] -and $inner -isnot [ObjectDisposedException]){throw}
+            # A short-lived child (notably ssh after a rejected identity or a
+            # remote preamble failure) can close stdin before the payload has
+            # been written.  Still collect its exit code and stderr so the
+            # caller can classify the failure and, for SSH, try the next key.
+        }
+        finally {
+            try { $process.StandardInput.Close() } catch { }
+        }
     }
     try {
         if ([string]::IsNullOrWhiteSpace($ProgressActivity)) {
@@ -1905,14 +1991,45 @@ function Get-VpsManagedSshKeyPath {
     return Join-Path ([string]$Context.Plan.Paths.KeyDirectory) $fileName
 }
 
-function Get-VpsSshKeyPath {
+function Get-VpsSshKeyCandidates {
     param([Parameter(Mandatory)] $Context)
+    $candidates = [Collections.Generic.List[string]]::new()
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    if ($Context.PSObject.Properties['ActiveSshKeyPath']) {
+        $active = [string]$Context.ActiveSshKeyPath
+        if (-not [string]::IsNullOrWhiteSpace($active)) {
+            $active = [IO.Path]::GetFullPath($active)
+            if ((Test-Path -LiteralPath $active -PathType Leaf) -and $seen.Add($active)) { $candidates.Add($active) }
+        }
+    }
     if ($Context.Plan.Contains('SshKey') -and [string]$Context.Plan.SshKey.Mode -eq 'ReuseExisting' -and
         $Context.Plan.SshKey.Contains('SourcePrivateKeyPath') -and $Context.Plan.SshKey.SourcePrivateKeyPath) {
         $source = [IO.Path]::GetFullPath([string]$Context.Plan.SshKey.SourcePrivateKeyPath)
-        if (Test-Path -LiteralPath $source -PathType Leaf) { return $source }
+        if ((Test-Path -LiteralPath $source -PathType Leaf) -and $seen.Add($source)) { $candidates.Add($source) }
     }
-    return Get-VpsManagedSshKeyPath -Context $Context
+    $managed = Get-VpsManagedSshKeyPath -Context $Context
+    $managed = [IO.Path]::GetFullPath($managed)
+    if ((Test-Path -LiteralPath $managed -PathType Leaf) -and $seen.Add($managed)) { $candidates.Add($managed) }
+    if ($candidates.Count -eq 0) { $candidates.Add($managed) }
+    return $candidates.ToArray()
+}
+
+function Get-VpsSshKeyPath {
+    param([Parameter(Mandatory)] $Context)
+    return @(Get-VpsSshKeyCandidates -Context $Context)[0]
+}
+
+function Set-VpsActiveSshKeyPath {
+    param([Parameter(Mandatory)] $Context, [Parameter(Mandatory)] [string]$Path)
+    $resolved = [IO.Path]::GetFullPath($Path)
+    if ($Context.PSObject.Properties['ActiveSshKeyPath']) { $Context.ActiveSshKeyPath = $resolved }
+    else { $Context | Add-Member -NotePropertyName ActiveSshKeyPath -NotePropertyValue $resolved }
+}
+
+function Test-VpsSshIdentityFailure {
+    param([Parameter(Mandatory)] $Result)
+    $details = ([string]$Result.StdErr) + "`n" + ([string]$Result.StdOut)
+    return $details -match '(?i)(UNPROTECTED PRIVATE KEY FILE|Load key .*(?:bad permissions|invalid format)|no such identity|Identity file .* not accessible|Permission denied \(publickey(?:,[^)]+)?\))'
 }
 
 function Get-VpsSshPublicKeyPath {
@@ -2002,10 +2119,16 @@ function Initialize-VpsSshKey {
     $keyPath = Get-VpsManagedSshKeyPath $Context
     $publicPath = $keyPath + '.pub'
     $sshKeygen = Get-VpsCommandPath 'ssh-keygen.exe'
+    $keyMode = if ($Context.Plan.Contains('SshKey') -and $Context.Plan.SshKey.Contains('Mode')) {
+        [string]$Context.Plan.SshKey.Mode
+    }
+    else { 'GenerateManaged' }
+    if ($Context.Plan.Contains('SshKey') -and $Context.Plan.SshKey.Contains('OperationalPrivateKeyPath')) {
+        [void]$Context.Plan.SshKey.Remove('OperationalPrivateKeyPath')
+    }
     if ((Test-Path -LiteralPath $keyPath) -and (Test-Path -LiteralPath $publicPath)) {
-        Protect-VpsPrivateFile -Path $keyPath
-        $activeKeyPath = Get-VpsSshKeyPath $Context
-        $derivedExisting = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $activeKeyPath) -TimeoutSeconds 60
+        Set-VpsOpenSshPrivateKeyAccess -Path $keyPath
+        $derivedExisting = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $keyPath) -TimeoutSeconds 60
         $derivedMatch = [regex]::Match($derivedExisting.StdOut.Trim(), '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+([A-Za-z0-9+/=]+)(?:\s+.*)?$')
         $storedMatch = [regex]::Match((Get-Content -Raw -LiteralPath $publicPath).Trim(), '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+([A-Za-z0-9+/=]+)(?:\s+.*)?$')
         if ($derivedExisting.ExitCode -ne 0 -or -not $derivedMatch.Success -or -not $storedMatch.Success -or
@@ -2014,10 +2137,6 @@ function Initialize-VpsSshKey {
         }
         return
     }
-    $keyMode = if ($Context.Plan.Contains('SshKey') -and $Context.Plan.SshKey.Contains('Mode')) {
-        [string]$Context.Plan.SshKey.Mode
-    }
-    else { 'GenerateManaged' }
     if ($keyMode -eq 'ReuseExisting') {
         $source = if ($Context.Plan.SshKey.Contains('SourcePrivateKeyPath')) {
             [string]$Context.Plan.SshKey.SourcePrivateKeyPath
@@ -2029,25 +2148,26 @@ function Initialize-VpsSshKey {
         [IO.Directory]::CreateDirectory((Split-Path -Parent $keyPath)) | Out-Null
         $sourceResolved = (Resolve-Path -LiteralPath $source).Path
         $destinationFull = [IO.Path]::GetFullPath($keyPath)
-        $derived = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $sourceResolved) -TimeoutSeconds 60
+        if (-not $sourceResolved.Equals($destinationFull, [StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $sourceResolved -Destination $keyPath -Force
+        }
+        Set-VpsOpenSshPrivateKeyAccess -Path $keyPath
+        $derived = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $keyPath) -TimeoutSeconds 60
         $publicMatch = [regex]::Match($derived.StdOut.Trim(), '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521))\s+([A-Za-z0-9+/=]+)(?:\s+.*)?$')
         if ($derived.ExitCode -ne 0 -or -not $publicMatch.Success) {
             throw '现有私钥无法作为无交互 OpenSSH 管理密钥使用；请确认格式和口令状态，或选择生成新 Ed25519 密钥。'
         }
-        if (-not $sourceResolved.Equals($destinationFull, [StringComparison]::OrdinalIgnoreCase)) {
-            Copy-Item -LiteralPath $sourceResolved -Destination $keyPath -Force
-        }
         $publicMaterial = $publicMatch.Groups[1].Value + ' ' + $publicMatch.Groups[2].Value
         [IO.File]::WriteAllText($publicPath, ($publicMaterial + ' ' + [string]$Context.Plan.NodeName + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
-        Protect-VpsPrivateFile -Path $keyPath
         Write-VpsUi '已复用现有 OpenSSH 私钥并建立规范文件名；原始私钥未改名、未删除，服务器公钥未轮换。' Success
         return
     }
     if ($keyMode -ne 'GenerateManaged') { throw "不支持的 SSH 密钥模式：$keyMode" }
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $keyPath)) | Out-Null
     $arguments = @('-t', 'ed25519', '-a', '64', '-N', '', '-C', $Context.Plan.NodeName, '-f', $keyPath)
     $result = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList $arguments -TimeoutSeconds 60
     if ($result.ExitCode -ne 0) { throw "生成 SSH 密钥失败：$($result.StdErr.Trim())" }
-    Protect-VpsPrivateFile -Path $keyPath
+    Set-VpsOpenSshPrivateKeyAccess -Path $keyPath
 }
 
 function Initialize-VpsBootstrapAccess {
@@ -2144,11 +2264,22 @@ function Invoke-VpsSshCommand {
     )
 
     $ssh = Get-VpsCommandPath 'ssh.exe'
-    $arguments = [Collections.Generic.List[string]]::new()
-    foreach ($item in (Get-VpsSshArguments -Context $Context -Port $Port -User $User)) { $arguments.Add($item) }
-    $arguments.Add($Command)
-    $result = Invoke-VpsProcess -FilePath $ssh -ArgumentList $arguments.ToArray() -InputText $InputText `
-        -TimeoutSeconds $TimeoutSeconds -ProgressActivity $ProgressActivity
+    $keyCandidates = @(Get-VpsSshKeyCandidates -Context $Context)
+    $result = $null
+    for ($index = 0; $index -lt $keyCandidates.Count; $index++) {
+        $identity = $keyCandidates[$index]
+        $arguments = [Collections.Generic.List[string]]::new()
+        foreach ($item in (Get-VpsSshArguments -Context $Context -Port $Port -User $User -IdentityFile $identity)) { $arguments.Add($item) }
+        $arguments.Add($Command)
+        $result = Invoke-VpsProcess -FilePath $ssh -ArgumentList $arguments.ToArray() -InputText $InputText `
+            -TimeoutSeconds $TimeoutSeconds -ProgressActivity $ProgressActivity
+        if ($result.ExitCode -eq 0) {
+            Set-VpsActiveSshKeyPath -Context $Context -Path $identity
+            break
+        }
+        if ($index -ge ($keyCandidates.Count - 1) -or -not (Test-VpsSshIdentityFailure -Result $result)) { break }
+        if (-not $SensitiveOutput) { Write-VpsLog -Context $Context -Message "SSH identity candidate rejected; trying managed/source fallback." }
+    }
     if (-not $SensitiveOutput) {
         Write-VpsLog -Context $Context -Message "SSH $User port=$Port exit=$($result.ExitCode)"
     }
@@ -2263,6 +2394,26 @@ function Test-VpsSshConnection {
     return $result.ExitCode -eq 0 -and $result.StdOut -match 'VPSDEPLOY_LOGIN_OK'
 }
 
+function Test-VpsManagedAdminPassword {
+    param([Parameter(Mandatory)] $Context)
+    if (-not $Context.Secrets -or -not $Context.Secrets.Contains('AdminPassword')) { return $false }
+    $password = [string]$Context.Secrets.AdminPassword
+    return -not [string]::IsNullOrWhiteSpace($password) -and $password -cne '<not-managed>'
+}
+
+function Test-VpsImportedAdminSudoPolicy {
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] [string]$User,
+        [Parameter(Mandatory)] [int]$Port
+    )
+    if ($User -notmatch '^[a-z_][a-z0-9_-]{0,31}$') { throw 'admin 用户名格式无效，无法执行 sudo 授权验证。' }
+    if (-not (Test-VpsSshConnection -Context $Context -User $User -Port $Port)) { return $false }
+    $result = Invoke-VpsSshCommand -Context $Context -User root -Port $Port `
+        -Command "sudo -l -U '$User' >/dev/null 2>&1" -AllowFailure
+    return $result.ExitCode -eq 0
+}
+
 function Invoke-VpsScpDownload {
     [CmdletBinding()]
     param(
@@ -2276,12 +2427,19 @@ function Invoke-VpsScpDownload {
     if (-not $Port) { $Port = [int]$Context.State.CurrentManagementPort }
     $scp = Get-VpsCommandPath 'scp.exe'
     [IO.Directory]::CreateDirectory((Split-Path -Parent $LocalPath)) | Out-Null
-    $args = @(
-        '-q', '-o', 'BatchMode=yes', '-o', 'ControlMaster=no', '-o', 'StrictHostKeyChecking=accept-new',
-        '-i', (Get-VpsSshKeyPath $Context), '-P', $Port.ToString(),
-        "root@$($Context.Plan.Server.IPv4):$RemotePath", $LocalPath
-    )
-    $result = Invoke-VpsProcess -FilePath $scp -ArgumentList $args -TimeoutSeconds 180 -ProgressActivity $ProgressActivity
+    $keyCandidates = @(Get-VpsSshKeyCandidates -Context $Context)
+    $result = $null
+    for ($index = 0; $index -lt $keyCandidates.Count; $index++) {
+        $identity = $keyCandidates[$index]
+        $args = @(
+            '-o', 'BatchMode=yes', '-o', 'ControlMaster=no', '-o', 'StrictHostKeyChecking=accept-new',
+            '-i', $identity, '-P', $Port.ToString(),
+            "root@$($Context.Plan.Server.IPv4):$RemotePath", $LocalPath
+        )
+        $result = Invoke-VpsProcess -FilePath $scp -ArgumentList $args -TimeoutSeconds 180 -ProgressActivity $ProgressActivity
+        if ($result.ExitCode -eq 0) { Set-VpsActiveSshKeyPath -Context $Context -Path $identity; break }
+        if ($index -ge ($keyCandidates.Count - 1) -or -not (Test-VpsSshIdentityFailure -Result $result)) { break }
+    }
     if ($result.ExitCode -ne 0) { throw "下载远端配置失败：$RemotePath" }
     Protect-VpsPrivateFile -Path $LocalPath
 }
@@ -2298,12 +2456,19 @@ function Invoke-VpsScpUpload {
     if (-not (Test-Path -LiteralPath $LocalPath -PathType Leaf)) { throw "待上传文件不存在：$LocalPath" }
     if (-not $Port) { $Port = [int]$Context.State.CurrentManagementPort }
     $scp = Get-VpsCommandPath 'scp.exe'
-    $args = @(
-        '-q', '-o', 'BatchMode=yes', '-o', 'ControlMaster=no', '-o', 'StrictHostKeyChecking=accept-new',
-        '-i', (Get-VpsSshKeyPath $Context), '-P', $Port.ToString(),
-        $LocalPath, "root@$($Context.Plan.Server.IPv4):$RemotePath"
-    )
-    $result = Invoke-VpsProcess -FilePath $scp -ArgumentList $args -TimeoutSeconds 180
+    $keyCandidates = @(Get-VpsSshKeyCandidates -Context $Context)
+    $result = $null
+    for ($index = 0; $index -lt $keyCandidates.Count; $index++) {
+        $identity = $keyCandidates[$index]
+        $args = @(
+            '-o', 'BatchMode=yes', '-o', 'ControlMaster=no', '-o', 'StrictHostKeyChecking=accept-new',
+            '-i', $identity, '-P', $Port.ToString(),
+            $LocalPath, "root@$($Context.Plan.Server.IPv4):$RemotePath"
+        )
+        $result = Invoke-VpsProcess -FilePath $scp -ArgumentList $args -TimeoutSeconds 180 -ProgressActivity '上传文件到 VPS'
+        if ($result.ExitCode -eq 0) { Set-VpsActiveSshKeyPath -Context $Context -Path $identity; break }
+        if ($index -ge ($keyCandidates.Count - 1) -or -not (Test-VpsSshIdentityFailure -Result $result)) { break }
+    }
     if ($result.ExitCode -ne 0) { throw "上传远端文件失败：$RemotePath" }
 }
 
@@ -3060,6 +3225,71 @@ function Test-MxhPublicIpv6SourceAddress {
     return (($bytes[0] -band 0xfe) -ne 0xfc)
 }
 
+function Get-MxhIpv6ValidationSkipRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] [ValidateSet('Reality', 'AnyTLS')] [string]$Protocol
+    )
+
+    if (-not $Context.Plan.Contains('ClientValidation') -or
+        -not $Context.Plan.ClientValidation.Contains('Ipv6Skips') -or
+        -not $Context.Plan.ClientValidation.Ipv6Skips.Contains($Protocol)) { return $null }
+    $record = $Context.Plan.ClientValidation.Ipv6Skips[$Protocol]
+    $currentIpv6 = ([string]$Context.Plan.Server.IPv6).Split('/')[0].Trim('[', ']')
+    if (-not $record -or [string]$record.ServerIpv6 -ne $currentIpv6 -or
+        [string]::IsNullOrWhiteSpace([string]$record.Reason) -or
+        [string]::IsNullOrWhiteSpace([string]$record.AcceptedAt)) { return $null }
+    return $record
+}
+
+function Request-MxhIpv6ValidationDisposition {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Context,
+        [Parameter(Mandatory)] [ValidateSet('Reality', 'AnyTLS')] [string]$Protocol,
+        [Parameter(Mandatory)] [string]$PathFailureReason
+    )
+
+    $existing = Get-MxhIpv6ValidationSkipRecord -Context $Context -Protocol $Protocol
+    if ($existing) { return $existing }
+    if ($Context.NonInteractive) { return $null }
+
+    Write-VpsUi "$Protocol 的 IPv6 本机验收路径不可用：$PathFailureReason" Warning
+    $choice = Read-VpsMenu '如何处理 IPv6 真实验收' @(
+        '选择外部受管 VPS 执行 IPv6 验收（推荐）',
+        '明确跳过本次 IPv6 验收（记录为未验证）'
+    ) 1 -AllowBack
+    if ($choice -eq 1) { return $null }
+
+    Write-VpsUi '跳过后只会确认 IPv4；IPv6 将记录为 SkippedByUser，不能视为双栈全部通过。' Warning
+    $phrase = Read-VpsText '输入 SKIP-IPV6-VALIDATION 确认' -AllowBack
+    if ($phrase -cne 'SKIP-IPV6-VALIDATION') { throw 'IPv6 跳过确认短语不匹配。' }
+    $reason = Read-VpsText '填写跳过 IPv6 验收的原因（写入私有记录）' -AllowBack -Validate {
+        param($v) -not [string]::IsNullOrWhiteSpace($v) -and $v.Trim().Length -ge 5
+    } -ValidationMessage '请至少填写 5 个字符的原因。'
+    $record = [ordered]@{
+        Status = 'SkippedByUser'
+        Protocol = $Protocol
+        ServerIpv6 = ([string]$Context.Plan.Server.IPv6).Split('/')[0].Trim('[', ']')
+        Reason = $reason.Trim()
+        AcceptedAt = (Get-Date).ToString('o')
+    }
+    if (-not $Context.Plan.Contains('ClientValidation')) { $Context.Plan.ClientValidation = [ordered]@{} }
+    if (-not $Context.Plan.ClientValidation.Contains('Ipv6Skips')) {
+        $Context.Plan.ClientValidation.Ipv6Skips = [ordered]@{}
+    }
+    $Context.Plan.ClientValidation.Ipv6Skips[$Protocol] = $record
+    Save-VpsJson -Value $Context.Plan -Path $Context.PlanPath -Private
+    if (-not $Context.State.Contains('ClientValidation')) { $Context.State.ClientValidation = [ordered]@{} }
+    if (-not $Context.State.ClientValidation.Contains('Ipv6Skips')) {
+        $Context.State.ClientValidation.Ipv6Skips = [ordered]@{}
+    }
+    $Context.State.ClientValidation.Ipv6Skips[$Protocol] = $record
+    Save-VpsContext -Context $Context
+    return $record
+}
+
 function Test-MxhControllerValidationPath {
     [CmdletBinding()]
     param(
@@ -3266,17 +3496,36 @@ function Invoke-MxhRealClientValidation {
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)][ValidateSet('Reality', 'AnyTLS')][string]$Protocol
     )
-    $exports = if ($Protocol -eq 'Reality') { $Context.State.ClientExports } else { $Context.State.AnyTlsClientExports }
-    if (-not $exports -or -not $exports.ValidationTargets) { throw "$Protocol 缺少逐地址族客户端验收配置，请先重新生成客户端导出。" }
-    $coreStates = if ($exports.CoreValidation) { $exports.CoreValidation } else { [ordered]@{} }
+    $stateKey=if($Protocol -eq 'Reality'){'ClientExports'}else{'AnyTlsClientExports'}
+    $exports=if($Context.State.Contains($stateKey)){$Context.State[$stateKey]}else{$null}
+    $hasTargets=$exports -and $exports.Contains('ValidationTargets') -and @($exports.ValidationTargets).Count -gt 0
+    if(-not $hasTargets){
+        $modulePath=if($Protocol -eq 'Reality'){'modules\90-ClientExport.ps1'}else{'modules\91-AnyTlsClientExport.ps1'}
+        $clientModule=& (Join-Path $Context.ProjectRoot $modulePath)
+        & $clientModule.Invoke $Context
+        $exports=if($Context.State.Contains($stateKey)){$Context.State[$stateKey]}else{$null}
+        $hasTargets=$exports -and $exports.Contains('ValidationTargets') -and @($exports.ValidationTargets).Count -gt 0
+    }
+    if(-not $hasTargets){throw "$Protocol 缺少逐地址族客户端验收配置，自动重新生成客户端导出后仍不可用。"}
+    $coreStates = if ($exports.Contains('CoreValidation') -and $exports.CoreValidation) { $exports.CoreValidation } else { [ordered]@{} }
     $results = [Collections.Generic.List[object]]::new()
     $localTargets = [Collections.Generic.List[object]]::new()
     $externalTargets = [Collections.Generic.List[object]]::new()
+    $skippedTargets = [Collections.Generic.List[object]]::new()
     $probeContext = $null
     foreach ($target in @($exports.ValidationTargets)) {
         $path = Test-MxhControllerValidationPath -Context $Context -Target $target -Protocol $Protocol
         if ($path.Usable) { $localTargets.Add($target); continue }
         Write-VpsUi "$Protocol 的 IPv6 本机验收路径不可用：$($path.Reason)" Warning
+        $skip = Get-MxhIpv6ValidationSkipRecord -Context $Context -Protocol $Protocol
+        if (-not $skip) {
+            $skip = Request-MxhIpv6ValidationDisposition -Context $Context -Protocol $Protocol `
+                -PathFailureReason ([string]$path.Reason)
+        }
+        if ($skip) {
+            $skippedTargets.Add([pscustomobject]@{ Target = $target; Record = $skip })
+            continue
+        }
         if (-not $probeContext) { $probeContext = Resolve-MxhExternalValidationProbeContext -Context $Context }
         $externalTargets.Add($target)
     }
@@ -3287,6 +3536,18 @@ function Invoke-MxhRealClientValidation {
             continue
         }
         if (-not (Test-Path -LiteralPath $coreState.Path -PathType Leaf)) { $coreState = Resolve-VpsClientValidationCore -Context $Context -Core $coreName }
+        foreach ($skipped in $skippedTargets) {
+            $metadata = Get-MxhValidationTargetMetadata -Target $skipped.Target -Protocol $Protocol -Plan $Context.Plan
+            $results.Add([ordered]@{
+                    Core = $coreName
+                    Entry = [string]$metadata.Entry
+                    AddressFamily = [string]$metadata.AddressFamily
+                    ServerPort = [int]$metadata.ServerPort
+                    Status = 'SkippedByUser'
+                    Reason = [string]$skipped.Record.Reason
+                    TestedAt = (Get-Date).ToString('o')
+                })
+        }
         foreach ($target in $localTargets) {
             $metadata = Get-MxhValidationTargetMetadata -Target $target -Protocol $Protocol -Plan $Context.Plan
             $entryName = [string]$metadata.Entry
@@ -3378,6 +3639,86 @@ function Invoke-MxhShadowsocksRealValidation {
     $summary = [ordered]@{ Status = 'Passed'; Results = $results.ToArray(); TestedAt = (Get-Date).ToString('o') }
     $Context.State.ShadowsocksSelfTest = $summary
     Save-VpsContext -Context $Context
+    return $summary
+}
+
+function Invoke-MxhShadowsocksExternalValidation {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Context)
+
+    $entryPlanPath = if ($Context.Plan.Contains('Migration') -and $Context.Plan.Migration.Contains('ValidationEntryPlanPath')) {
+        [string]$Context.Plan.Migration.ValidationEntryPlanPath
+    }
+    else { '' }
+    if ([string]::IsNullOrWhiteSpace($entryPlanPath)) {
+        throw 'Shadowsocks 外部真实验收缺少可信入口 deployment-plan.json；不能只用落地机回环自测代替。'
+    }
+    Test-MxhMigrationValidationEntryPlan -PlanPath $entryPlanPath `
+        -LandingServerIpv4 ([string]$Context.Plan.Server.IPv4) `
+        -AllowedEntryIpv4s @($Context.Plan.Shadowsocks.TrustedEntryIPv4s) | Out-Null
+    $entryContext = New-MxhReadonlyContextFromPlan -ProjectRoot $Context.ProjectRoot -PlanPath $entryPlanPath
+    $entryPort = [int]$entryContext.State.CurrentManagementPort
+    if (-not (Test-VpsSshConnection -Context $entryContext -User root -Port $entryPort)) {
+        throw '无法通过实例专用密钥登录验证入口 VPS。'
+    }
+    $archKey = Get-VpsSupportedAssetArchitecture -Architecture ([string]$entryContext.State.Audit.Architecture)
+    $readAsset = {
+        param($Assets, [string]$Architecture)
+        if ($Assets -is [Collections.IDictionary]) { return $Assets[$Architecture] }
+        $property = $Assets.PSObject.Properties[$Architecture]
+        if ($null -eq $property) { throw "版本清单缺少 $Architecture 资产。" }
+        return $property.Value
+    }
+    $singBoxAsset = & $readAsset $Context.Versions.sing_box.assets $archKey
+    $mihomoAsset = & $readAsset $Context.Versions.mihomo.assets $archKey
+    $credentials = $Context.Secrets.Shadowsocks
+    $users = [Collections.Generic.List[object]]::new()
+    $users.Add([pscustomobject]@{ Label = 'IPv4 用户'; Key = [string]$credentials.PrimaryUserKey; IpVersion = '4' })
+    if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
+        $users.Add([pscustomobject]@{ Label = 'IPv6 用户'; Key = [string]$credentials.SecondaryUserKey; IpVersion = '6' })
+    }
+    $results = [Collections.Generic.List[object]]::new()
+    foreach ($user in $users) {
+        $probe = Invoke-VpsRemoteScript -Context $entryContext -Asset 'shadowsocks-external-probe.sh' -Parameters @{
+            MIHOMO_VERSION = [string]$Context.Versions.mihomo.version
+            MIHOMO_ASSET_NAME = [string]$mihomoAsset.name
+            MIHOMO_SHA256 = [string]$mihomoAsset.sha256
+            SING_BOX_VERSION = [string]$Context.Versions.sing_box.version
+            SING_BOX_ASSET_NAME = [string]$singBoxAsset.name
+            SING_BOX_SHA256 = [string]$singBoxAsset.sha256
+            METHOD = [string]$Context.Plan.Shadowsocks.Method
+            PASSWORD = ([string]$credentials.ServerKey) + ':' + ([string]$user.Key)
+            LANDING_PORT = [string]$Context.Plan.Ports.LandingShadowsocks
+            IP_VERSION = [string]$user.IpVersion
+            TEST_SERVER = [string]$Context.Plan.Server.IPv4
+        } -Port $entryPort -TimeoutSeconds 900 -SensitiveOutput `
+            -ProgressActivity "可信入口执行 Shadowsocks $([string]$user.Label) 双核心验收"
+        $acceptance = (Get-VpsMarkerValue $probe.StdOut EXTERNAL_ACCEPTANCE -Required) | ConvertFrom-Json -AsHashtable
+        if ($acceptance.status -ne 'Passed' -or @($acceptance.results).Count -ne 2 -or
+            @($acceptance.results | Where-Object udp -ne 'Passed').Count) {
+            throw "可信入口到 Shadowsocks $([string]$user.Label) 的双核心 TCP/UDP 链式实测失败。"
+        }
+        foreach ($item in @($acceptance.results)) {
+            $results.Add([ordered]@{
+                    User = [string]$user.Label
+                    Core = [string]$item.core
+                    AddressFamily = [string]$item.egress_family
+                    Egress = [string]$item.egress
+                    HttpsEndpoint = [string]$item.https_endpoint
+                    Udp = [string]$item.udp
+                    TestedAt = (Get-Date).ToString('o')
+                })
+        }
+    }
+    $summary = [ordered]@{
+        Status = 'Passed'
+        EntryNode = [string]$entryContext.Plan.NodeName
+        Results = $results.ToArray()
+        TestedAt = (Get-Date).ToString('o')
+    }
+    $Context.State.MigrationShadowsocksExternalProbe = $summary
+    Save-VpsContext -Context $Context
+    Write-VpsUi '可信入口 → Shadowsocks 落地的 Mihomo、sing-box、HTTPS 出口和 UDP 测试均通过。' Success
     return $summary
 }
 
@@ -4127,13 +4468,13 @@ Export-ModuleMember -Function @(
     'Invoke-VpsProcess', 'Get-VpsCommandPath', 'Get-VpsModules', 'Get-VpsRandomPort',
     'Test-VpsReusableBootstrapSshPort', 'New-VpsSshPortSelection', 'Test-VpsBootstrapSshPortRetained',
     'Test-VpsSupportedOsRelease', 'Get-VpsSupportedAssetArchitecture', 'Assert-VpsSupportedTarget',
-    'Get-VpsBundledClientCore', 'Resolve-VpsClientValidationCore', 'Get-VpsMihomoCorePaths', 'Get-VpsSingBoxCorePath',
+    'Get-VpsBundledClientCore', 'Copy-VpsBundledMihomoGeodata', 'Resolve-VpsClientValidationCore', 'Get-VpsMihomoCorePaths', 'Get-VpsSingBoxCorePath',
     'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',
     'Read-VpsNetworkTuningSettings', 'Get-VpsConservativeNetworkPlan',
     'Get-MxhRealityTargetSettings', 'Set-MxhRealityExternalTarget',
     'New-MxhXrayInbound', 'New-MxhXrayServerConfig', 'New-MxhMihomoProfileText', 'New-MxhRealitySingBoxOutbound',
     'New-MxhSingBoxTestConfig', 'Invoke-MxhMihomoEgressTest', 'Invoke-MxhSingBoxEgressTest',
-    'Invoke-MxhRealClientValidation', 'Invoke-MxhShadowsocksRealValidation',
+    'Invoke-MxhRealClientValidation', 'Invoke-MxhShadowsocksRealValidation', 'Invoke-MxhShadowsocksExternalValidation',
     'New-MxhAnyTlsPaddingScheme', 'Get-MxhAnyTlsPaddingScheme',
     'ConvertFrom-MxhEchKeyPairText', 'New-MxhAnyTlsServerConfig', 'New-MxhAnyTlsClientOutbound', 'New-MxhAnyTlsMihomoProfileText',
     'New-MxhRandomBase64Key', 'New-MxhShadowsocksServerConfig', 'New-MxhLandingMihomoProfileText',

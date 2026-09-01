@@ -30,7 +30,7 @@
   },
   "Shadowsocks": {
     "Method": "2022-blake3-aes-128-gcm",
-    "SingBoxVersion": "1.13.19",
+    "SingBoxVersion": "1.14.0",
     "TrustedEntryIPv4s": ["192.0.2.30", "192.0.2.31"],
     "TrustedEntryIPv6s": ["2001:db8::30"],
     "ClientTransitTag": "US-West Entry",

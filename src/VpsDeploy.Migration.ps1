@@ -467,6 +467,7 @@ function New-MxhProtocolMigrationPlan {
         [ValidateSet('FixedVerified','LatestStable','ImportedOrLegacy')][string]$XrayVersionChannel = 'FixedVerified',
         [string]$AnyTlsServerName,
         [string]$EchPublicName,
+        [string]$SingBoxVersion,
         [string[]]$AnyTlsPaddingScheme = @(),
         [bool]$ForceIpv4Egress = $true,
         [bool]$TrustedTlsEnabled = $false,
@@ -513,6 +514,7 @@ function New-MxhProtocolMigrationPlan {
     if (-not $plan.Contains('AnyTls')) { $plan.AnyTls = [ordered]@{} }
     $plan.AnyTls.Enabled = ($TargetRole -eq 'AnyTlsEntry') -or [bool]$initialInventory.AnyTlsEntry.Installed
     if ($TargetRole -eq 'AnyTlsEntry') {
+        if($SingBoxVersion){$plan.AnyTls.SingBoxVersion=$SingBoxVersion}
         $plan.AnyTls.ServerName = $AnyTlsServerName
         $plan.AnyTls.EchPublicName = $EchPublicName
         $plan.AnyTls.ForceIpv4Egress = $ForceIpv4Egress
@@ -532,6 +534,7 @@ function New-MxhProtocolMigrationPlan {
 
     if (-not $plan.Contains('Shadowsocks')) { $plan.Shadowsocks = [ordered]@{} }
     if ($TargetRole -eq 'ShadowsocksLanding') {
+        if($SingBoxVersion){$plan.Shadowsocks.SingBoxVersion=$SingBoxVersion}
         $plan.Shadowsocks.Method = '2022-blake3-aes-128-gcm'
         $plan.Shadowsocks.TrustedEntryIPv4s = @($TrustedEntryIps.IPv4)
         $plan.Shadowsocks.TrustedEntryIPv6s = @($TrustedEntryIps.IPv6)
@@ -1132,6 +1135,7 @@ function New-MxhProtocolMigrationDetails {
             -RealityServerName $realityServerName -RealityTargetAddress $realityAddress `
             -XrayVersion $wizard.XrayVersion -XrayVersionChannel $wizard.XrayVersionChannel `
             -AnyTlsServerName $wizard.AnyTlsServerName -EchPublicName $wizard.EchPublicName `
+            -SingBoxVersion ([string]$versions.sing_box.version) `
             -AnyTlsPaddingScheme @($wizard.AnyTlsPaddingScheme) -ForceIpv4Egress ([bool]$wizard.ForceIpv4) `
             -TrustedTlsEnabled $trustedTls -CloudflareZoneName $wizard.CloudflareZoneName `
             -CertbotEmail $wizard.CertbotEmail -CloudflareTokenFile $wizard.CloudflareTokenFile `

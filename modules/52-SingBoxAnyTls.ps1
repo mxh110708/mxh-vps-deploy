@@ -11,7 +11,8 @@
         $arch = [string]$Context.State.Audit.Architecture
         $archKey = Get-VpsSupportedAssetArchitecture -Architecture $arch
         $asset = $Context.Versions.sing_box.assets.$archKey
-        $version = [string]$Context.Plan.AnyTls.SingBoxVersion
+        $version = [string]$Context.Versions.sing_box.version
+        $Context.Plan.AnyTls.SingBoxVersion = $version
         $install = Invoke-VpsRemoteScript -Context $Context -Asset 'sing-box-anytls-install.sh' -Parameters @{
             VERSION = $version
             ASSET_NAME = [string]$asset.name

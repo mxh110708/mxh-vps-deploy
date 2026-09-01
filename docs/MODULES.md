@@ -54,11 +54,15 @@ tests/Run-Tests.ps1                   跨模块回归、交互和秘密扫描
 
 Schema 3 新计划把运行数据放在 `<InstanceDirectory>/MXH-VPS-Deploy`，`Paths.InstanceDirectory` 指向用户实例目录，`Paths.Archive` 指向受管子目录，`Paths.KeyDirectory` 指向其下 `ssh`。旧 schema 的根目录布局仍按计划原值读取，不自动迁移。
 
-`SshKey.Mode` 为 `ReuseExisting` 或 `GenerateManaged`。复用模式复制私钥并用 `ssh-keygen -y` 推导公钥；它不会修改源文件、额外调整/检查本地 ACL 或轮换服务器 `authorized_keys`。Import 的 `EnforceKeyOnlySsh` 是显式用户选择而非纳管前置条件。
+`SshKey.Mode` 为 `ReuseExisting` 或 `GenerateManaged`。复用模式复制私钥并用 `ssh-keygen -y` 推导公钥；它不会修改源文件或轮换服务器 `authorized_keys`。源私钥与受管副本都可作为真实认证候选，前一份被 OpenSSH 拒绝时会尝试后一份。项目不建立额外的 `.ssh` 运行副本；只对实际使用的受管私钥文件设置 Windows OpenSSH 所需的当前用户独占 ACL，其他归档文件和目录不调整权限。Import 的 `EnforceKeyOnlySsh` 是显式用户选择而非纳管前置条件。
 
 `bootstrap-access` 先尝试实例管理私钥，失败后才进入服务商初始认证。密码输入由 OpenSSH 直接处理且不回显，真实的初始登录失败允许重试。若初始密码会话成功，但 Debian 服务商镜像的有效配置禁用了公钥认证、使用非标准 `AuthorizedKeysFile` 或限定了 `AuthenticationMethods`，模块会写入最小的 `00-00-mxh-bootstrap-access.conf`，仅恢复标准公钥入口。该临时兼容配置必须通过 `sshd -t`、`sshd -T` 和 reload，失败即回滚；它不会提前关闭密码或移除服务商端口。最终 key-only 策略仍由 `ssh-transition` 提交。
 
+导入实例不会伪造或保存未知的现有 admin 密码。最终验收对项目管理的密码继续执行真实 `sudo -S`；对标记为 `<not-managed>` 的导入账户，则分别验证 admin 公钥登录和 root 视角的 sudo 授权策略，并明确说明没有验证未知密码本身。
+
 `deployment-baseline`（Order 5）在恢复公钥已验证、其他新机模块尚未修改服务器时建立统一快照。它只记录项目管理的 SSH、协议、证书、nftables、sysctl、Komari、服务状态和受管账户，并记录基线时已有的软件包及 `/root/vps-deploy-backups` 子目录。`deployment-baseline-commit`（Order 119）只有在 AuditOnly 的 `audit` 或常规角色的 `ssh-cutover` 成功后才删除基线；即使通过 `-OnlyModule` 显式调用也不能绕过该门禁。
+
+最终私有归档的 `SHA256SUMS-private.txt` 覆盖静态计划、状态、密钥与配置快照；持续追加的根目录 `deployment.log` 明确不纳入清单，否则任何后续只读审计或维护记录都会使已经完成的归档立即出现伪校验失败。
 
 供应商专有 IPv6 获取、策略路由或网络命名空间应作为单独模块加入，不应修改通用 `sing-box-shadowsocks` 模块。
 
@@ -81,7 +85,7 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 
 `New-MxhAnyTlsPaddingScheme` 在创建计划时生成 `PerInstanceConservativeV1`：保持协议默认方案的前八包结构，但在受控范围内改变各段长度，单段 TLS plaintext 上限不超过 1100 字节。结果写入部署计划并在继续运行时保持不变。服务端通过 AnyTLS 协议下发 padding scheme，客户端配置不需要也不应复制该数组；缺少字段的旧计划由 `Get-MxhAnyTlsPaddingScheme` 回退到官方默认值。
 
-`anytls-self-test.sh` 会以真实 AnyTLS+ECH 客户端完成 HTTPS、出口 IP 和 UDP DNS 往返。`Invoke-MxhRealClientValidation` 使用项目 vendor 目录内经 SHA-256 校验的稳定版 Mihomo 与 sing-box，对 Reality 的主/救援入口及已配置地址族、AnyTLS 的已配置地址族逐项测试。两个核心都通过各自 SOCKS5 UDP 路径做独立 DNS 往返，不修改桌面客户端、TUN 或系统代理；主测试端点失败时再尝试独立备用端点。语法通过、443 可达或证书可读都不能替代这组功能测试。
+`anytls-self-test.sh` 会以真实 AnyTLS+ECH 客户端完成 HTTPS、出口 IP 和 UDP DNS 往返。`Invoke-MxhRealClientValidation` 使用项目 vendor 目录内经 SHA-256 校验的稳定版 Mihomo 与 sing-box，对 Reality 的主/救援入口及已配置地址族、AnyTLS 的已配置地址族逐项测试。两个核心都通过各自 SOCKS5 UDP 路径做独立 DNS 往返，不修改桌面客户端、TUN 或系统代理；主测试端点失败时再尝试独立备用端点。若控制机没有原生 IPv6，默认应选择另一台受管 VPS 作为外部探针；也可通过强确认明确跳过本次 IPv6 验收，跳过项会写入私有计划与结果并标记为 `SkippedByUser`，不能视为双栈全部通过。非交互模式不会自行生成跳过记录。语法通过、443 可达或证书可读都不能替代这组功能测试。
 
 内置核心只支持 Windows amd64 控制端，解压目录为被 Git 忽略的 `.cache/client-cores`。正常流程不扫描 PATH、注册表或 Clash Verge AppData。交互式手动跳过必须记录 `SkippedByUser`；非交互流程找不到任一核心即失败。Mihomo Alpha 仅作为显式配置的额外兼容检查。
 

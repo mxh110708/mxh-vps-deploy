@@ -78,6 +78,22 @@ try {
     $genericTemplate=Join-Path $ProjectRoot 'templates\client\sing-box-general.template.json'
     & $SingBoxPath check -c $genericTemplate
     if($LASTEXITCODE-ne 0){throw 'generic sing-box authority template check failed'}
+    $genericConfig = Get-Content -Raw -LiteralPath $genericTemplate | ConvertFrom-Json -AsHashtable
+    $genericMixed = @($genericConfig.inbounds | Where-Object { [string]$_.type -eq 'mixed' })
+    $genericTun = @($genericConfig.inbounds | Where-Object { [string]$_.type -eq 'tun' })
+    if ($genericMixed.Count -ne 1 -or $genericTun.Count -ne 1) {
+        throw 'generic sing-box authority template must support both system-proxy and TUN capture modes'
+    }
+    if ([string]$genericTun[0].dns_mode -ne 'hijack' -or -not [bool]$genericTun[0].auto_route -or -not [bool]$genericTun[0].strict_route) {
+        throw 'generic sing-box authority template must keep the 1.14 TUN DNS and routing contract'
+    }
+    $genericDnsHijack = @($genericConfig.route.rules | Where-Object {
+            $_.Contains('protocol') -and [string]$_['protocol'] -eq 'dns' -and
+            $_.Contains('action') -and [string]$_['action'] -eq 'hijack-dns'
+        })
+    if ($genericDnsHijack.Count -ne 1) {
+        throw 'generic sing-box authority template must contain exactly one DNS hijack rule'
+    }
 
     $echOutput = (& $SingBoxPath generate ech-keypair 'www.example.invalid' 2>&1) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw 'sing-box ECH keypair generation failed' }

@@ -3,11 +3,19 @@
 ## Unreleased
 
 - 正式拓扑收窄为 Windows PowerShell 7.4+ 控制端管理 Debian 12/13 amd64 VPS；新建、Import、维护统一使用同一 OS/架构门禁。CI 的 Debian 12/13 容器只验证远端 Bash、包名与 OpenSSH 契约。
-- 项目直接携带并校验稳定版 Mihomo 1.19.30 与 sing-box 1.13.19 Windows amd64 官方压缩包；运行时只解压到 `.cache/client-cores`，不扫描 Clash Verge AppData、注册表或 PATH。交互式显式跳过记为 `SkippedByUser`，非交互模式不能跳过。
+- 项目直接携带并校验稳定版 Mihomo 1.19.30 与 sing-box 1.14.0 Windows amd64 官方压缩包；运行时只解压到 `.cache/client-cores`，不扫描 Clash Verge AppData、注册表或 PATH。交互式显式跳过记为 `SkippedByUser`，非交互模式不能跳过。
+- sing-box 通用权威模板补齐 mixed 与 TUN 双入口、1.14 `dns_mode: hijack` 和显式路由动作，使新生成配置可直接供 MXH Route 在系统代理/TUN 间切换；导入现有权威配置仍原样保留其高级 DNS、规则集与实验设置。
+- 客户端配置设计器的 Mihomo 校验在同一隔离目录内自动重试一次首次 GeoData/规则集获取失败，并合并标准错误与标准输出展示诊断；配置本身不合法时仍禁止把跳过误记为通过。
+- 项目固定携带并校验 Mihomo 权威规则所需的 GeoSite/GeoIP 数据，在临时验证目录内离线使用，避免 `GEOSITE`/`GEOIP` 配置把公网下载和 DNS 状态误当成配置兼容性。
 - Reality 服务端改为 IPv4/IPv6 独立入站；Reality/AnyTLS 按入口、地址族分别生成 Mihomo 与 sing-box 完整测试配置，执行 HTTPS、出口 IP 与 UDP DNS 验收，并在受控协议升级后复用同一流程。
+- 控制端缺少原生 IPv6 验收路径时，交互模式可改用另一台受管 VPS 执行外部验收；也可在强确认后按协议和目标 IPv6 记录 `SkippedByUser`，不再把本机不可达误判为协议失败，也不会把跳过计为通过。
+- Reality target 的严格审计将 TLS 探测固定为 IPv4 并增加超时，避免双栈目标在控制端 IPv6 路径异常时长期无输出等待。
+- 最终私有归档校验清单排除仍会持续追加的 `deployment.log`，避免后续只读审计使已完成归档立即出现伪校验失败；其他归档内容仍全部校验。
 - apt 安装增加锁占用等待/重试，客户端设计器预检 Python 3.9+，PowerShell 控制端预检 7.4+；真实验收增加独立 HTTPS、出口 IP 和 UDP DNS 备用端点。
 - 有默认值的文本提示现在明确显示“直接回车使用默认值”；Xray LatestStable 提示同时展示通道、解析版本和“与固定验证版同号”的情况，不再把安装脚本固定误解为核心版本固定。
-- 按用户归档策略，VPS 私有归档及相关本地文件沿用所在目录权限，项目不再额外修改或检查 ACL/文件模式。
+- VPS 私有归档、配置、日志和目录沿用所在位置的权限；唯一例外是实际交给 Windows OpenSSH 使用的受管私钥文件，会在生成、复制或轮换写回后设置为仅当前用户可访问，以满足 OpenSSH 的最低运行要求，不再创建额外的 `.ssh` 运行副本。
+- SSH/SCP 会在源私钥与受管私钥之间按真实认证结果回退；SCP 不再用静默模式隐藏 `Load key: bad permissions`，同时为上传恢复文件显示文字与已用时间。
+- Komari Controller 恢复会等待回环监听和 HTTP 就绪；失败回滚同时恢复 Controller 与 cloudflared 原有启停状态，避免大数据库启动较慢被误判或回滚后 Tunnel 留在停止状态。
 - 所有交互式本地路径与对应命令行参数现在接受统一的 `/` 或统一的 `\` 写法，输入阶段拒绝同一路径混用两种分隔符，并在使用前规范化为本机格式。
 - Reality/AnyTLS 最终验收补充真实 SOCKS5 UDP DNS 往返，和客户端握手、HTTPS 204、出口 IP 一起成为必过项；测试使用隔离 Mihomo 进程，不修改桌面客户端代理状态。
 - 修复 Debian 12 Nginx 1.22 不支持独立 `http2 on;` 导致 Reality 本机 HTTPS target 部署失败；改用向前兼容的 `listen ... ssl http2`。
@@ -37,7 +45,7 @@
 - 新增独立 `ClientConfig` 模式、可版本控制的基础布局和本机覆盖模板；支持多实例私有片段提取、未纳管节点隐藏输入、地区/落地/业务组排序与默认值、selector 引用/循环检查及 dialer-proxy/detour 同步。
 - 客户端合并器对 sing-box 运行配置使用紧凑 JSON，并在 4 MiB 前硬性停止；完整权威回放从约 4.94 MiB 降至约 2.44 MiB，避免桌面端 IPC 导入失败。
 - Xray 新部署、协议补充和受控升级同时支持 `FixedVerified` 与官方 `LatestStable` 通道；latest 会解析并固化具体非预发行版本。
-- Windows 本地归档曾采用尽力收紧 ACL 的过渡策略；本次 Unreleased 后续变更已按用户要求取消额外 ACL 修改与检查。远端秘密、回滚和 Git 防泄漏边界不放宽。
+- Windows 本地归档曾采用尽力收紧 ACL 的过渡策略；本次 Unreleased 后续变更取消对普通归档文件和目录的 ACL 修改与检查，仅保留 Windows OpenSSH 对实际受管私钥文件所要求的最低权限。远端秘密、回滚和 Git 防泄漏边界不放宽。
 - 修复 GitHub Actions：Windows runner 先安装固定 YAML 依赖；Linux ShellCheck 修正 Komari trap 状态变量和恢复脚本递归删除保护。
 - 新增统一 `Maintain` 运维中心：手动恢复、健康/漂移审计、协议凭据轮换、SSH/防火墙独立维护、固定资产升级、客户端权威候选合并、Komari 生命周期和分级退役。
 - 健康报告只保存脱敏状态和配置 SHA-256；支持建立基线、发现计划外哈希变化，并只在纯哈希变化且人工确认时更新基线。

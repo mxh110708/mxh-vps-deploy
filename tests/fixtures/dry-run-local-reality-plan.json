@@ -37,7 +37,7 @@
     "Enabled": false,
     "ServerName": null,
     "EchPublicName": null,
-    "SingBoxVersion": "1.13.19",
+    "SingBoxVersion": "1.14.0",
     "ForceIpv4Egress": true
   },
   "TrustedTls": {
@@ -50,7 +50,7 @@
   },
   "Shadowsocks": {
     "Method": "2022-blake3-aes-128-gcm",
-    "SingBoxVersion": "1.13.19",
+    "SingBoxVersion": "1.14.0",
     "TrustedEntryIPv4s": [],
     "TrustedEntryIPv6s": [],
     "ClientTransitTag": null,

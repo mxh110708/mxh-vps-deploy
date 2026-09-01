@@ -83,7 +83,12 @@ function Undo-MxhMaintenanceTransaction {
 
 function Get-MxhHealthAudit {
     [CmdletBinding()]
-    param([Parameter(Mandatory)] $Context, [switch]$Persist, [switch]$InitializeBaseline)
+    param(
+        [Parameter(Mandatory)] $Context,
+        [switch]$Persist,
+        [switch]$InitializeBaseline,
+        [switch]$IgnoreActiveRollbackTimer
+    )
     if ($Context.DryRun) {
         return [ordered]@{ SchemaVersion=1; DryRun=$true; Findings=@(); Status='DryRun' }
     }
@@ -108,7 +113,7 @@ function Get-MxhHealthAudit {
     if ($inventory.AnyTlsEntry.Installed -and (-not $audit.Certificate.Present -or [int]$audit.Certificate.DaysRemaining -lt 21)) {
         & $add Warning 'TLS_CERT_EXPIRY' 'AnyTLS 证书不存在或剩余不足 21 天。'
     }
-    if ($audit.Timers.RollbackActive) { & $add Warning 'ROLLBACK_TIMER_ACTIVE' '存在尚未提交的自动回滚计时器。' }
+    if ($audit.Timers.RollbackActive -and -not $IgnoreActiveRollbackTimer) { & $add Warning 'ROLLBACK_TIMER_ACTIVE' '存在尚未提交的自动回滚计时器。' }
     if ($Context.State.Contains('HealthBaseline')) {
         foreach ($key in $Context.State.HealthBaseline.Hashes.Keys) {
             $old=[string]$Context.State.HealthBaseline.Hashes[$key]; $now=[string]$audit.Hashes[$key]
@@ -176,17 +181,47 @@ function Invoke-MxhManualRestoreCenter {
     $scopeChoice=Read-VpsMenu '恢复范围' @('仅恢复协议配置和凭据文件，保留当前服务/防火墙状态','完整恢复协议文件、服务启停、防火墙和 sysctl') 1 -AllowBack
     $scope=if($scopeChoice -eq 1){'ConfigOnly'}else{'Full'}
     if((Read-VpsText '输入 RESTORE 确认' -AllowBack) -cne 'RESTORE'){Write-VpsUi '未恢复。' Warning;return}
-    Start-MxhMaintenanceTransaction $Context 'ManualRestore'|Out-Null
+    $restorePlanPath=Join-Path $selected.Directory 'deployment-plan.json'
+    $restoreStatePath=Join-Path $selected.Directory 'deployment-state.json'
+    $restoreSecretsPath=Join-Path $selected.Directory 'deployment-secrets.private.json'
+    if(-not(Test-Path -LiteralPath $restorePlanPath -PathType Leaf) -or -not(Test-Path -LiteralPath $restoreStatePath -PathType Leaf)){
+        throw '所选恢复点缺少部署计划或状态元数据，已停止恢复。'
+    }
+    $restorePlan=Read-VpsJsonHashtable $restorePlanPath
+    $restoreState=Read-VpsJsonHashtable $restoreStatePath
+    $restoreSecrets=if(Test-Path -LiteralPath $restoreSecretsPath -PathType Leaf){Read-VpsJsonHashtable $restoreSecretsPath}else{$Context.Secrets}
+    $transaction=Start-MxhMaintenanceTransaction $Context 'ManualRestore'
     try {
         $r=Invoke-VpsRemoteScript $Context 'maintenance-restore-apply.sh' @{BACKUP_PATH=$selected.Remote;SCOPE=$scope} -TimeoutSeconds 600
         if($r.StdOut -notmatch 'VPSDEPLOY_MANUAL_RESTORE_APPLIED'){throw '恢复脚本未确认完成。'}
-        $report=Get-MxhHealthAudit $Context
+        $currentPlan=$Context.Plan;$currentState=$Context.State;$currentSecrets=$Context.Secrets
+        try{
+            $Context.Plan=$restorePlan;$Context.State=$restoreState;$Context.Secrets=$restoreSecrets
+            $report=Get-MxhHealthAudit $Context -IgnoreActiveRollbackTimer
+        }finally{
+            $Context.Plan=$currentPlan;$Context.State=$currentState;$Context.Secrets=$currentSecrets
+        }
         Show-MxhHealthAudit $report
+        if($report.Status -eq 'Critical'){throw '恢复后的服务器状态与所选恢复点清单不一致。'}
         if(-not(Read-VpsYesNo '保留此次恢复结果？' $true)){throw '用户选择恢复到操作前状态。'}
         Complete-MxhMaintenanceTransaction $Context
         foreach($name in @('deployment-plan.json','deployment-state.json','deployment-secrets.private.json')){
-            $source=Join-Path $selected.Directory $name; if(Test-Path $source){Copy-Item $source (Join-Path $Context.ArchivePath $name) -Force}
+            $source=Join-Path $selected.Directory $name; if(Test-Path -LiteralPath $source -PathType Leaf){Copy-Item -LiteralPath $source -Destination (Join-Path $Context.ArchivePath $name) -Force}
         }
+        foreach($directory in @('client-exports','server-configs')){
+            $current=Join-Path $Context.ArchivePath $directory
+            $source=Join-Path $selected.Directory $directory
+            if(Test-Path -LiteralPath $current -PathType Container){Remove-Item -LiteralPath $current -Recurse -Force}
+            if(Test-Path -LiteralPath $source -PathType Container){Copy-Item -LiteralPath $source -Destination $current -Recurse}
+        }
+        $Context.Plan=Read-VpsJsonHashtable $Context.PlanPath
+        $Context.State=Read-VpsJsonHashtable $Context.StatePath
+        $Context.Secrets=Read-VpsJsonHashtable $Context.SecretsPath
+        $transaction.Committed=$true
+        $transaction.CommittedAt=(Get-Date).ToString('o')
+        $Context.State.MaintenanceTransaction=$transaction
+        $Context.State.LastManualRestore=[ordered]@{At=(Get-Date).ToString('o');RestorePoint=$selected.Name;Scope=$scope}
+        Save-MxhMaintenanceContext $Context
         Write-VpsUi '远端恢复与对应本地元数据恢复已提交。建议立即再运行一次健康审计并建立新基线。' Success
     } catch { Undo-MxhMaintenanceTransaction $Context $_.Exception.Message; throw }
 }
@@ -226,6 +261,7 @@ function Invoke-MxhCredentialRotation {
             Invoke-MxhRealClientValidation -Context $candidate -Protocol AnyTLS|Out-Null
         } else {
             Invoke-MxhShadowsocksRealValidation -Context $candidate|Out-Null
+            Invoke-MxhShadowsocksExternalValidation -Context $candidate|Out-Null
         }
         Complete-MxhMaintenanceTransaction $Context
         $Context.Secrets=$candidateSecrets; $Context.State=$candidate.State
@@ -272,7 +308,7 @@ function Invoke-MxhSshMaintenance {
     }
     $temp=$managedKey+'.rotation-'+(Get-Date -Format yyyyMMddHHmmss)
     $r=Invoke-VpsProcess $keygen @('-t','ed25519','-a','64','-N','','-C',$Context.Plan.NodeName,'-f',$temp) -TimeoutSeconds 60
-    if($r.ExitCode -ne 0){throw '生成候选 SSH 密钥失败。'}; Protect-VpsPrivateFile $temp
+    if($r.ExitCode -ne 0){throw '生成候选 SSH 密钥失败。'}; Set-VpsOpenSshPrivateKeyAccess $temp
     $newPublic=(Get-Content -Raw ($temp+'.pub')).Trim(); $oldPorts=@([int]$Context.Plan.Ports.SshPrimary,[int]$Context.Plan.Ports.SshRescue)|Sort-Object -Unique
     $rotationStamp=Get-Date -Format yyyyMMddHHmmss
     $keyBackup=$managedKey+'.bak-'+$rotationStamp
@@ -297,7 +333,7 @@ function Invoke-MxhSshMaintenance {
         $localMutationStarted=$true
         Copy-Item -LiteralPath $temp -Destination $managedKey -Force
         Copy-Item -LiteralPath ($temp+'.pub') -Destination $managedPublic -Force
-        Protect-VpsPrivateFile $managedKey
+        Set-VpsOpenSshPrivateKeyAccess $managedKey
         $Context.Plan.SshKey.Mode='GenerateManaged'
         $Context.Plan.SshKey.RotatedFromMode=[string]$oldSshKeyPlan.Mode
         $Context.Plan.SshKey.RotatedAt=(Get-Date).ToString('o')
@@ -313,7 +349,7 @@ function Invoke-MxhSshMaintenance {
             $Context.Plan.SshKey=$oldSshKeyPlan
             if($managedKeyExisted -and (Test-Path -LiteralPath $keyBackup)){Copy-Item -LiteralPath $keyBackup -Destination $managedKey -Force}elseif(Test-Path -LiteralPath $managedKey){Remove-Item -LiteralPath $managedKey -Force}
             if($managedPublicExisted -and (Test-Path -LiteralPath $publicBackup)){Copy-Item -LiteralPath $publicBackup -Destination $managedPublic -Force}elseif(Test-Path -LiteralPath $managedPublic){Remove-Item -LiteralPath $managedPublic -Force}
-            if(Test-Path -LiteralPath $managedKey){Protect-VpsPrivateFile $managedKey}
+            if(Test-Path -LiteralPath $managedKey){Set-VpsOpenSshPrivateKeyAccess $managedKey}
         }
         if($changePorts){
             try{
@@ -395,6 +431,8 @@ function Invoke-MxhControlledUpgrade {
             $params=@{VERSION=[string]$Context.Versions.sing_box.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256}
             if($role -eq 'ShadowsocksLanding'){$params.NEED_BIND_INTERFACE=([bool]$Context.Plan.Shadowsocks.SecondaryBindInterface).ToString().ToLowerInvariant()}
             Invoke-VpsRemoteScript $Context $script $params -TimeoutSeconds 1200|Out-Null
+            if($role -eq 'AnyTlsEntry'){$Context.Plan.AnyTls.SingBoxVersion=[string]$Context.Versions.sing_box.version}
+            else{$Context.Plan.Shadowsocks.SingBoxVersion=[string]$Context.Versions.sing_box.version}
         }elseif($role -eq 'KomariAgent'){
             $asset=$Context.Versions.komari_agent.assets.$arch
             $r=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='AgentUpgrade';VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200
@@ -425,6 +463,7 @@ function Invoke-MxhControlledUpgrade {
             Invoke-MxhRealClientValidation -Context $Context -Protocol AnyTLS|Out-Null
         }elseif($role -eq 'ShadowsocksLanding'){
             Invoke-MxhShadowsocksRealValidation -Context $Context|Out-Null
+            Invoke-MxhShadowsocksExternalValidation -Context $Context|Out-Null
         }
         $report=Get-MxhHealthAudit $Context;if($report.Status -eq 'Critical'){throw '升级后健康审计出现严重项。'}
         Complete-MxhMaintenanceTransaction $Context;$Context.State.LastControlledUpgrade=[ordered]@{Component=$role;At=(Get-Date).ToString('o');Catalog='versions.json'};Save-MxhMaintenanceContext $Context

@@ -47,14 +47,21 @@ case "$VPS_PARAM_ACTION" in
     install -d -m 0700 "$safety"; current=()
     for p in var/lib/komari opt/komari etc/systemd/system/komari.service etc/systemd/system/cloudflared.service usr/local/bin/komari usr/local/bin/cloudflared usr/bin/cloudflared; do [[ -e "/$p" ]] && current+=("$p"); done
     ((${#current[@]} == 0)) || tar --numeric-owner -czpf "$safety/current.tar.gz" -C / "${current[@]}"
-    was_enabled=false; was_active=false; systemctl is-enabled --quiet komari.service 2>/dev/null && was_enabled=true; systemctl is-active --quiet komari.service 2>/dev/null && was_active=true
-    rollback(){ set +e; systemctl disable --now cloudflared.service komari.service >/dev/null 2>&1; [[ ! -f "$safety/current.tar.gz" ]] || tar --numeric-owner -xzpf "$safety/current.tar.gz" -C /; systemctl daemon-reload; [[ "$was_enabled" == false ]] || systemctl enable komari.service >/dev/null; [[ "$was_active" == false ]] || systemctl start komari.service; }
+    was_enabled=false; was_active=false; tunnel_was_enabled=false; tunnel_was_active=false
+    systemctl is-enabled --quiet komari.service 2>/dev/null && was_enabled=true
+    systemctl is-active --quiet komari.service 2>/dev/null && was_active=true
+    systemctl is-enabled --quiet cloudflared.service 2>/dev/null && tunnel_was_enabled=true
+    systemctl is-active --quiet cloudflared.service 2>/dev/null && tunnel_was_active=true
+    rollback(){ set +e; systemctl disable --now cloudflared.service komari.service >/dev/null 2>&1; [[ ! -f "$safety/current.tar.gz" ]] || tar --numeric-owner -xzpf "$safety/current.tar.gz" -C /; systemctl daemon-reload; [[ "$was_enabled" == false ]] || systemctl enable komari.service >/dev/null; [[ "$was_active" == false ]] || systemctl start komari.service; [[ "$tunnel_was_enabled" == false ]] || systemctl enable cloudflared.service >/dev/null; [[ "$tunnel_was_active" == false ]] || systemctl start cloudflared.service; }
     on_restore_exit(){ local rc=$?; trap - EXIT; if ((rc != 0)); then rollback; fi; exit "$rc"; }
     trap on_restore_exit EXIT
     systemctl stop cloudflared.service komari.service >/dev/null 2>&1 || true
     tar --numeric-owner -xzpf "$file" -C /; systemctl daemon-reload
     systemctl enable --now komari.service >/dev/null
+    for _ in {1..30}; do grep -Fq '127.0.0.1:25774' <<< "$(ss -H -lnt 'sport = :25774' 2>/dev/null)" && break; sleep 1; done
     grep -Fq '127.0.0.1:25774' <<< "$(ss -H -lntp 'sport = :25774')"
+    code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 http://127.0.0.1:25774/)"
+    [[ "$code" =~ ^(200|302|303|307|308|401|403)$ ]]
     if [[ "$final_active" == false ]]; then systemctl disable --now komari.service >/dev/null 2>&1 || true; fi
     trap - EXIT
     printf 'VPSDEPLOY_BACKUP_DIR_B64=%s\n' "$(printf '%s' "$safety" | base64 | tr -d '\n')"
