@@ -1294,6 +1294,56 @@ $activeRollbackPayload=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(
 $restoreAudit=& $coreModule {param($c,$payload) function Invoke-VpsRemoteScript{return [pscustomobject]@{StdOut="VPSDEPLOY_HEALTH_AUDIT_B64=$payload`nVPSDEPLOY_HEALTH_AUDIT_OK`n"}};try{Get-MxhHealthAudit $c -IgnoreActiveRollbackTimer}finally{Remove-Item Function:\Invoke-VpsRemoteScript -ErrorAction SilentlyContinue}} $healthContext $activeRollbackPayload
 Assert-True ('ROLLBACK_TIMER_ACTIVE' -notin @($restoreAudit.Findings.Code)) 'manual restore validation can ignore its own expected rollback timer'
 $healthAuditFixture.Timers.RollbackActive=$false
+$healthPolicyResults=& $coreModule {
+    param($c,$audit)
+    $c.Plan=Copy-MxhHashtable $c.Plan
+    $c.Plan.Import=@{SshAuthenticationPreserved=$true}
+    $audit.Ssh.PasswordAuthentication='yes'
+    function Invoke-VpsRemoteScript { [pscustomobject]@{StdOut=('VPSDEPLOY_HEALTH_AUDIT_B64='+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($audit|ConvertTo-Json -Depth 20 -Compress))))} }
+    $preserved=Get-MxhHealthAudit $c
+    $c.Plan.Import.SshAuthenticationPreserved=$false
+    $enforced=Get-MxhHealthAudit $c
+    $c.Plan.Import.SshAuthenticationPreserved=$true
+    $audit.Ssh.PubkeyAuthentication='no'
+    $disabled=Get-MxhHealthAudit $c
+    @('SSH_NOT_KEY_ONLY' -notin @($preserved.Findings.Code);'SSH_NOT_KEY_ONLY' -in @($enforced.Findings.Code);'SSH_PUBKEY_DISABLED' -in @($disabled.Findings.Code))
+} ([pscustomobject]@{Plan=$realitySource;State=$healthContext.State;DryRun=$false}) ($healthAuditFixture|ConvertTo-Json -Depth 20|ConvertFrom-Json -AsHashtable)
+foreach($result in $healthPolicyResults){Assert-True $result 'health audit respects preserved authentication but requires public-key access'}
+$recoveryResults=& $coreModule {
+    function Invoke-VpsRemoteScript {param($Context,$Asset,$Parameters)
+        if(-not $Parameters.ContainsKey('EXPECTED_BACKUP')){throw 'Recovery lost the recorded backup identity'}
+        [pscustomobject]@{StdOut='VPSDEPLOY_TRANSACTION_PHASE_B64=Um9sbGVkQmFjaw=='}
+    }
+    function Undo-MxhMaintenanceTransaction {param($Context,$Reason) $Context.State.Reconciled=$true}
+    foreach($phase in @('LocalPrepared','Started')){
+        $c=[pscustomobject]@{DryRun=$false;ArchivePath=(Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString()));State=@{MaintenanceTransaction=@{Phase=$phase;Committed=$false;RemoteBackup='/root/vps-deploy-backups/20260910-010101/protocol-lifecycle'}}}
+        $blocked=$false
+        try{Assert-MxhNoPendingLocalTransaction $c}catch{$blocked=$true}
+        Invoke-MxhTransactionRecovery $c
+        $blocked -and $c.State.Reconciled
+    }
+}
+foreach($result in $recoveryResults){Assert-True $result 'automatic rollback reconciles local metadata and pending state blocks new maintenance'}
+$restorePortResults=& $coreModule {
+    param($plan)
+    $plan=Copy-MxhHashtable $plan
+    $c=[pscustomobject]@{Plan=$plan;State=@{Modules=@{}};Secrets=@{Xray=@{Fixture='secret'}}}
+    $backup=Copy-MxhHashtable $plan
+    $valid=New-MxhRestoreMetadata $c $backup $c.State $c.Secrets Full
+    $backup.Ports.SshPrimary=34567
+    $blocked=$false
+    try{New-MxhRestoreMetadata $c $backup $c.State $c.Secrets Full|Out-Null}catch{$blocked=$_.Exception.Message -match '旧 SSH 端口'}
+    @($valid.Plan.Ports.SshPrimary -eq $plan.Ports.SshPrimary;$blocked)
+} $realitySource
+foreach($result in $restorePortResults){Assert-True $result 'full restore accepts matching SSH ports and rejects historical firewall after port changes'}
+$inactiveUpgradeBlocked=& $coreModule {
+    function Get-MxhProtocolInventory { @{RealityEntry=@{Installed=$true;Active=$false};AnyTlsEntry=@{Installed=$false};ShadowsocksLanding=@{Installed=$false}} }
+    function Read-VpsMenu {1}
+    function Start-MxhMaintenanceTransaction {throw 'UNEXPECTED_REMOTE_MUTATION'}
+    $c=[pscustomobject]@{Plan=@{};State=@{}}
+    try{Invoke-MxhControlledUpgrade $c;return $false}catch{return $_.Exception.Message -match '停用备用状态'}
+}
+Assert-True $inactiveUpgradeBlocked 'inactive protocol upgrade is rejected before any transaction or remote mutation'
 Assert-True ($operationsSource -match 'Get-MxhHealthAudit \$Context -IgnoreActiveRollbackTimer') 'manual restore validates against the selected restore-point context without flagging its own transaction timer'
 Assert-True ($operationsSource -match '\$Context\.Plan=Read-VpsJsonHashtable \$Context\.PlanPath' -and $operationsSource -match '\$Context\.State=Read-VpsJsonHashtable \$Context\.StatePath') 'manual restore reloads in-memory plan and state after restoring local metadata'
 Assert-True ($operationsSource -match 'foreach\(\$directory in @\(''client-exports'',''server-configs''\)\)') 'manual restore restores generated client and server directories together with metadata'

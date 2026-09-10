@@ -29,6 +29,10 @@ else
     copy_path "$relative"
   done
   systemctl daemon-reload
+  if systemctl is-active --quiet nginx.service; then
+    nginx -t
+    systemctl reload nginx.service
+  fi
   if systemctl is-active --quiet xray.service; then /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json; systemctl restart xray.service; fi
   if systemctl is-active --quiet sing-box-anytls.service; then /usr/local/bin/sing-box-anytls check -c /etc/sing-box-anytls/config.json; systemctl restart sing-box-anytls.service; fi
   if systemctl is-active --quiet sing-box.service; then /usr/local/bin/sing-box check -c /etc/sing-box/config.json; systemctl restart sing-box.service; fi

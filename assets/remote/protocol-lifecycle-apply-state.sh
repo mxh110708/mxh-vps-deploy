@@ -4,6 +4,8 @@ set -euo pipefail
 : "${VPS_PARAM_REALITY_ENABLED:?}"
 : "${VPS_PARAM_ANYTLS_ENABLED:?}"
 : "${VPS_PARAM_SHADOWSOCKS_ENABLED:?}"
+restart_role="${VPS_PARAM_RESTART_ROLE:-}"
+case "$restart_role" in ''|RealityEntry|AnyTlsEntry|ShadowsocksLanding) ;; *) exit 1 ;; esac
 
 for value in "$VPS_PARAM_REALITY_ENABLED" "$VPS_PARAM_ANYTLS_ENABLED" "$VPS_PARAM_SHADOWSOCKS_ENABLED"; do
   [[ "$value" == 'true' || "$value" == 'false' ]] || exit 1
@@ -72,8 +74,25 @@ check_state() {
     ! systemctl is-active --quiet "$service" 2>/dev/null
   fi
 }
+case "$restart_role" in
+  RealityEntry) [[ "$VPS_PARAM_REALITY_ENABLED" == true ]]; systemctl restart xray.service ;;
+  AnyTlsEntry) [[ "$VPS_PARAM_ANYTLS_ENABLED" == true ]]; systemctl restart sing-box-anytls.service ;;
+  ShadowsocksLanding) [[ "$VPS_PARAM_SHADOWSOCKS_ENABLED" == true ]]; systemctl restart sing-box.service ;;
+esac
 check_state xray.service "$VPS_PARAM_REALITY_ENABLED"
 check_state sing-box-anytls.service "$VPS_PARAM_ANYTLS_ENABLED"
 check_state sing-box.service "$VPS_PARAM_SHADOWSOCKS_ENABLED"
+
+if [[ -n "$restart_role" ]]; then
+  case "$restart_role" in
+    RealityEntry) service=xray.service; binary=/usr/local/bin/xray ;;
+    AnyTlsEntry) service=sing-box-anytls.service; binary=/usr/local/bin/sing-box-anytls ;;
+    ShadowsocksLanding) service=sing-box.service; binary=/usr/local/bin/sing-box ;;
+  esac
+  pid="$(systemctl show "$service" -p MainPID --value)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "/proc/$pid/exe" -ef "$binary" ]] || {
+    echo 'The running process does not match the installed binary.' >&2; exit 1
+  }
+fi
 
 printf '%s\n' 'VPSDEPLOY_PROTOCOL_STATE_APPLIED'

@@ -133,6 +133,82 @@ systemctl() {
         self.assertTrue(self.owner.exists())
 
 
+class MaintenanceRuntimeTests(unittest.TestCase):
+    def run_isolated(self, name, preamble, parameters, *, matching_process=True):
+        with tempfile.TemporaryDirectory(prefix='maintenance-runtime-', dir=ROOT / '.tmp') as folder:
+            root = Path(folder)
+            source = (ROOT / 'assets' / 'remote' / name).read_text(encoding='utf-8')
+            for prefix in ('/usr/local', '/etc', '/proc', '/root/vps-deploy-backups'):
+                source = source.replace(prefix, shell_path(root) + prefix)
+            binary = root / 'usr/local/bin/sing-box-anytls'
+            binary.parent.mkdir(parents=True)
+            binary.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+            binary.chmod(0o755)
+            config = root / 'etc/sing-box-anytls/config.json'
+            config.parent.mkdir(parents=True)
+            config.write_text('{}', encoding='utf-8')
+            proc = root / 'proc/123/exe'
+            proc.parent.mkdir(parents=True)
+            if matching_process:
+                os.link(binary, proc)
+            else:
+                proc.write_text('old binary', encoding='utf-8')
+            backup = root / 'root/vps-deploy-backups/20260910-010101/protocol-lifecycle'
+            backup.mkdir(parents=True)
+            (backup / 'protocol-files.tar.gz').touch()
+            rollback = root / 'usr/local/libexec/mxh-protocol-migration-rollback'
+            rollback.parent.mkdir(parents=True)
+            rollback.write_text('#!/usr/bin/env bash\nexit 0\n', encoding='utf-8')
+            rollback.chmod(0o755)
+            env = dict(os.environ, CALLS=shell_path(root / 'calls'),
+                       VPS_PARAM_BACKUP_PATH=shell_path(backup), **parameters)
+            result = subprocess.run([BASH, '--noprofile', '--norc', '-s'], input=preamble + source,
+                                    text=True, encoding='utf-8', capture_output=True, timeout=15, env=env)
+            calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
+            return result, calls
+
+    def test_upgrade_restarts_only_target_and_checks_running_binary(self):
+        preamble = '''
+systemctl() {
+  echo "$*" >> "$CALLS"
+  case "$1" in
+    show) echo 123;;
+    is-active|is-enabled) [[ "$*" == *sing-box-anytls.service* ]];;
+    *) return 0;;
+  esac
+}
+'''
+        params = dict(VPS_PARAM_REALITY_ENABLED='false', VPS_PARAM_ANYTLS_ENABLED='true',
+                      VPS_PARAM_SHADOWSOCKS_ENABLED='false', VPS_PARAM_RESTART_ROLE='AnyTlsEntry')
+        result, calls = self.run_isolated('protocol-lifecycle-apply-state.sh', preamble, params)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('restart sing-box-anytls.service', calls)
+        self.assertNotIn('restart xray.service', calls)
+        result, _ = self.run_isolated('protocol-lifecycle-apply-state.sh', preamble, params, matching_process=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('does not match', result.stderr)
+        params.pop('VPS_PARAM_RESTART_ROLE')
+        result, calls = self.run_isolated('protocol-lifecycle-apply-state.sh', preamble, params)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('restart ', calls)
+
+    def test_config_restore_checks_nginx_before_reload(self):
+        preamble = '''
+tar() { return 0; }
+systemctl() {
+  echo "$*" >> "$CALLS"
+  if [[ "$1" == is-active ]]; then [[ "$*" == *nginx.service* ]]; else return 0; fi
+}
+nginx() { echo "nginx $*" >> "$CALLS"; return "${NGINX_FAIL:-0}"; }
+'''
+        result, calls = self.run_isolated('maintenance-restore-apply.sh', preamble, dict(VPS_PARAM_SCOPE='ConfigOnly'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(calls.index('nginx -t'), calls.index('reload nginx.service'))
+        result, calls = self.run_isolated('maintenance-restore-apply.sh', preamble, dict(VPS_PARAM_SCOPE='ConfigOnly', NGINX_FAIL='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('reload nginx.service', calls)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--bash', required=True)

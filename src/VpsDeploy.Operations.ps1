@@ -47,6 +47,9 @@ function Save-MxhMaintenanceContext {
 
 function Assert-MxhNoPendingLocalTransaction {
     param($Context)
+    if($Context.State.Contains('MaintenanceTransaction') -and -not [bool]$Context.State.MaintenanceTransaction.Committed){
+        throw '本地仍有未完成的维护记录，请先进入“处理未完成的维护操作”核对服务器并恢复本地状态。'
+    }
     foreach($name in @('restore-pending.private.json','ssh-maintenance-pending.private.json')){
         $path=Join-Path $Context.ArchivePath $name
         if(Test-Path -LiteralPath $path){if((Read-VpsJsonHashtable $path).Phase -notin @('Committed','RolledBack')){throw '请先在遗留事务入口处理未完成的本地恢复/SSH 记录，不能开始新操作。'}}
@@ -173,6 +176,14 @@ function Invoke-MxhTransactionRecovery {
     }
     if($Context.State.Contains('MaintenanceTransaction')){
         $local=$Context.State.MaintenanceTransaction
+        if(-not [bool]$local.Committed){
+            $status=Invoke-VpsRemoteScript $Context 'maintenance-transaction-status.sh' @{ACTION='Status';EXPECTED_BACKUP=[string]$local.RemoteBackup}
+            if((Get-VpsMarkerValue $status.StdOut TRANSACTION_PHASE -Required) -eq 'RolledBack'){
+                Undo-MxhMaintenanceTransaction $Context 'Reconcile confirmed automatic rollback'
+                Write-VpsUi '服务器已自动回滚，对应本地计划、凭据和配置也已恢复。' Success
+                return
+            }
+        }
         if($local.Contains('Phase') -and $local.Phase -eq 'LocalPrepared'){
             $status=Invoke-VpsRemoteScript $Context 'maintenance-transaction-status.sh' @{ACTION='Status';EXPECTED_BACKUP=[string]$local.RemoteBackup}
             if((Get-VpsMarkerValue $status.StdOut TRANSACTION_PHASE -Required) -eq 'Committed'){
@@ -221,7 +232,10 @@ function Get-MxhHealthAudit {
     $findings = [Collections.Generic.List[object]]::new()
     $add = { param($severity,$code,$message) $findings.Add([ordered]@{ Severity=$severity; Code=$code; Message=$message }) }
     if (-not $audit.Ssh.Valid) { & $add Critical 'SSH_CONFIG_INVALID' 'sshd -T 未通过。' }
-    if ($audit.Ssh.PasswordAuthentication -ne 'no' -or $audit.Ssh.KbdInteractiveAuthentication -ne 'no' -or $audit.Ssh.PubkeyAuthentication -ne 'yes') {
+    $preserveSsh = $Context.Plan.Contains('Import') -and $Context.Plan.Import.Contains('SshAuthenticationPreserved') -and [bool]$Context.Plan.Import.SshAuthenticationPreserved
+    if ($audit.Ssh.PubkeyAuthentication -ne 'yes') {
+        & $add Critical 'SSH_PUBKEY_DISABLED' 'SSH 公钥认证已关闭，不能保证受管密钥入口可用。'
+    } elseif (-not $preserveSsh -and ($audit.Ssh.PasswordAuthentication -ne 'no' -or $audit.Ssh.KbdInteractiveAuthentication -ne 'no')) {
         & $add Critical 'SSH_NOT_KEY_ONLY' 'SSH 有效配置不是公钥独占登录。'
     }
     $expectedPorts = @([int]$Context.Plan.Ports.SshPrimary,[int]$Context.Plan.Ports.SshRescue) | Sort-Object -Unique
@@ -307,9 +321,14 @@ function New-MxhRestoreMetadata {
             }
         }
     }else{
+        $oldSshPorts=@([int]$Plan.Ports.SshPrimary,[int]$Plan.Ports.SshRescue)|Sort-Object -Unique
+        $currentSshPorts=@([int]$Context.Plan.Ports.SshPrimary,[int]$Context.Plan.Ports.SshRescue)|Sort-Object -Unique
+        if(($oldSshPorts -join ',') -ne ($currentSshPorts -join ',')){
+            throw '恢复点使用旧 SSH 端口，完整恢复其防火墙可能切断当前连接。请选择“只恢复代理配置和密钥／密码”，或使用 SSH 端口变更后的备份。未修改服务器。'
+        }
         $newPlan=Copy-MxhHashtable $Plan;$newState=Copy-MxhHashtable $State;$newSecrets=Copy-MxhHashtable $Secrets
         # The protocol snapshot does not restore SSH identity, server identity or local paths.
-        foreach($key in @('Server','Paths','Bootstrap','SshKey','AdminUser','Provider','Instance','NodeName')){
+        foreach($key in @('Server','Paths','Bootstrap','SshKey','AdminUser','Provider','Instance','NodeName','Import')){
             if($Context.Plan.Contains($key)){$newPlan[$key]=$Context.Plan[$key]}
         }
         foreach($key in @('SshPrimary','SshRescue')){$newPlan.Ports[$key]=$Context.Plan.Ports[$key]}
@@ -347,7 +366,7 @@ function Invoke-MxhManualRestoreCenter {
     while ($true) {
     $scopeChoice=Read-VpsMenu '选择恢复范围' @('只恢复代理配置和密钥／密码','恢复协议相关文件和运行设置') 1 -AllowBack -HelpText @'
 1 只恢复配置：保留当前服务启停、防火墙和程序版本；若安装的协议、端口或证书设置不兼容，会停止恢复。
-2 恢复协议相关文件和设置：恢复备份中的程序、配置、服务启停、防火墙和网络参数；可能包含 Komari 等被记录的组件。
+2 恢复协议相关文件和设置：恢复备份中的程序、配置、服务启停、防火墙和网络参数；可能包含 Komari 等被记录的组件。备份与当前 SSH 端口不同会拒绝恢复，避免旧防火墙切断当前连接。
 两项都不是系统重装，不恢复 SSH 登录身份；执行前会备份当前状态。
 '@
     try {
@@ -381,6 +400,9 @@ function Invoke-MxhManualRestoreCenter {
     try {
         $r=Invoke-VpsRemoteScript $Context 'maintenance-restore-apply.sh' @{BACKUP_PATH=$selected.Remote;SCOPE=$scope} -TimeoutSeconds 600
         if($r.StdOut -notmatch 'VPSDEPLOY_MANUAL_RESTORE_APPLIED'){throw '恢复脚本未确认完成。'}
+        foreach($port in @([int]$Context.Plan.Ports.SshPrimary,[int]$Context.Plan.Ports.SshRescue)|Sort-Object -Unique){
+            if(-not(Test-VpsSshConnection $Context root $port)){throw '恢复后 SSH 管理入口复验失败，停止提交并恢复操作前状态。'}
+        }
         $currentPlan=$Context.Plan;$currentState=$Context.State;$currentSecrets=$Context.Secrets
         try{
             $Context.Plan=$restorePlan;$Context.State=$restoreState;$Context.Secrets=$restoreSecrets
@@ -630,6 +652,9 @@ function Invoke-MxhControlledUpgrade {
     try {
     $role=$roles[$choice-1]
     $targetVersion=$null;$targetChannel=$null
+    if($role -in @(Get-MxhManagedProtocolRoles) -and -not [bool]$inventory[$role].Active){
+        throw '该协议当前处于停用备用状态，不能直接更新并进行真实连接验收。请先在“管理代理协议”中启用或切换到该协议，再执行更新；未修改服务器。'
+    }
     if($role -eq 'RealityEntry'){
         $channelChoice=Read-VpsMenu 'Xray 升级目标' @(
             "保持计划版本（$($Context.Plan.Reality.XrayVersion)）",
@@ -682,6 +707,7 @@ function Invoke-MxhControlledUpgrade {
                 REALITY_ENABLED=([bool]$inventory.RealityEntry.Enabled).ToString().ToLowerInvariant()
                 ANYTLS_ENABLED=([bool]$inventory.AnyTlsEntry.Enabled).ToString().ToLowerInvariant()
                 SHADOWSOCKS_ENABLED=([bool]$inventory.ShadowsocksLanding.Enabled).ToString().ToLowerInvariant()
+                RESTART_ROLE=$role
             } -TimeoutSeconds 300
             if($stateResult.StdOut -notmatch 'VPSDEPLOY_PROTOCOL_STATE_APPLIED'){throw '升级后原服务启停状态恢复未确认。'}
         }
