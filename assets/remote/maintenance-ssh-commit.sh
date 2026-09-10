@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+: "${VPS_PARAM_EXPECTED_BACKUP:?}"
+exec 9>/var/lib/mxh-vps-deploy/transaction.lock
+flock -n 9 || exit 1
+[[ "$(cat /var/lib/mxh-vps-deploy/transaction.owner)" == "$VPS_PARAM_EXPECTED_BACKUP" ]]
+[[ ! -f "$VPS_PARAM_EXPECTED_BACKUP/rollback-executed" ]]
 : "${VPS_PARAM_NEW_PRIMARY:?}"; : "${VPS_PARAM_NEW_RESCUE:?}"; : "${VPS_PARAM_NEW_PUBLIC_KEY:?}"
 old_public="${VPS_PARAM_OLD_PUBLIC_KEY:-}"; admin="${VPS_PARAM_ADMIN_USER:-root}"
 managed=/etc/ssh/sshd_config.d/00-00-local-access.conf
@@ -24,5 +29,5 @@ if [[ -n "$old_public" && "$old_public" != "$VPS_PARAM_NEW_PUBLIC_KEY" ]]; then
   done
 fi
 sshd -t; systemctl reload ssh.service 2>/dev/null || systemctl reload sshd.service
-systemctl disable --now mxh-ssh-maintenance-rollback.timer >/dev/null 2>&1 || true
+# Keep the rollback timer armed until the controller has saved local state and final firewall.
 printf '%s\n' 'VPSDEPLOY_SSH_MAINTENANCE_COMMITTED'

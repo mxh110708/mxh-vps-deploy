@@ -371,6 +371,7 @@ function Get-MxhRemoteProtocolInventory {
     )
 
     $context = New-MxhReadonlyContextFromPlan -ProjectRoot $ProjectRoot -PlanPath $PlanPath
+    Initialize-MxhPendingSshAccess $context
     $result = Invoke-VpsRemoteScript -Context $context -Asset 'protocol-lifecycle-status.sh' -TimeoutSeconds 180
     if ($result.StdOut -notmatch 'VPSDEPLOY_PROTOCOL_STATUS_OK') {
         throw '远端协议状态检查未返回成功标记。'
@@ -414,7 +415,7 @@ function Read-MxhProtocolMigrationSource {
             else {
                 Get-MxhRemoteProtocolInventory -ProjectRoot $ProjectRoot -PlanPath $candidatePath
             }
-            Show-VpsPlanSummary -Plan $plan
+            Show-VpsPlanSummary -Plan $plan -ExistingInstance
             Show-MxhProtocolInventory -Inventory $inventory
         }
         catch {
@@ -423,15 +424,12 @@ function Read-MxhProtocolMigrationSource {
             continue
         }
         try {
-            $choice = Read-VpsMenu '请选择实例操作' @(
-                '使用此实例',
+            $choice = Read-VpsMenu '确认要管理的 VPS' @(
+                '确认，继续管理此 VPS',
                 '取消并返回主菜单'
             ) 1 -AllowBack -HelpText @'
-安装并切换：部署目标协议并切换 443；冲突协议保留但停用。
-安装为备用：完成配置和功能验证后恢复原启停状态。
-切换/启停：只改变已安装协议的服务状态。
-卸载：先备份再移除所选协议，其他协议、SSH 和 Komari 不受影响。
-备份管理：查看、恢复或按明确确认删除脚本生成的协议备份。
+请核对上方的 VPS 信息和协议状态。
+选择 1 进入下一步；选择 2 取消本次操作；输入 0 返回计划文件选择页。
 '@
         }
         catch {
@@ -1180,7 +1178,7 @@ function New-MxhProtocolMigrationDetails {
             '启用新入口协议；冲突的 TCP 443 入口保留安装文件但停用'
         }
         Write-Host "  安装后状态：$installStateText"
-        Write-Host '  网络调优：保持现状；如需调整请从主菜单进入“独立网络调优”'
+        Write-Host '  网络参数：保持现状；如需调整请从主菜单进入“调整网络参数”'
         Write-Host "  SSH：保留 $($plan.Ports.SshPrimary) + $($plan.Ports.SshRescue)"
         Write-Host "  自动回滚：切换后 20 分钟内未完成验收则恢复源服务和旧 nftables"
         Show-VpsPlanSummary -Plan $plan
@@ -1207,10 +1205,12 @@ function New-MxhProtocolStateDetails {
     param([Parameter(Mandatory)] $Source)
 
     $inventory = Get-MxhProtocolInventory -Plan $Source.Plan -State $Source.State -RemoteInventory $Source.Inventory
-    $actionChoice = Read-VpsMenu '切换/启停操作' @(
-        '启用一个已安装协议（Reality/AnyTLS 会自动切换 TCP 443 所有者）',
-        '停用一个当前已启用协议'
+    while ($true) {
+    $actionChoice = Read-VpsMenu '启用或停用协议' @(
+        '启用协议（如端口冲突，会停用另一入口协议）',
+        '停用协议（保留安装文件）'
     ) 1 -AllowBack
+    try {
     $operation = if ($actionChoice -eq 1) { 'Enable' } else { 'Disable' }
     $candidates = @(if ($operation -eq 'Enable') {
             Get-MxhManagedProtocolRoles | Where-Object { $inventory[$_].Installed -and -not $inventory[$_].Enabled }
@@ -1222,7 +1222,9 @@ function New-MxhProtocolStateDetails {
         throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
     }
     $labels = @($candidates | ForEach-Object { Get-MxhProtocolRoleLabel -Role $_ })
+    while ($true) {
     $choice = Read-VpsMenu '选择协议' $labels 1 -AllowBack
+    try {
     $role = $candidates[$choice - 1]
     $plan = New-MxhProtocolLifecyclePlan -SourcePlan $Source.Plan -SourcePlanPath $Source.PlanPath `
         -SourceState $Source.State -SourceInventory $Source.Inventory -TargetRole $role -Operation $operation
@@ -1240,6 +1242,10 @@ function New-MxhProtocolStateDetails {
     Show-MxhProtocolInventory -Inventory $plan.Migration.FinalInventory
     [void](Read-VpsMenu '请核对状态变更' @('确认并执行') 1 -AllowBack)
     return [pscustomobject]@{ Plan = $plan; Source = $Source }
+    } catch { if (Test-VpsWizardBackError $_) { continue }; throw }
+    }
+    } catch { if (Test-VpsWizardBackError $_) { continue }; throw }
+    }
 }
 
 function New-MxhProtocolUninstallDetails {
@@ -1255,7 +1261,9 @@ function New-MxhProtocolUninstallDetails {
         throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
     }
     $labels = @($candidates | ForEach-Object { Get-MxhProtocolRoleLabel -Role $_ })
+    while ($true) {
     $choice = Read-VpsMenu '选择要卸载的已停用协议' $labels 1 -AllowBack
+    try {
     $role = $candidates[$choice - 1]
     $plan = New-MxhProtocolLifecyclePlan -SourcePlan $Source.Plan -SourcePlanPath $Source.PlanPath `
         -SourceState $Source.State -SourceInventory $Source.Inventory -TargetRole $role -Operation Uninstall
@@ -1273,6 +1281,8 @@ function New-MxhProtocolUninstallDetails {
         throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
     }
     return [pscustomobject]@{ Plan = $plan; Source = $Source }
+    } catch { if (Test-VpsWizardBackError $_) { continue }; throw }
+    }
 }
 
 function Invoke-MxhProtocolBackupCleanup {
@@ -1288,10 +1298,10 @@ function Invoke-MxhProtocolBackupCleanup {
         throw '存在未完成协议变更，拒绝清理任何备份。'
     }
     $scope = Read-VpsMenu '清理哪些协议变更备份' @(
-        '仅本地私有归档中的 migration-backups',
-        '仅 VPS 上的 protocol-lifecycle/protocol-migration 备份',
-        '本地与 VPS 两者'
-    ) 1 -AllowBack
+        '只清理本机备份',
+        '只清理 VPS 上的备份',
+        '同时清理两处备份'
+    ) 1 -AllowBack -HelpText '只清理本工具生成的协议变更备份，不是删除服务。下一步可设置保留份数；删除前会列出范围并要求确认。'
     $keep = [int](Read-VpsText '保留最近几份（0 表示全部删除）' -Default '3' -AllowBack -ZeroIsValue -Validate {
             param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 0 -and $n -le 100
         } -ValidationMessage '请输入 0–100 之间的整数。')
@@ -1364,14 +1374,21 @@ function New-VpsProtocolMigrationPlanInteractive {
         $returnToSource = $false
         while ($true) {
             try {
-                $choice = Read-VpsMenu '现有 VPS 协议管理' @(
-                    '安装新协议并切换使用（保留原协议但停用冲突项）',
-                    '安装新协议作为备用（验证后恢复当前状态）',
-                    '切换/启停已安装协议',
+                $choice = Read-VpsMenu '代理协议管理' @(
+                    '安装并启用新协议',
+                    '安装备用协议（验证后停用）',
+                    '启用或停用已有协议',
                     '卸载已停用协议',
-                    '清理协议变更备份',
-                    '重新选择实例'
-                ) 1 -AllowBack
+                    '清理旧备份（协议变更）',
+                    '更换 VPS'
+                ) 1 -AllowBack -HelpText @'
+1 安装并启用：安装所选协议并投入使用。Reality 与 AnyTLS 共用 443，启用一个会停用另一个，但不卸载。
+2 安装备用：安装并临时启动验证，结束后保留新协议但不启用，恢复原有服务状态；验证期间可能短暂切换服务。
+3 启用或停用：只调整已安装协议，不重新安装。Shadowsocks 使用独立端口，可与入口协议同时运行。
+4 卸载：仅允许卸载已停用协议；删除该协议的程序和配置，保留回滚备份。
+5 清理旧备份：按保留份数删除协议变更备份；从备份恢复请进入运维中心。
+6 更换 VPS：重新选择部署计划文件。输入 0 返回当前 VPS 的确认页。
+'@
             }
             catch {
                 if (-not (Test-VpsWizardBackError $_)) { throw }
@@ -1535,6 +1552,7 @@ function Invoke-MxhProtocolMigrationRollback {
     Write-VpsUi '协议变更失败，正在立即恢复变更前的协议文件、启用状态与 nftables；若 SSH 暂时不可达，服务器端计时器仍会自动执行。' Warning
     try {
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'protocol-migration-trigger-rollback.sh' -Parameters @{
+            EXPECTED_BACKUP = [string]$Context.State.Migration.RemoteBackupDirectory
             SOURCE_ROLE = [string]$Context.Plan.Migration.SourceRole
         } -TimeoutSeconds 180
         if ($result.StdOut -notmatch 'VPSDEPLOY_MIGRATION_ROLLBACK_OK') { throw '远端未返回回滚成功标记。' }

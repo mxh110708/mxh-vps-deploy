@@ -10,9 +10,20 @@ for port in ${VPS_PARAM_OLD_PORTS//,/ } "$VPS_PARAM_NEW_PRIMARY" "$VPS_PARAM_NEW
 done
 [[ "$VPS_PARAM_NEW_PUBLIC_KEY" == ssh-ed25519\ * ]]
 [[ "$VPS_PARAM_ADMIN_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+command -v flock >/dev/null || { echo 'Missing flock (util-linux); install it before starting maintenance.' >&2; exit 1; }
+install -d -m 0700 /var/lib/mxh-vps-deploy
+exec 9>/var/lib/mxh-vps-deploy/transaction.lock
+flock -n 9 || exit 1
+[[ ! -f /var/lib/mxh-vps-deploy/transaction.owner ]]
+if systemctl is-active --quiet mxh-ssh-maintenance-rollback.timer; then exit 1; fi
+if systemctl is-active --quiet mxh-protocol-migration-rollback.timer; then exit 1; fi
 stamp="$(date -u +%Y%m%d-%H%M%S)"; backup="/root/vps-deploy-backups/${stamp}/ssh-maintenance"
+[[ ! -e "$backup" ]]
 install -d -m 0700 "$backup"
+printf '%s\n' "$backup" > /var/lib/mxh-vps-deploy/transaction.owner
+chmod 0600 /var/lib/mxh-vps-deploy/transaction.owner
 cp -a /etc/ssh "$backup/etc-ssh"
+if [[ -f /etc/nftables.conf ]]; then cp -a /etc/nftables.conf "$backup/nftables.conf"; fi
 cp -a /root/.ssh/authorized_keys "$backup/root-authorized_keys"
 if id "$VPS_PARAM_ADMIN_USER" >/dev/null 2>&1; then
   home="$(getent passwd "$VPS_PARAM_ADMIN_USER" | cut -d: -f6)"
@@ -21,6 +32,10 @@ fi
 cat > "$backup/rollback" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+exec 9>/var/lib/mxh-vps-deploy/transaction.lock
+flock -w 30 9 || exit 1
+[[ ! -f '$backup/transaction-committed' ]] || exit 0
+[[ "\$(cat /var/lib/mxh-vps-deploy/transaction.owner)" == '$backup' ]]
 rm -rf /etc/ssh
 cp -a '$backup/etc-ssh' /etc/ssh
 cp -a '$backup/root-authorized_keys' /root/.ssh/authorized_keys
@@ -30,6 +45,9 @@ if [[ -f '$backup/admin-authorized_keys' ]]; then
 fi
 sshd -t
 systemctl reload ssh.service 2>/dev/null || systemctl reload sshd.service
+if [[ -f '$backup/nftables.conf' ]]; then cp -a '$backup/nftables.conf' /etc/nftables.conf; nft -c -f /etc/nftables.conf; nft -f /etc/nftables.conf; fi
+date -u +%FT%TZ > '$backup/rollback-executed'
+rm -f /var/lib/mxh-vps-deploy/transaction.owner
 EOF
 chmod 0700 "$backup/rollback"
 cat > /etc/systemd/system/mxh-ssh-maintenance-rollback.service <<EOF
@@ -47,6 +65,7 @@ WantedBy=timers.target
 EOF
 systemctl daemon-reload
 systemctl enable --now mxh-ssh-maintenance-rollback.timer >/dev/null
+date -u +%FT%TZ > "$backup/transaction-armed"
 
 for user in root "$VPS_PARAM_ADMIN_USER"; do
   id "$user" >/dev/null 2>&1 || continue

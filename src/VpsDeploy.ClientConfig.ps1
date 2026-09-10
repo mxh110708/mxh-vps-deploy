@@ -58,6 +58,7 @@ function Invoke-MxhEditClientLayoutDefaults {
     while ($true) {
         $template = Get-MxhClientLayoutTemplate -ProjectRoot $ProjectRoot
         $layout = $template.Value
+        $choice = $null
         try {
             $choice = Read-VpsMenu '客户端布局默认值' @(
                 '查看当前默认值',
@@ -131,7 +132,13 @@ function Invoke-MxhEditClientLayoutDefaults {
             Save-VpsJson -Value $layout -Path $template.LocalPath -Private
             Write-VpsUi '本机客户端布局默认值已保存。' Success
         }
-        catch { if (Test-VpsWizardBackError $_) { return }; throw }
+        catch {
+            if (Test-VpsWizardBackError $_) {
+                if ($null -eq $choice) { return }
+                continue
+            }
+            throw
+        }
     }
 }
 
@@ -177,9 +184,11 @@ function Read-MxhSecretText {
     while ($true) {
         $hint = if($AllowBack){'（隐藏输入；输入 0 返回上一级）'}else{'（隐藏输入）'}
         $secure = Read-Host ($Prompt+$hint) -AsSecureString
+        if ($null -eq $secure) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         try { $value = ConvertFrom-VpsSecureString $secure }
         finally { $secure.Dispose() }
         if(Test-VpsClearCommand $value){Clear-VpsScreen;continue}
+        if(Test-VpsHelpCommand $value){Show-VpsHelp '敏感值不会显示；输入 0 返回上一级，输入 clear 清屏。';continue}
         if($AllowBack -and $value.Trim() -eq '0'){throw [InvalidOperationException]::new($script:VpsWizardBackMarker)}
         if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
         Write-VpsUi '该敏感项不能为空。' Warning
@@ -251,39 +260,57 @@ function Get-MxhFragmentNodeNames {
 
 function New-MxhManualClientNode {
     param([Parameter(Mandatory)][string[]]$RegionGroups,[hashtable]$LandingTransitDefaults)
-    $kind = Read-VpsMenu '手动节点协议' @('VLESS + Reality + Vision 入口','AnyTLS + TLS/ECH 入口','Shadowsocks 2022 落地') 1 -AllowBack
-    $name = Read-VpsText '节点名称/tag' -AllowBack -Validate ${function:Test-VpsNodeName}
-    $server = Read-VpsText '服务器地址（IPv4、IPv6 或域名）' -AllowBack -Validate { param($v) -not [string]::IsNullOrWhiteSpace($v) }
-    $defaultPort = if ($kind -eq 3) { '46936' } else { '443' }
-    $port = [int](Read-VpsText '服务端口' -Default $defaultPort -AllowBack -Validate {
-            param($v) $n = 0; [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 65535
-        })
+    $draft = Read-VpsForm -Steps @(
+        @{Key='kind';Read={param($v)
+            $selected=Read-VpsMenu '手动节点协议' @('VLESS + Reality + Vision 入口','AnyTLS + TLS/ECH 入口','Shadowsocks 2022 落地') $(if($v.kind){[int]$v.kind}else{1}) -AllowBack
+            if($v.kind -and $v.kind -ne $selected){foreach($key in @('port','uuid','publicKey','shortId','password','serverName','echConfig','method')){$v[$key]=$null}}
+            return $selected
+        }}
+        @{Key='name';Read={param($v) Read-VpsText '节点名称/tag' -Default $v.name -AllowBack -Validate ${function:Test-VpsNodeName}}}
+        @{Key='server';Read={param($v) Read-VpsText '服务器地址（IPv4、IPv6 或域名）' -Default $v.server -AllowBack -Validate {
+            param($value) $ip=$null; [Net.IPAddress]::TryParse($value,[ref]$ip) -or (Test-VpsHostName $value)
+        } -ValidationMessage '请输入 IP 或域名，不要包含协议、端口或路径。'}}
+        @{Key='port';Read={param($v) [int](Read-VpsText '服务端口' -Default $(if($v.port){[string]$v.port}elseif($v.kind -eq 3){'46936'}else{'443'}) -AllowBack -Validate {
+            param($value) $n=0; [int]::TryParse($value,[ref]$n) -and $n -ge 1 -and $n -le 65535
+        })}}
+        @{Key='uuid';When={param($v)$v.kind -eq 1};Read={param($v) Read-MxhSecretText 'UUID' -AllowBack}}
+        @{Key='publicKey';When={param($v)$v.kind -eq 1};Read={param($v) Read-MxhSecretText 'Reality PublicKey' -AllowBack}}
+        @{Key='shortId';When={param($v)$v.kind -eq 1};Read={param($v) Read-MxhSecretText 'Reality short-id' -AllowBack}}
+        @{Key='method';When={param($v)$v.kind -eq 3};Read={param($v) Read-VpsText 'Shadowsocks 方法' -Default $(if($v.method){$v.method}else{'2022-blake3-aes-128-gcm'}) -AllowBack}}
+        @{Key='password';When={param($v)$v.kind -ne 1};Read={param($v) Read-MxhSecretText '协议密码（Shadowsocks 使用客户端组合密码）' -AllowBack}}
+        @{Key='serverName';When={param($v)$v.kind -ne 3};Read={param($v) Read-VpsText '服务端 SNI / servername' -Default $v.serverName -AllowBack -Validate ${function:Test-VpsHostName}}}
+        @{Key='echConfig';When={param($v)$v.kind -eq 2};Read={param($v)
+            while($true){
+                $value=Read-MxhSecretText 'ECH client config Base64' -AllowBack
+                try { $decoded=[Convert]::FromBase64String($value); if($decoded.Length -gt 0){return $value} } catch [FormatException] {}
+                Write-VpsUi 'ECH client config 不是有效 Base64，请重新输入。' Warning
+            }
+        }}
+        @{Key='group';Read={param($v)
+            $preferred=if($v.group){[string]$v.group}elseif($LandingTransitDefaults -and $LandingTransitDefaults.Contains($v.name)){[string]$LandingTransitDefaults[$v.name]}else{''}
+            $defaultIndex=[Array]::IndexOf($RegionGroups,$preferred)+1;if($defaultIndex -lt 1){$defaultIndex=1}
+            $title=if($v.kind -eq 3){'该落地节点经由哪个地区入口组连接'}else{'该入口属于哪个地区入口组'}
+            $RegionGroups[(Read-VpsMenu $title $RegionGroups $defaultIndex -AllowBack)-1]
+        }}
+    )
+    $kind=$draft.kind;$name=$draft.name;$server=$draft.server;$port=[int]$draft.port
     if ($kind -eq 1) {
-        $uuid = Read-MxhSecretText 'UUID' -AllowBack
-        $publicKey = Read-MxhSecretText 'Reality PublicKey' -AllowBack
-        $shortId = Read-MxhSecretText 'Reality short-id' -AllowBack
-        $serverName = Read-VpsText 'Reality servername' -AllowBack -Validate ${function:Test-VpsHostName}
+        $uuid=$draft.uuid;$publicKey=$draft.publicKey;$shortId=$draft.shortId;$serverName=$draft.serverName
         $clash = [ordered]@{ name=$name;type='vless';server=$server;port=$port;uuid=$uuid;network='tcp';tls=$true;udp=$true;servername=$serverName;flow='xtls-rprx-vision';'client-fingerprint'='chrome';'reality-opts'=[ordered]@{'public-key'=$publicKey;'short-id'=$shortId} }
         $sing = [ordered]@{ type='vless';tag=$name;server=$server;server_port=$port;uuid=$uuid;flow='xtls-rprx-vision';packet_encoding='xudp';tls=[ordered]@{enabled=$true;server_name=$serverName;utls=[ordered]@{enabled=$true;fingerprint='chrome'};reality=[ordered]@{enabled=$true;public_key=$publicKey;short_id=$shortId}} }
-        $region = $RegionGroups[(Read-VpsMenu '该入口属于哪个地区入口组' $RegionGroups 1 -AllowBack)-1]
+        $region = $draft.group
         return [ordered]@{name=$name;kind='entry';region_group=$region;transit_group=$null;clash=$clash;sing_box=$sing}
     }
     if ($kind -eq 2) {
-        $password = Read-MxhSecretText 'AnyTLS 密码' -AllowBack
-        $serverName = Read-VpsText '证书域名/内部 SNI' -AllowBack -Validate ${function:Test-VpsHostName}
-        $echConfig = Read-MxhSecretText 'ECH client config Base64' -AllowBack
+        $password=$draft.password;$serverName=$draft.serverName;$echConfig=$draft.echConfig
         if ($echConfig -notmatch '^[A-Za-z0-9+/=]+$') { throw 'ECH client config 不是规范 Base64。' }
         $pem = @('-----BEGIN ECH CONFIGS-----',$echConfig,'-----END ECH CONFIGS-----')
         $clash = [ordered]@{name=$name;type='anytls';server=$server;port=$port;password=$password;udp=$true;sni=$serverName;'skip-cert-verify'=$false;'ech-opts'=[ordered]@{enable=$true;config=$echConfig}}
         $sing = [ordered]@{type='anytls';tag=$name;server=$server;server_port=$port;password=$password;tls=[ordered]@{enabled=$true;server_name=$serverName;min_version='1.3';ech=[ordered]@{enabled=$true;config=$pem}}}
-        $region = $RegionGroups[(Read-VpsMenu '该入口属于哪个地区入口组' $RegionGroups 1 -AllowBack)-1]
+        $region = $draft.group
         return [ordered]@{name=$name;kind='entry';region_group=$region;transit_group=$null;clash=$clash;sing_box=$sing}
     }
-    $method = Read-VpsText 'Shadowsocks 方法' -Default '2022-blake3-aes-128-gcm' -AllowBack
-    $password = Read-MxhSecretText 'Shadowsocks 客户端组合密码' -AllowBack
-    $preferred=if($LandingTransitDefaults -and $LandingTransitDefaults.Contains($name)){[string]$LandingTransitDefaults[$name]}else{''}
-    $defaultIndex=[Array]::IndexOf($RegionGroups,$preferred)+1;if($defaultIndex -lt 1){$defaultIndex=1}
-    $transit = $RegionGroups[(Read-VpsMenu '该落地节点经由哪个地区入口组连接' $RegionGroups $defaultIndex -AllowBack)-1]
+    $method=$draft.method;$password=$draft.password;$transit=$draft.group
     $clash = [ordered]@{name=$name;type='ss';server=$server;port=$port;cipher=$method;password=$password;udp=$true;'dialer-proxy'=$transit}
     $sing = [ordered]@{type='shadowsocks';tag=$name;server=$server;server_port=$port;method=$method;password=$password;detour=$transit}
     return [ordered]@{name=$name;kind='landing';region_group=$null;transit_group=$transit;clash=$clash;sing_box=$sing}
@@ -387,29 +414,67 @@ function Publish-MxhAuthorityPair {
         [Parameter(Mandatory)][string]$CandidateSingBox,
         [Parameter(Mandatory)][string]$TargetClash,
         [Parameter(Mandatory)][string]$TargetSingBox,
-        [Parameter(Mandatory)][string]$BackupRoot
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [hashtable]$Expected,
+        [hashtable]$ExpectedCandidates
     )
     if((Test-MxhForbiddenAuthorityPath $TargetClash) -or (Test-MxhForbiddenAuthorityPath $TargetSingBox)){throw '拒绝写入 Clash Verge AppData/profile 副本；请选择独立权威文件。'}
+    $TargetClash=[IO.Path]::GetFullPath($TargetClash);$TargetSingBox=[IO.Path]::GetFullPath($TargetSingBox)
+    if($TargetClash -eq $TargetSingBox){throw '两份配置不能指向同一个目标文件。'}
+    if($TargetClash -in @([IO.Path]::GetFullPath($CandidateClash),[IO.Path]::GetFullPath($CandidateSingBox)) -or $TargetSingBox -in @([IO.Path]::GetFullPath($CandidateClash),[IO.Path]::GetFullPath($CandidateSingBox))){throw '发布目标不能覆盖候选文件本身。'}
     foreach($target in @($TargetClash,$TargetSingBox)){
         $parent=Split-Path -Parent $target
         if([string]::IsNullOrWhiteSpace($parent)){throw "目标必须是完整路径：$target"}
         [IO.Directory]::CreateDirectory($parent)|Out-Null
     }
     [IO.Directory]::CreateDirectory($BackupRoot)|Out-Null
-    $clashBackup=$null;$singBackup=$null
-    if(Test-Path -LiteralPath $TargetClash -PathType Leaf){$clashBackup=Join-Path $BackupRoot (Split-Path -Leaf $TargetClash);Copy-Item -LiteralPath $TargetClash -Destination $clashBackup}
-    if(Test-Path -LiteralPath $TargetSingBox -PathType Leaf){$singBackup=Join-Path $BackupRoot (Split-Path -Leaf $TargetSingBox);Copy-Item -LiteralPath $TargetSingBox -Destination $singBackup}
-    $clashTemp=$TargetClash+'.mxh-new';$singTemp=$TargetSingBox+'.mxh-new'
+    Protect-VpsPrivateFile $BackupRoot
+    $stamp=[Guid]::NewGuid().ToString('N')
+    $clashBackup=Join-Path $BackupRoot ('clash-'+$stamp+'.backup');$singBackup=Join-Path $BackupRoot ('sing-box-'+$stamp+'.backup')
+    $clashTemp=$TargetClash+'.mxh-new-'+$stamp;$singTemp=$TargetSingBox+'.mxh-new-'+$stamp
+    $locks=[Collections.Generic.List[object]]::new()
+    $journalPath=Join-Path $BackupRoot 'publish.private.json'
+    $singChanged=$false
     try{
+        foreach($target in @($TargetClash,$TargetSingBox) | Sort-Object){
+            $locks.Add([IO.File]::Open($target+'.mxh-publish.lock',[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None))
+        }
+        $before=@{Clash=Get-MxhFileFingerprint $TargetClash;SingBox=Get-MxhFileFingerprint $TargetSingBox}
+        if($Expected -and ($Expected.Clash -ne $before.Clash -or $Expected.SingBox -ne $before.SingBox)){throw '确认后目标文件已经变化，未覆盖，请重新查看发布摘要。'}
+        if($before.Clash -ne 'Missing'){Copy-Item -LiteralPath $TargetClash -Destination $clashBackup}
+        if($before.SingBox -ne 'Missing'){Copy-Item -LiteralPath $TargetSingBox -Destination $singBackup}
+        $journal=@{Phase='Prepared';Clash=$TargetClash;SingBox=$TargetSingBox;ClashBackup=$clashBackup;SingBackup=$singBackup;Before=$before}
+        Save-VpsJson $journal $journalPath -Private
+        [IO.File]::WriteAllText($clashTemp,'');Protect-VpsPrivateFile $clashTemp
+        [IO.File]::WriteAllText($singTemp,'');Protect-VpsPrivateFile $singTemp
         Copy-Item -LiteralPath $CandidateClash -Destination $clashTemp -Force
         Copy-Item -LiteralPath $CandidateSingBox -Destination $singTemp -Force
+        $candidateHashes=@{Clash=Get-MxhFileFingerprint $clashTemp;SingBox=Get-MxhFileFingerprint $singTemp}
+        if($ExpectedCandidates -and ($candidateHashes.Clash -ne $ExpectedCandidates.Clash -or $candidateHashes.SingBox -ne $ExpectedCandidates.SingBox)){throw '候选文件与已校验版本不同，未发布。'}
+        $journal.Candidates=$candidateHashes;Save-VpsJson $journal $journalPath -Private
+        if((Get-MxhFileFingerprint $TargetClash) -ne $before.Clash -or (Get-MxhFileFingerprint $TargetSingBox) -ne $before.SingBox){throw '目标文件被外部程序修改，发布已停止。'}
         [IO.File]::Move($clashTemp,$TargetClash,$true)
-        try{[IO.File]::Move($singTemp,$TargetSingBox,$true)}catch{
-            if($clashBackup){Copy-Item -LiteralPath $clashBackup -Destination $TargetClash -Force}else{Remove-Item -LiteralPath $TargetClash -ErrorAction SilentlyContinue}
+        try{
+            $journal.Phase='ClashApplied';Save-VpsJson $journal $journalPath -Private
+            if((Get-MxhFileFingerprint $TargetSingBox) -ne $before.SingBox){throw 'sing-box 目标被外部修改，停止第二份替换。'}
+            [IO.File]::Move($singTemp,$TargetSingBox,$true)
+            $singChanged=$true
+            $journal.Phase='Committed';Save-VpsJson $journal $journalPath -Private
+        }catch{
+            if((Get-MxhFileFingerprint $TargetClash) -ne $candidateHashes.Clash){throw '发布期间 Clash 目标被外部修改，拒绝覆盖外部变更；请从发布记录人工恢复。'}
+            if(Test-Path -LiteralPath $clashBackup){Copy-Item -LiteralPath $clashBackup -Destination $TargetClash -Force}else{Remove-Item -LiteralPath $TargetClash -ErrorAction SilentlyContinue}
+            if($singChanged){
+                if((Get-MxhFileFingerprint $TargetSingBox) -ne $candidateHashes.SingBox){throw '发布期间 sing-box 目标被外部修改，保留备份供人工恢复。'}
+                if(Test-Path -LiteralPath $singBackup){Copy-Item -LiteralPath $singBackup -Destination $TargetSingBox -Force}elseif($before.SingBox -eq 'Missing' -and [IO.File]::Exists($TargetSingBox)){[IO.File]::Delete($TargetSingBox)}
+            }
+            $journal.Phase='RolledBack';Save-VpsJson $journal $journalPath -Private
             throw
         }
     }
-    finally{Remove-Item -LiteralPath $clashTemp,$singTemp -Force -ErrorAction SilentlyContinue}
+    finally{
+        foreach($lock in $locks){$lock.Dispose()}
+        Remove-Item -LiteralPath $clashTemp,$singTemp -Force -ErrorAction SilentlyContinue
+    }
     return [pscustomobject]@{Clash=$TargetClash;SingBox=$TargetSingBox;BackupRoot=$BackupRoot}
 }
 
@@ -636,12 +701,17 @@ function Invoke-MxhClientAuthorityDesigner {
     while($true){
         try{
             $choice=Read-VpsMenu 'Clash/sing-box 客户端权威配置设计器' @(
-                '生成配置（通用模板或可选现有配置）',
-                '查看或修改本机布局默认值',
+                '快速创建方案',
+                '打开已有方案／恢复草稿',
+                '导入现有配置到方案',
+                '校验一对现有 Clash/sing-box 配置',
+                '高级默认设置',
+                '旧版高级生成流程（兼容入口）',
                 '查看可用节点数据源',
-                '校验一对现有 Clash/sing-box 配置'
+                '检查／恢复未完成的配置发布'
             ) 1 -AllowBack -HelpText @'
-生成配置：选择基础模板、节点来源、地区/落地关系和业务组，再选择覆盖权威配置或生成新文件。
+快速创建：选择节点与连接关系，进入可随时修改的方案工作台；生成候选与发布分离。
+已有方案：打开私有草稿，敏感值不显示；重新打开必须重新校验。
 默认值：只维护被 Git 忽略的本机偏好，可恢复项目通用默认。
 数据源：只读扫描已纳管计划；未纳管节点可在生成流程中隐藏输入。
 校验配置：不改文件，执行可用 Mihomo 核心、严格 JSON 和 4 MiB 检查。
@@ -651,9 +721,22 @@ function Invoke-MxhClientAuthorityDesigner {
             throw
         }
         try{
-            if($choice -eq 1){Invoke-MxhBuildClientAuthority -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot -ClashAuthorityPath $ClashAuthorityPath -SingBoxAuthorityPath $SingBoxAuthorityPath -ClientOutputRoot $ClientOutputRoot -DryRun:$DryRun;return}
-            elseif($choice -eq 2){Invoke-MxhEditClientLayoutDefaults -ProjectRoot $ProjectRoot}
-            elseif($choice -eq 3){
+            if($choice -in @(1,2,3)){
+                $scheme=if($choice -eq 2){Open-MxhClientScheme $ProjectRoot}else{New-MxhClientScheme $ProjectRoot}
+                if($choice -eq 3){
+                    $paths=Read-VpsForm -Steps @(
+                        @{Key='clash';Read={param($v)Read-VpsText '现有 Clash YAML（只读）' -Default $ClashAuthorityPath -AllowBack -Validate{param($p)Test-VpsExistingInputPath $p -PathType Leaf}}}
+                        @{Key='sing';Read={param($v)Read-VpsText '现有 sing-box JSON（只读）' -Default $SingBoxAuthorityPath -AllowBack -Validate{param($p)Test-VpsExistingInputPath $p -PathType Leaf}}}
+                    )
+                    $scheme.Clash=ConvertTo-VpsInputPath $paths.clash;$scheme.SingBox=ConvertTo-VpsInputPath $paths.sing;$scheme.SourceMode='ExistingAuthority'
+                    $scheme.Sources[$scheme.Clash]=Get-MxhFileFingerprint $scheme.Clash;$scheme.Sources[$scheme.SingBox]=Get-MxhFileFingerprint $scheme.SingBox
+                }
+                Invoke-MxhClientWorkbench $ProjectRoot $InstanceRoot $scheme -DryRun:$DryRun
+            }
+            elseif($choice -eq 5){Invoke-MxhEditClientLayoutDefaults -ProjectRoot $ProjectRoot}
+            elseif($choice -eq 6){Invoke-MxhBuildClientAuthority -ProjectRoot $ProjectRoot -InstanceRoot $InstanceRoot -ClashAuthorityPath $ClashAuthorityPath -SingBoxAuthorityPath $SingBoxAuthorityPath -ClientOutputRoot $ClientOutputRoot -DryRun:$DryRun;return}
+            elseif($choice -eq 8){Invoke-MxhPublicationRecovery $ProjectRoot -DryRun:$DryRun}
+            elseif($choice -eq 7){
                 $plans=@(Get-MxhManagedClientPlans -InstanceRoot $InstanceRoot);Write-VpsUi "已扫描 $InstanceRoot，发现 $($plans.Count) 个可读取的受管计划。" Info
                 foreach($item in $plans){Write-Host ("  - {0} / {1} / {2}" -f $item.Plan.Provider,$item.Plan.Instance,$item.Plan.NodeName)}
                 Write-VpsUi '此外可在生成流程中手动添加未纳管 VLESS Reality、AnyTLS 或 Shadowsocks 节点；敏感输入不会显示。' Info

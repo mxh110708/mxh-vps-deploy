@@ -23,7 +23,7 @@ apt_get_retry() {
 }
 apt_get_retry update
 apt_get_retry install -y --no-install-recommends \
-  ca-certificates curl dnsutils iproute2 jq nftables openssl python3 sudo tar unzip
+  ca-certificates curl dnsutils iproute2 jq nftables openssl python3 sudo tar unzip util-linux
 
 if systemctl is-active --quiet chrony.service 2>/dev/null || \
    systemctl is-active --quiet chronyd.service 2>/dev/null; then

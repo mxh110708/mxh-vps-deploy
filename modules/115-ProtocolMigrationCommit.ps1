@@ -53,6 +53,7 @@
             [string]$Context.Plan.Ports.LandingShadowsocks
         } else { [string]$Context.Plan.Migration.TargetPrimaryPort }
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'protocol-migration-commit.sh' -Parameters @{
+            EXPECTED_BACKUP = [string]$Context.State.Migration.RemoteBackupDirectory
             SOURCE_ROLE = [string]$Context.Plan.Migration.SourceRole
             TARGET_ROLE = $targetRole
             TARGET_PORT = $effectiveTargetPort

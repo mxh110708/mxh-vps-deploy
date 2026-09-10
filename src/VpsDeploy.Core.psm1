@@ -260,16 +260,18 @@ function Read-VpsText {
         [switch]$AllowEmpty,
         [switch]$AllowBack,
         [switch]$ZeroIsValue,
+        [switch]$AllowClear,
         [string]$HelpText
     )
 
     $showPrompt = {
         Write-Host $Prompt
+        if ($AllowClear -and $AllowEmpty) { Write-Host '  输入 !empty 清空已有值；直接回车保留默认值。' -ForegroundColor DarkGray }
         if (-not [string]::IsNullOrWhiteSpace($Default)) {
             Write-Host "  默认值：$Default（直接按 Enter/回车采用）" -ForegroundColor DarkGray
         }
         if ($AllowBack) {
-            if ($ZeroIsValue) { Write-Host '  本字段的 0 是有效数值；返回请在上一层菜单操作。' -ForegroundColor DarkGray }
+            if ($ZeroIsValue) { Write-Host '  本字段的 0 是有效数值；输入 /back 返回上一级。' -ForegroundColor DarkGray }
             else { Write-Host '  输入 0 返回上一级。' -ForegroundColor DarkGray }
         }
     }
@@ -285,15 +287,19 @@ function Read-VpsText {
         }
         if (Test-VpsHelpCommand $value) {
             $navigationHelp = if ($AllowBack) {
-                if ($ZeroIsValue) { '；本字段的 0 是有效数值，返回请在上一层菜单操作' }
+                if ($ZeroIsValue) { '；本字段的 0 是有效数值，输入 /back 返回上一级' }
                 else { '；输入 0 返回上一级' }
             } else { '' }
             Show-VpsHelp $(if ($HelpText) { $HelpText } else { "请按提示输入此字段；clear/cls 清屏$navigationHelp。" })
             & $showPrompt
             continue
         }
-        if ($AllowBack -and -not $ZeroIsValue -and $value.Trim() -eq '0') {
+        if ($AllowBack -and ((-not $ZeroIsValue -and $value.Trim() -eq '0') -or ($ZeroIsValue -and $value.Trim() -eq '/back'))) {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
+        }
+        if ($AllowClear -and $AllowEmpty -and $value.Trim() -eq '!empty') {
+            if ($Validate -and -not (& $Validate '')) { Write-VpsUi $ValidationMessage Warning; continue }
+            return ''
         }
         if ([string]::IsNullOrWhiteSpace($value)) {
             $value = $Default
@@ -360,6 +366,9 @@ function Read-VpsMenu {
         [string]$HelpText
     )
 
+    if ($Options.Count -eq 0 -or $Default -lt 1 -or $Default -gt $Options.Count) {
+        throw [ArgumentException]::new('菜单必须有选项，且默认编号必须位于选项范围内。')
+    }
     $showMenu = {
         Write-Host ''
         Write-Host $Title -ForegroundColor Cyan
@@ -388,13 +397,35 @@ function Read-VpsMenu {
         if ($AllowBack -and $raw.Trim() -eq '0') {
             throw [InvalidOperationException]::new($script:VpsWizardBackMarker)
         }
-        if (-not $raw) { return $Default }
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $Default }
         $choice = 0
         if ([int]::TryParse($raw, [ref]$choice) -and $choice -ge 1 -and $choice -le $Options.Count) {
             return $choice
         }
         Write-VpsUi '请输入列表中的编号。' Warning
     }
+}
+
+function Read-VpsForm {
+    # Steps collect input only. Never put file writes, transactions or remote calls here.
+    param([Parameter(Mandatory)][object[]]$Steps, [hashtable]$Values = @{})
+    foreach ($step in $Steps) { if (-not $Values.ContainsKey($step.Key)) { $Values[$step.Key] = $null } }
+    $visited = [Collections.Generic.List[int]]::new()
+    $index = 0
+    while ($index -lt $Steps.Count) {
+        $step = $Steps[$index]
+        if ($step.Contains('When') -and -not (& $step.When $Values)) { $index++; continue }
+        try {
+            $Values[$step.Key] = & $step.Read $Values
+            $visited.Add($index)
+            $index++
+        } catch {
+            if (-not (Test-VpsWizardBackError $_) -or $visited.Count -eq 0) { throw }
+            $index = $visited[$visited.Count - 1]
+            $visited.RemoveAt($visited.Count - 1)
+        }
+    }
+    return $Values
 }
 
 function Test-VpsWizardBackError {
@@ -622,14 +653,25 @@ function Read-VpsNetworkTuningSettings {
     )
 
     Write-VpsUi '套餐标称带宽是必填参考值；脚本不会把网卡协商速率或一次测速当成套餐带宽。参考 RTT 可不提供。' Info
-    $bandwidth = [int](Read-VpsText '套餐标称带宽（Mbps，例如 100 或 1000）' -AllowBack:$AllowBack -Validate {
+    $step = 0
+    $bandwidth = $null
+    $referenceRtt = $null
+    while ($true) {
+    try {
+    if ($step -eq 0) {
+    $bandwidth = [int](Read-VpsText '套餐标称带宽（Mbps，例如 100 或 1000）' -Default ([string]$bandwidth) -AllowBack:$AllowBack -Validate {
             param($v)
             $n = 0
             [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 100000
         } -ValidationMessage '请输入 1–100000 之间的整数 Mbps。')
+    $step = 1
+    }
+    if ($step -eq 1) {
     if ($Role -eq 'MonitorOnly' -or
         -not (Read-VpsYesNo '是否有可信的代表性 RTT，用于计算额外的保守缓冲区？' $false -AllowBack:$AllowBack)) {
         return [ordered]@{ Mode = 'BaselineOnly'; BandwidthMbps = $bandwidth; ReferenceRttMs = $null }
+    }
+    $step = 2
     }
     $rttPrompt = if ($Role -in @('RealityEntry', 'AnyTlsEntry')) {
         '主要使用地到该入口 VPS 的典型 RTT（ms）'
@@ -637,7 +679,7 @@ function Read-VpsNetworkTuningSettings {
     else {
         '常用入口 VPS 到该落地机的典型 RTT（ms）'
     }
-    $referenceRtt = [int](Read-VpsText $rttPrompt -AllowBack:$AllowBack -Validate {
+    $referenceRtt = [int](Read-VpsText $rttPrompt -Default ([string]$referenceRtt) -AllowBack:$AllowBack -Validate {
             param($v)
             $n = 0
             [int]::TryParse($v, [ref]$n) -and $n -ge 1 -and $n -le 2000
@@ -646,6 +688,11 @@ function Read-VpsNetworkTuningSettings {
         Mode = 'AdaptiveConservative'
         BandwidthMbps = $bandwidth
         ReferenceRttMs = $referenceRtt
+    }
+    } catch {
+        if (-not (Test-VpsWizardBackError $_) -or $step -eq 0) { throw }
+        $step--
+    }
     }
 }
 
@@ -1114,7 +1161,7 @@ function New-VpsInteractivePlan {
         [pscustomobject]@{
             Id = 'ipv6'; ShouldRun = { $true }; Run = {
                 $old = [string]$wizard.IPv6
-                $value = Read-VpsText '服务器 IPv6（没有则直接回车）' -Default $old -AllowEmpty -AllowBack `
+                $value = Read-VpsText '服务器 IPv6（未填写时可直接回车）' -Default $old -AllowEmpty -AllowClear -AllowBack `
                     -Validate { param($v) -not $v -or (Test-VpsIpAddress $v IPv6) } `
                     -ValidationMessage '请输入有效 IPv6，或留空。'
                 $wizard.IPv6 = if ($value) { $value } else { $null }
@@ -1392,7 +1439,7 @@ function New-VpsInteractivePlan {
         },
         [pscustomobject]@{
             Id = 'secondary-bind-interface'; ShouldRun = { $wizard.Role -eq 'ShadowsocksLanding' -and [bool]$wizard.IPv6 -and [bool]$wizard.SecondaryIpv6Enabled }; Run = {
-                $value = Read-VpsText 'IPv6 出口接口（一般留空；多网卡时填写）' -Default ([string]$wizard.SecondaryBindInterface) -AllowEmpty -AllowBack `
+                $value = Read-VpsText 'IPv6 出口接口（一般留空；多网卡时填写）' -Default ([string]$wizard.SecondaryBindInterface) -AllowEmpty -AllowClear -AllowBack `
                     -Validate { param($v) -not $v -or $v -match '^[A-Za-z0-9_.:-]{1,32}$' }
                 $wizard.SecondaryBindInterface = if ($value) { $value } else { $null }
             }
@@ -1647,8 +1694,11 @@ function Set-VpsOpenSshPrivateKeyAccess {
     # 先以 OpenSSH 自身作为权威判断。若现有 ACL 已满足运行最低要求，
     # 不做任何修改；只有实际被拒绝时才收紧这一个私钥文件。
     $sshKeygen = Get-VpsCommandPath 'ssh-keygen.exe'
-    $probe = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $Path) -TimeoutSeconds 60
+    $probe = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-P', '', '-f', $Path) -TimeoutSeconds 60
     if ($probe.ExitCode -eq 0) { return }
+    if ($probe.StdErr -notmatch '(?i)UNPROTECTED PRIVATE KEY FILE|bad permissions|too open') {
+        throw 'OpenSSH 无法读取私钥，但不是权限过宽：请检查密钥格式或口令；未修改文件权限。'
+    }
 
     # Windows OpenSSH 会拒绝其他账户可读的用户私钥。icacls 仅对明确的
     # literal 文件移除继承并授予当前用户；不改所有者、不递归、不处理目录。
@@ -1660,7 +1710,16 @@ function Set-VpsOpenSshPrivateKeyAccess {
     if ($aclResult.ExitCode -ne 0) {
         throw "无法把 OpenSSH 私钥权限收紧到运行最低要求：$($aclResult.StdErr.Trim())"
     }
-    $verify = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-f', $Path) -TimeoutSeconds 60
+    # /inheritance:r does not remove explicit grants left by a file copy or restore.
+    $acl = Get-Acl -LiteralPath $Path
+    $trusted = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
+    foreach ($rule in @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) {
+        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -notin $trusted) {
+            $removed = Invoke-VpsProcess -FilePath $icacls -ArgumentList @($Path, '/remove:g', ('*' + $rule.IdentityReference.Value)) -TimeoutSeconds 60
+            if ($removed.ExitCode -ne 0) { throw '无法移除私钥的显式宽权限授权，请检查该文件的访问权限。' }
+        }
+    }
+    $verify = Invoke-VpsProcess -FilePath $sshKeygen -ArgumentList @('-y', '-P', '', '-f', $Path) -TimeoutSeconds 60
     if ($verify.ExitCode -ne 0) {
         throw '私钥 ACL 已尝试收紧，但 Windows OpenSSH 仍拒绝读取。'
     }
@@ -1677,8 +1736,21 @@ function Save-VpsJson {
     $parent = Split-Path -Parent $Path
     if ($parent) { [IO.Directory]::CreateDirectory($parent) | Out-Null }
     $json = $Value | ConvertTo-Json -Depth 30
-    [IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
-    if ($Private) { Protect-VpsPrivateFile -Path $Path }
+    # Same-directory replacement keeps the last complete plan intact if writing fails.
+    $temporaryPath = $Path + '.writing.' + [Guid]::NewGuid().ToString('N')
+    try {
+        [IO.File]::WriteAllText($temporaryPath, '', [Text.UTF8Encoding]::new($false))
+        if ($Private) { Protect-VpsPrivateFile -Path $temporaryPath }
+        elseif ($IsWindows -and [IO.File]::Exists($Path)) {
+            # Replacing an existing file must not silently broaden its permissions.
+            Set-Acl -LiteralPath $temporaryPath -AclObject (Get-Acl -LiteralPath $Path)
+        }
+        [IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($temporaryPath, $Path, $true)
+    }
+    finally {
+        if ([IO.File]::Exists($temporaryPath)) { [IO.File]::Delete($temporaryPath) }
+    }
 }
 
 function Read-VpsJsonHashtable {
@@ -2268,6 +2340,13 @@ function Invoke-VpsSshCommand {
     $result = $null
     for ($index = 0; $index -lt $keyCandidates.Count; $index++) {
         $identity = $keyCandidates[$index]
+        # Check only the canonical managed key, before any remote command is sent.
+        # Never replay a mutating remote command to repair local permissions.
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+            [IO.Path]::GetFullPath($identity) -eq [IO.Path]::GetFullPath((Get-VpsManagedSshKeyPath $Context)) -and
+            (Test-Path -LiteralPath $identity -PathType Leaf)) {
+            Set-VpsOpenSshPrivateKeyAccess -Path $identity
+        }
         $arguments = [Collections.Generic.List[string]]::new()
         foreach ($item in (Get-VpsSshArguments -Context $Context -Port $Port -User $User -IdentityFile $identity)) { $arguments.Add($item) }
         $arguments.Add($Command)
@@ -3857,9 +3936,9 @@ function Test-VpsProject {
 }
 
 function Show-VpsPlanSummary {
-    param([Parameter(Mandatory)] [Collections.IDictionary]$Plan)
+    param([Parameter(Mandatory)] [Collections.IDictionary]$Plan, [switch]$ExistingInstance)
     Write-Host ''
-    Write-Host '部署摘要' -ForegroundColor White
+    Write-Host $(if($ExistingInstance){'已有 VPS 的部署记录'}else{'部署摘要'}) -ForegroundColor White
     Write-Host "  实例：$($Plan.Provider) / $($Plan.Instance)"
     Write-Host "  节点：$($Plan.NodeName)"
     Write-Host "  主角色/执行角色：$($Plan.Role)"
@@ -3916,6 +3995,10 @@ function Show-VpsPlanSummary {
         $operation = if ($Plan.Migration.Contains('Operation')) { $Plan.Migration.Operation } else { 'LegacyConversion' }
         Write-Host "  协议生命周期操作：$operation / $($Plan.Migration.TargetRole)（$($Plan.Migration.Status)）"
         Write-Host "  自动回滚：$($Plan.Migration.RollbackTimeoutMinutes) 分钟"
+    }
+    if($ExistingInstance){
+        Write-VpsUi '以上为已有计划记录，不代表本次将执行的变更；具体操作会在后续确认。' Info
+        return
     }
     $showedPortWarning = $false
     $sshFirewallText = if (Test-VpsBootstrapSshPortRetained -Plan $Plan) {
@@ -4150,7 +4233,7 @@ function Invoke-VpsAbandonIncompletePlan {
     $privateArchiveSucceeded = $state.Contains('Modules') -and $state.Modules.Contains('private-archive') -and
         [string]$state.Modules['private-archive'].Status -eq 'Success'
     if ([string]$transaction.Status -eq 'Committed' -or $privateArchiveSucceeded) {
-        throw '该部署已经提交完成，不属于未完成计划；如需移除，请使用现有 VPS 运维中心的完整退役。'
+        throw '该部署已完成，不能作为未完成计划继续；如需移除服务，请进入“VPS 运维中心 → 停用或卸载服务”。'
     }
     if ([string]$transaction.Status -notin @('Armed', 'RolledBackAwaitingSnapshotCleanup', 'SnapshotDeletedAwaitingLocalCleanup')) {
         throw "统一部署事务状态为 $($transaction.Status)，不能确认可回滚基线。"
@@ -4386,24 +4469,24 @@ function Start-VpsDeploy {
         while ($true) {
             try {
                 $choice = Read-VpsMenu '请选择操作' @(
-                    '新部署',
+                    '部署新 VPS',
                     '继续未完成部署',
-                    '导入/纳管没有 deployment-plan 的现有 VPS',
-                    '现有 VPS 协议管理',
-                    '现有 VPS 运维中心',
-                    '现有 VPS 独立网络调优',
-                    'Clash/sing-box 客户端权威配置设计器',
-                    '项目离线自检',
+                    '接入已有 VPS（首次管理）',
+                    '管理代理协议',
+                    'VPS 运维中心',
+                    '调整网络参数',
+                    '客户端配置（Clash / sing-box）',
+                    '本地自检（不连接 VPS）',
                     '退出'
                 ) 1 -HelpText @'
-1 新部署：为新 VPS 建立归档、SSH、防火墙和所选协议，会修改服务器。
+1 部署新 VPS：配置 SSH、防火墙和所选代理协议，会修改服务器。
 2 继续未完成部署：读取已有 deployment-plan.json，从未完成模块继续。
-3 导入/纳管：保留现有服务，建立可维护计划和基线。
-4 协议管理：进入安装、共存、切换、停用、卸载和备份子菜单。
-5 运维中心：进入恢复、审计、轮换、SSH、防火墙、升级、客户端、Komari 和退役子菜单。
-6 独立网络调优：可单独为已有 VPS 应用保守参数，标称带宽必填，RTT 可选。
-7 客户端配置设计器：使用通用模板、受管片段、手动节点或可选现有配置生成并验证配置。
-8 项目离线自检：不连接 VPS，仅检查本地代码、模板和依赖。
+3 接入已有 VPS：用于还没有本工具部署计划的服务器。保留现有服务，建立管理记录；已有计划请选择 4 或 5。
+4 管理代理协议：安装、启用、停用或卸载 Reality、AnyTLS、Shadowsocks。
+5 VPS 运维中心：检查服务、从备份恢复、更换密钥、调整 SSH/防火墙、更新或卸载服务。
+6 调整网络参数：按套餐带宽和可选的往返延迟 RTT 调整网络参数，不改变代理协议和防火墙。
+7 客户端配置：选择节点，编辑方案，生成并校验 Clash/sing-box 配置；发布前另行确认。
+8 本地自检：不连接 VPS，检查项目脚本、模板及离线测试。
 9 退出：结束脚本，不修改任何内容。
 '@
             }
@@ -4459,6 +4542,7 @@ function Start-VpsDeploy {
 . (Join-Path $PSScriptRoot 'VpsDeploy.Import.ps1')
 . (Join-Path $PSScriptRoot 'VpsDeploy.Operations.ps1')
 . (Join-Path $PSScriptRoot 'VpsDeploy.ClientConfig.ps1')
+. (Join-Path $PSScriptRoot 'VpsDeploy.Workbench.ps1')
 
 Export-ModuleMember -Function @(
     'Start-VpsDeploy', 'Write-VpsUi', 'Write-VpsLog', 'Read-VpsYesNo', 'Read-VpsText',

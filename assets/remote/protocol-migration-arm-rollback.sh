@@ -10,9 +10,23 @@ case "$VPS_PARAM_TARGET_ROLE" in RealityEntry|AnyTlsEntry|ShadowsocksLanding|Mon
 [[ "$VPS_PARAM_TIMEOUT_MINUTES" =~ ^[0-9]+$ ]]
 (( VPS_PARAM_TIMEOUT_MINUTES >= 5 && VPS_PARAM_TIMEOUT_MINUTES <= 60 ))
 
+command -v flock >/dev/null || { echo 'Missing flock (util-linux); install it before starting maintenance.' >&2; exit 1; }
+install -d -m 0700 /var/lib/mxh-vps-deploy
+exec 9>/var/lib/mxh-vps-deploy/transaction.lock
+flock -n 9 || { echo 'Another transaction command is running.' >&2; exit 1; }
+owner=/var/lib/mxh-vps-deploy/transaction.owner
+[[ ! -e "$owner" ]] || { echo 'An unfinished transaction exists; inspect and recover it before starting another.' >&2; exit 1; }
+if systemctl is-active --quiet mxh-ssh-maintenance-rollback.timer; then exit 1; fi
+if systemctl is-active --quiet mxh-ssh-maintenance-rollback.service; then exit 1; fi
+if systemctl is-active --quiet mxh-protocol-migration-rollback.timer || systemctl is-active --quiet mxh-protocol-migration-rollback.service; then
+  echo 'An existing rollback unit is active; refusing to replace it.' >&2; exit 1
+fi
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 backup_dir="/root/vps-deploy-backups/${stamp}/protocol-lifecycle"
+[[ ! -e "$backup_dir" ]] || { echo 'Snapshot timestamp collision; retry later.' >&2; exit 1; }
 install -d -m 0700 "$backup_dir"
+printf '%s\n' "$backup_dir" > "$owner"
+chmod 0600 "$owner"
 if [[ -f /etc/nftables.conf ]]; then cp -a /etc/nftables.conf "$backup_dir/nftables.conf"; fi
 if [[ -f /etc/sysctl.d/99-mxh-vps-deploy.conf ]]; then
   cp -a /etc/sysctl.d/99-mxh-vps-deploy.conf "$backup_dir/99-mxh-vps-deploy.conf"
@@ -80,6 +94,12 @@ cat > /usr/local/libexec/mxh-protocol-migration-rollback <<'ROLLBACK'
 #!/usr/bin/env bash
 set -euo pipefail
 backup_dir="$1"
+exec 9>/var/lib/mxh-vps-deploy/transaction.lock
+flock -w 30 9 || exit 1
+if [[ "${2:-}" == '--transaction' ]]; then
+  [[ ! -f "$backup_dir/transaction-committed" ]] || exit 0
+  [[ "$(cat /var/lib/mxh-vps-deploy/transaction.owner)" == "$backup_dir" ]]
+fi
 
 cleanup_role() {
   case "$1" in
@@ -165,6 +185,9 @@ restore_aux KomariAgent komari-agent.service
 restore_aux KomariController komari.service
 restore_aux Cloudflared cloudflared.service
 date -u +%FT%TZ > "$backup_dir/rollback-executed"
+if [[ "${2:-}" == '--transaction' ]]; then
+  rm -f /var/lib/mxh-vps-deploy/transaction.owner
+fi
 ROLLBACK
 chmod 0750 /usr/local/libexec/mxh-protocol-migration-rollback
 
@@ -174,7 +197,7 @@ Description=Rollback an unconfirmed MXH protocol lifecycle change
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/libexec/mxh-protocol-migration-rollback $backup_dir
+ExecStart=/usr/local/libexec/mxh-protocol-migration-rollback $backup_dir --transaction
 EOF
 cat > /etc/systemd/system/mxh-protocol-migration-rollback.timer <<EOF
 [Unit]
@@ -193,5 +216,6 @@ chmod 0644 /etc/systemd/system/mxh-protocol-migration-rollback.service \
 systemctl daemon-reload
 systemctl enable --now mxh-protocol-migration-rollback.timer >/dev/null
 systemctl is-active --quiet mxh-protocol-migration-rollback.timer
+date -u +%FT%TZ > "$backup_dir/transaction-armed"
 printf 'VPSDEPLOY_BACKUP_DIR_B64=%s\n' "$(printf '%s' "$backup_dir" | base64 | tr -d '\n')"
 printf '%s\n' 'VPSDEPLOY_MIGRATION_ROLLBACK_ARMED'

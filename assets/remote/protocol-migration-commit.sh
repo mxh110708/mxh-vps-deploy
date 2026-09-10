@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+: "${VPS_PARAM_EXPECTED_BACKUP:?}"
+exec 9>/var/lib/mxh-vps-deploy/transaction.lock
+flock -n 9 || exit 1
+if [[ -f "$VPS_PARAM_EXPECTED_BACKUP/transaction-committed" ]]; then printf '%s\n' 'VPSDEPLOY_MIGRATION_COMMITTED'; exit 0; fi
+[[ "$(cat /var/lib/mxh-vps-deploy/transaction.owner)" == "$VPS_PARAM_EXPECTED_BACKUP" ]]
+[[ ! -f "$VPS_PARAM_EXPECTED_BACKUP/rollback-executed" ]]
+if systemctl is-active --quiet mxh-protocol-migration-rollback.service; then exit 1; fi
 
 : "${VPS_PARAM_SOURCE_ROLE:?}"
 : "${VPS_PARAM_TARGET_ROLE:?}"
@@ -101,4 +108,6 @@ esac
 systemctl stop mxh-protocol-migration-rollback.timer
 systemctl disable mxh-protocol-migration-rollback.timer >/dev/null
 if systemctl is-active --quiet mxh-protocol-migration-rollback.timer; then exit 1; fi
+date -u +%FT%TZ > "$VPS_PARAM_EXPECTED_BACKUP/transaction-committed"
+rm -f /var/lib/mxh-vps-deploy/transaction.owner
 printf '%s\n' 'VPSDEPLOY_MIGRATION_COMMITTED'

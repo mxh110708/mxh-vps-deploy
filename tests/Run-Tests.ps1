@@ -1434,7 +1434,8 @@ $targetClash=Join-Path $publishRoot 'authority.yaml';$targetSing=Join-Path $publ
 $backupRoot=Join-Path $publishRoot 'backups\fixture'
 & $coreModule {param($cc,$cs,$tc,$ts,$br)Publish-MxhAuthorityPair -CandidateClash $cc -CandidateSingBox $cs -TargetClash $tc -TargetSingBox $ts -BackupRoot $br} (Join-Path $genericOutput 'Clash_General.candidate.yaml') (Join-Path $genericOutput 'sing-box-general.candidate.json') $targetClash $targetSing $backupRoot|Out-Null
 Assert-True ((Get-Content -Raw $targetClash)-match 'Portable-Entry' -and (Get-Content -Raw $targetSing)-match 'Portable-Entry') 'validated authority pair publishes to both selected targets'
-Assert-True ((Get-Content -Raw (Join-Path $backupRoot 'authority.yaml'))-eq'old-clash' -and (Get-Content -Raw (Join-Path $backupRoot 'authority.json'))-eq'old-sing') 'authority overwrite preserves timestamp-scoped rollback copies'
+$publishJournal=Get-Content -Raw (Join-Path $backupRoot 'publish.private.json') | ConvertFrom-Json -AsHashtable
+Assert-True ((Get-Content -Raw $publishJournal.ClashBackup)-eq'old-clash' -and (Get-Content -Raw $publishJournal.SingBackup)-eq'old-sing') 'authority overwrite preserves uniquely named rollback copies recorded in journal'
 $cycleSpec = Get-Content -Raw -LiteralPath $designerSpec | ConvertFrom-Json -AsHashtable
 $cycleSpec.groups = @([ordered]@{name='Cycle A';members=@('Cycle B')},[ordered]@{name='Cycle B';members=@('Cycle A')})
 $cyclePath = Join-Path $candidateRoot 'cycle-spec.private.json'; Save-VpsJson -Value $cycleSpec -Path $cyclePath -Private
@@ -1447,7 +1448,7 @@ Assert-True ($cycle.ExitCode -ne 0 -and $cycle.StdErr -match 'cycle') 'client au
 $designerInstanceRoot = Join-Path $candidateRoot 'empty-instances'; [IO.Directory]::CreateDirectory($designerInstanceRoot)|Out-Null
 $designerDryOutput = Join-Path $candidateRoot 'dry-output-root'
 $designerDryInput = (@(
-    '1','n','US-West Entry','2',$authorityYaml,$authorityJson,'n','1','1','Existing-IPv4','US-West Entry,DIRECT','n','2',$designerDryOutput,$designerDryOutput,'Clash_General.yaml','sing-box-general.json'
+    '6','n','US-West Entry','2',$authorityYaml,$authorityJson,'n','1','1','Existing-IPv4','US-West Entry,DIRECT','n','2',$designerDryOutput,$designerDryOutput,'Clash_General.yaml','sing-box-general.json'
 ) -join [Environment]::NewLine) + [Environment]::NewLine
 $designerDry = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
     '-NoProfile','-File',(Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),'-Mode','ClientConfig','-DryRun','-InstanceRoot',$designerInstanceRoot
@@ -1550,7 +1551,7 @@ $mainMenuReservedResult = Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @(
 ) -InputText ((@('0', 'b', '9') -join [Environment]::NewLine) + [Environment]::NewLine) -TimeoutSeconds 60
 Assert-True ($mainMenuReservedResult.ExitCode -eq 0 -and $mainMenuReservedResult.StdOut -match '(?m)^b\r?$' -and $mainMenuReservedResult.StdOut -match '(?m)^9\r?$') 'main menu rejects 0 and b and exits only with 9'
 $startVpsDeploySource = & $coreModule { (Get-Command Start-VpsDeploy).ScriptBlock.ToString() }
-Assert-True ($startVpsDeploySource -match "'项目离线自检',\s*'退出'") 'main menu exposes one numbered exit after offline validation'
+Assert-True ($startVpsDeploySource -match "'本地自检（不连接 VPS）',\s*'退出'") 'main menu exposes one numbered exit after offline validation'
 Assert-True (([regex]::Matches($startVpsDeploySource, "'退出'")).Count -eq 1) 'main menu has no duplicate numbered exit option'
 $mainHelpResult=Invoke-VpsProcess -FilePath $pwshPath -ArgumentList @('-NoProfile','-File',(Join-Path $ProjectRoot 'Start-VPSDeploy.ps1'),'-Mode','Interactive','-DryRun') -InputText ((@('help','9')-join[Environment]::NewLine)+[Environment]::NewLine) -TimeoutSeconds 60
 Assert-True ($mainHelpResult.ExitCode-eq 0 -and ([regex]::Matches($mainHelpResult.StdOut,'help / h')).Count-ge 2 -and $mainHelpResult.StdOut-match '(?m)^help\r?$') 'main menu help command explains current choices and returns to the menu'
@@ -1653,3 +1654,11 @@ Write-Host '== Secret scan ==' -ForegroundColor Cyan
 Assert-True $true 'secret scan'
 
 Write-Host "All tests passed: $passed assertions" -ForegroundColor Green
+& (Join-Path $ProjectRoot 'tests/Test-Interaction.ps1') -ProjectRoot $ProjectRoot
+& (Join-Path $ProjectRoot 'tests/Test-Workbench.ps1') -ProjectRoot $ProjectRoot
+& (Join-Path $ProjectRoot 'tests/Test-SshKeyAccess.ps1') -ProjectRoot $ProjectRoot
+& (Join-Path $ProjectRoot 'tests/Test-MenuCopy.ps1') -ProjectRoot $ProjectRoot
+if($bash -and $pythonCommandForClient){
+    & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_remote_transactions.py') --bash $bash
+    if($LASTEXITCODE -ne 0){throw 'Remote transaction guard tests failed.'}
+}
