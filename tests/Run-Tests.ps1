@@ -152,6 +152,7 @@ Assert-True ($coreSource -match 'Invoke-WebRequest[^\r\n]+-ProgressAction Silent
 Assert-True ($coreSource -match 'function Invoke-VpsScpDownload[\s\S]*?\[string\]\$ProgressActivity[\s\S]*?-ProgressActivity \$ProgressActivity') 'SCP downloads can reuse the compact elapsed timer'
 $privateArchiveSource = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'modules\120-PrivateArchive.ps1')
 Assert-True ($privateArchiveSource -match '下载配置并生成最终私有归档可能需要数分钟' -and $privateArchiveSource -match '下载最终私有归档配置' -and $privateArchiveSource -match '服务器配置下载完成（用时') 'final private archive downloads show timing guidance and per-download elapsed status'
+Assert-True ($privateArchiveSource -match 'Secondary IPv6 User Key: \$secondaryUserKey' -and $privateArchiveSource -match "else \{ '<disabled>' \}" -and $privateArchiveSource -notmatch 'Secondary IPv6 User Key: \$\(\$ss\.SecondaryUserKey\)') 'IPv4-only Shadowsocks archive does not access a missing IPv6 user key'
 Assert-True ($shadowsocksSelfTest -match 'VPSDEPLOY_UDP_B64') 'Shadowsocks self-test reports functional UDP result'
 Assert-True ($shadowsocksSelfTest -match '"type": "direct"') 'Shadowsocks self-test creates a UDP tunnel inbound'
 Assert-True ($shadowsocksSelfTest -match 'override_address') 'Shadowsocks UDP self-test uses an explicit DNS destination'
@@ -499,6 +500,19 @@ Assert-True (@($serverConfigRoundTrip.inbounds).Count -eq 4) 'Reality server cre
 Assert-True ('0.0.0.0' -in @($serverConfigRoundTrip.inbounds.listen) -and '2001:db8::10' -in @($serverConfigRoundTrip.inbounds.listen)) 'Reality listener addresses include explicit IPv4 wildcard and configured IPv6 address'
 Assert-True (@($serverConfigRoundTrip.routing.rules).Count -eq 1) 'Xray routing rules remain a JSON array with one rule'
 Assert-True ($serverConfigRoundTrip.routing.rules[0].outboundTag -eq 'block') 'Xray IPv6 egress block rule preserved'
+Assert-True ('::/0' -in @($serverConfigRoundTrip.routing.rules[0].ip)) 'Xray IPv6 destination block covers all IPv6 addresses'
+$directOutbound = @($serverConfigRoundTrip.outbounds | Where-Object { $_.tag -eq 'direct' })[0]
+Assert-True ($directOutbound.settings.domainStrategy -eq 'ForceIPv4') 'Reality ForceIpv4Egress forces IPv4 on the website outbound'
+& $coreModule { param($Plan) Assert-MxhExpectedEgressFamily -Plan $Plan -Protocol Reality -Egress '192.0.2.20' -Label 'fixture' } $fixtureContext.Plan
+Assert-True $true 'Reality IPv4 egress acceptance passes when enforced'
+$ipv6EgressRejected = $false
+try {
+    & $coreModule { param($Plan) Assert-MxhExpectedEgressFamily -Plan $Plan -Protocol Reality -Egress '2001:db8::20' -Label 'fixture' } $fixtureContext.Plan
+} catch { $ipv6EgressRejected = $true }
+Assert-True $ipv6EgressRejected 'Reality validation rejects IPv6 egress when ForceIpv4Egress is enabled'
+$optOutPlan = [ordered]@{ Reality = [ordered]@{ ForceIpv4Egress = $false } }
+& $coreModule { param($Plan) Assert-MxhExpectedEgressFamily -Plan $Plan -Protocol Reality -Egress '2001:db8::20' -Label 'fixture' } $optOutPlan
+Assert-True $true 'explicit IPv6 egress opt-out remains supported'
 $localRealityPlan = [ordered]@{
     Reality = [ordered]@{
         Target = 'portal.example.invalid'

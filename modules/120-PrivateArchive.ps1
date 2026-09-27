@@ -118,8 +118,12 @@ AnyTLS Client Egress Test: $anyTlsEgressJson
         $shadowsocksBlock = if ($shadowsocksInstalled) {
             $ss = $Context.Secrets.Shadowsocks
             $primaryPassword = ([string]$ss.ServerKey) + ':' + ([string]$ss.PrimaryUserKey)
+            $secondaryUserKey = if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
+                [string]$ss.SecondaryUserKey
+            }
+            else { '<disabled>' }
             $secondaryPassword = if ([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled) {
-                ([string]$ss.ServerKey) + ':' + ([string]$ss.SecondaryUserKey)
+                ([string]$ss.ServerKey) + ':' + $secondaryUserKey
             }
             else { '<disabled>' }
 @"
@@ -130,7 +134,7 @@ Server Key: $($ss.ServerKey)
 Primary IPv4 User Key: $($ss.PrimaryUserKey)
 Primary Client Password: $primaryPassword
 Secondary IPv6 Enabled: $($Context.Plan.Shadowsocks.SecondaryIpv6Enabled)
-Secondary IPv6 User Key: $($ss.SecondaryUserKey)
+Secondary IPv6 User Key: $secondaryUserKey
 Secondary Client Password: $secondaryPassword
 Secondary IPv6 Address: $($Context.Plan.Shadowsocks.SecondaryIpv6Address)
 Secondary Bind Interface: $($Context.Plan.Shadowsocks.SecondaryBindInterface)

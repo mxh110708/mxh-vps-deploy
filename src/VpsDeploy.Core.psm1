@@ -3203,6 +3203,27 @@ function Invoke-MxhProxyAcceptanceRequests {
     return [ordered]@{ Egress = $egress; HttpsEndpoint = $httpsEndpoint; IpEndpoint = $ipEndpoint; UdpDnsEndpoint = $udpEndpoint }
 }
 
+function Assert-MxhExpectedEgressFamily {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [Collections.IDictionary]$Plan,
+        [Parameter(Mandatory)] [ValidateSet('Reality', 'AnyTLS')] [string]$Protocol,
+        [Parameter(Mandatory)] [string]$Egress,
+        [Parameter(Mandatory)] [string]$Label
+    )
+    $forceIpv4 = if ($Protocol -eq 'Reality') {
+        [bool]$Plan.Reality.ForceIpv4Egress
+    } else {
+        [bool]$Plan.AnyTls.ForceIpv4Egress
+    }
+    if (-not $forceIpv4) { return }
+    $address = $null
+    if (-not [Net.IPAddress]::TryParse($Egress, [ref]$address) -or
+        $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+        throw "$Protocol 计划要求网站强制 IPv4 出口，但 $Label 实测出口为 $Egress。"
+    }
+}
+
 function Invoke-MxhMihomoEgressTest {
     [CmdletBinding()]
     param(
@@ -3639,6 +3660,7 @@ function Invoke-MxhRealClientValidation {
                 Invoke-MxhSingBoxEgressTest -Context $Context -CorePath $coreState.Path -ProfilePath $target.SingBoxProfile `
                     -MixedPort ([int]$target.MixedPort) -Label $label -Detailed
             }
+            Assert-MxhExpectedEgressFamily -Plan $Context.Plan -Protocol $Protocol -Egress ([string]$acceptance.Egress) -Label $label
             $results.Add([ordered]@{
                     Core = $coreName
                     Entry = $entryName
@@ -3658,6 +3680,8 @@ function Invoke-MxhRealClientValidation {
         $entryName = [string]$metadata.Entry
         $external = Invoke-MxhExternalValidationTarget -Context $Context -ProbeContext $probeContext -Target $target -Protocol $Protocol
         foreach ($item in @($external.results)) {
+            Assert-MxhExpectedEgressFamily -Plan $Context.Plan -Protocol $Protocol -Egress ([string]$item.egress) `
+                -Label "$Protocol/$($metadata.Entry)/$($metadata.AddressFamily)/$([string]$item.core)"
             $results.Add([ordered]@{
                     Core = [string]$item.core
                     Entry = $entryName
@@ -3965,6 +3989,11 @@ function Show-VpsPlanSummary {
         $target = Get-MxhRealityTargetSettings -Plan $Plan
         $portsText = if ($Plan.Ports.XrayBackup) { "443 + $($Plan.Ports.XrayBackup)" } else { '443（无救援入口）' }
         Write-Host "  Xray：$portsText，target=$($target.TargetAddress)，SNI=$($target.ServerName)"
+        if ($Plan.Reality.Contains('ForceIpv4Egress') -and [bool]$Plan.Reality.ForceIpv4Egress) {
+            Write-Host '  Xray 网站出口：强制 IPv4（IPv6 入口仍保留）'
+        } else {
+            Write-VpsUi 'Xray 网站出口允许 IPv6；IPv4 入口不会自动限制网站出口。' Warning
+        }
         if ($Plan.Reality.Contains('XrayVersion')) {
             $channel = if ($Plan.Reality.Contains('XrayVersionChannel')) { [string]$Plan.Reality.XrayVersionChannel } else { 'ImportedOrLegacy' }
             Write-Host "  Xray 版本：$($Plan.Reality.XrayVersion)（$channel）"
@@ -3972,6 +4001,11 @@ function Show-VpsPlanSummary {
     }
     if ($anyTlsInstalled) {
         Write-Host "  AnyTLS：443，SNI=$($Plan.AnyTls.ServerName)，ECH public name=$($Plan.AnyTls.EchPublicName)"
+        if ($Plan.AnyTls.Contains('ForceIpv4Egress') -and [bool]$Plan.AnyTls.ForceIpv4Egress) {
+            Write-Host '  AnyTLS 网站出口：强制 IPv4（IPv6 入口仍保留）'
+        } else {
+            Write-VpsUi 'AnyTLS 网站出口允许 IPv6；IPv4 入口不会自动限制网站出口。' Warning
+        }
         $paddingMode = if ($Plan.AnyTls.Contains('PaddingSchemeMode') -and $Plan.AnyTls.PaddingSchemeMode) {
             [string]$Plan.AnyTls.PaddingSchemeMode
         } else { 'OfficialDefault' }
