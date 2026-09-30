@@ -42,6 +42,7 @@ jobs:
             bash -n "$file"
           done
           python3 tests/test_remote_transactions.py --bash /bin/bash
+          python3 tests/test_komari_lifecycle.py --bash /bin/bash
 
   powershell:
     runs-on: windows-latest
@@ -66,6 +67,7 @@ jobs:
           $singBox = Get-VpsBundledClientCore -ProjectRoot $PWD -Core sing-box
           if (-not (Test-Path $mihomo)) { throw 'bundled Mihomo validation failed' }
           ./tests/Test-SingBoxConfig.ps1 -ProjectRoot $PWD -SingBoxPath $singBox
+          ./tests/Test-ClientCompatibility.ps1 -ProjectRoot $PWD
 
   shell:
     runs-on: ubuntu-latest

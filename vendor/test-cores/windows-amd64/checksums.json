@@ -10,10 +10,10 @@
     },
     {
       "core": "sing-box",
-      "version": "1.14.0",
-      "file": "sing-box-1.14.0-windows-amd64.zip",
-      "sha256": "3ffb56267da14e287be48bd10cf7e6505260125bad940b75101fbb4d5d58e5d6",
-      "source": "https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-windows-amd64.zip"
+      "version": "1.14.2",
+      "file": "sing-box-1.14.2-windows-amd64.zip",
+      "sha256": "c2d8bfff918755808781dfdeeb8581b6c91eb3a243d9a7b55483cfc0c0684d32",
+      "source": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-amd64.zip"
     }
   ],
   "data_files": [
@@ -32,6 +32,41 @@
       "file": "mihomo-geodata/GeoIP.dat",
       "sha256": "0d5d2ba0c5a5c58027fd1347a6afd57c9470799b6bb3cbc274fd4657ed8de382",
       "source": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat"
+    },
+    {
+      "consumer": "sing-box",
+      "tag": "geosite-category-ads-all",
+      "file": "mxh-route-public-rules/geosite-category-ads-all.srs",
+      "sha256": "8757ac0121b6f4af473a00e9d764650602d21b8a04ba95b1f11f7a9b46db5098",
+      "source": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ads-all.srs"
+    },
+    {
+      "consumer": "sing-box",
+      "tag": "geosite-private",
+      "file": "mxh-route-public-rules/geosite-private.srs",
+      "sha256": "3c2a2cff9a128a1f4fc30d4ce6f0928b613f4361287da8c20ccd1df0b0ff7e81",
+      "source": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/private.srs"
+    },
+    {
+      "consumer": "sing-box",
+      "tag": "geosite-cn",
+      "file": "mxh-route-public-rules/geosite-cn.srs",
+      "sha256": "9bb2b605018fd4d1c9821f984e18ce193c97cd20f302779f5c131ca01ad37852",
+      "source": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs"
+    },
+    {
+      "consumer": "sing-box",
+      "tag": "geoip-cn",
+      "file": "mxh-route-public-rules/geoip-cn.srs",
+      "sha256": "13dda230c519044395cb66986fa01ca5f57a87f8b19445b4ccb5173544911ef4",
+      "source": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs"
+    },
+    {
+      "consumer": "sing-box",
+      "tag": "geosite-geolocation-not-cn",
+      "file": "mxh-route-public-rules/geosite-geolocation-not-cn.srs",
+      "sha256": "c846ef8245a0560a6891f4845b6bd84f0ba8df879ef64eecb2e7cf6cc30ac2ae",
+      "source": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/geolocation-!cn.srs"
     }
   ]
 }

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ruamel.yaml import YAML
+from client_compatibility import serialize_profile
 
 
 ROLE_FILES = {
@@ -236,6 +237,29 @@ def validate_rendered_references(clash: dict[str, Any], sing: dict[str, Any]) ->
             for child in value:
                 check_route_rules(child)
     check_route_rules(route.get("rules") or [])
+    for rule in route.get("rule_set") or []:
+        detour = rule.get("download_detour")
+        if detour and str(detour) not in sing_tags:
+            fail("rendered sing-box rule set has an unknown download detour")
+    dns = sing.get("dns") or {}
+    dns_tags = {str(server.get("tag")) for server in dns.get("servers") or []}
+    for server in dns.get("servers") or []:
+        detour = server.get("detour")
+        if detour and str(detour) not in sing_tags:
+            fail("rendered sing-box DNS server has an unknown detour")
+    def check_dns_rules(value: Any) -> None:
+        if isinstance(value, dict):
+            server = value.get("server")
+            if server and str(server) not in dns_tags:
+                fail("rendered sing-box DNS rule has an unknown server")
+            for child in value.values():
+                check_dns_rules(child)
+        elif isinstance(value, list):
+            for child in value:
+                check_dns_rules(child)
+    check_dns_rules(dns.get("rules") or [])
+    if dns.get("final") and str(dns["final"]) not in dns_tags:
+        fail("rendered sing-box DNS has an unknown final server")
 
 
 def main() -> None:
@@ -268,6 +292,7 @@ def main() -> None:
     apply_clash_groups(clash, groups, order, remove_groups)
     apply_sing_groups(sing, groups, order, remove_groups)
     validate_rendered_references(clash, sing)
+    sing_text = serialize_profile(sing)
 
     args.output.mkdir(parents=True, exist_ok=True)
     clash_path = args.output / "Clash_General.candidate.yaml"
@@ -276,7 +301,7 @@ def main() -> None:
     sing_path = args.output / "sing-box-general.candidate.json"
     # The desktop IPC path has a practical 4 MiB ceiling.  Keep the private
     # spec/manifest readable, but serialize the runtime profile compactly.
-    sing_path.write_text(json.dumps(sing, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    sing_path.write_text(sing_text, encoding="utf-8")
     manifest = {
         "schema_version": 1,
         "generated_nodes": [str(node["name"]) for node in nodes],

@@ -5,6 +5,28 @@ mode: rule
 log-level: info
 ipv6: true
 find-process-mode: strict
+geodata-mode: true
+geodata-loader: standard
+geox-url:
+  geosite: https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat
+  geoip: https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat
+sniffer:
+  enable: true
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+      override-destination: true
+    TLS:
+      ports: [443, 8443]
+    QUIC:
+      ports: [443, 8443]
+tun:
+  enable: false
+  stack: system
+  auto-route: true
+  strict-route: true
+  auto-detect-interface: true
+  dns-hijack: ["any:53", "tcp://any:53"]
 profile:
   store-selected: true
   store-fake-ip: true
@@ -13,6 +35,10 @@ dns:
   ipv6: false
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - localhost
+    - +.lan
+    - +.local
   respect-rules: true
   default-nameserver:
     - 223.5.5.5
@@ -23,6 +49,13 @@ dns:
   proxy-server-nameserver:
     - 223.5.5.5
     - 119.29.29.29
+  direct-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver-policy:
+    "geosite:private,cn":
+      - 223.5.5.5
+      - 119.29.29.29
 proxies: []
 proxy-groups:
   - name: US-West Entry
@@ -93,11 +126,25 @@ rules:
   - DST-PORT,3306,Legacy Ports
   - AND,((NETWORK,UDP),(DST-PORT,443)),QUIC Guard
   - AND,((NETWORK,UDP),(DST-PORT,3478-3481)),WebRTC Guard
+  - GEOSITE,category-ads-all,Ad Block
+  - GEOSITE,private,Direct Route
+  - IP-CIDR,127.0.0.0/8,Direct Route,no-resolve
+  - IP-CIDR,10.0.0.0/8,Direct Route,no-resolve
+  - IP-CIDR,172.16.0.0/12,Direct Route,no-resolve
+  - IP-CIDR,192.168.0.0/16,Direct Route,no-resolve
+  - IP-CIDR,169.254.0.0/16,Direct Route,no-resolve
+  - IP-CIDR6,::1/128,Direct Route,no-resolve
+  - IP-CIDR6,fc00::/7,Direct Route,no-resolve
+  - IP-CIDR6,fe80::/10,Direct Route,no-resolve
   - DOMAIN-SUFFIX,openai.com,AI Services
   - DOMAIN-SUFFIX,chatgpt.com,AI Services
+  - DOMAIN-SUFFIX,oaistatic.com,AI Services
+  - DOMAIN-SUFFIX,oaiusercontent.com,AI Services
   - DOMAIN-SUFFIX,anthropic.com,AI Services
   - DOMAIN-SUFFIX,claude.ai,AI Services
   - DOMAIN-SUFFIX,perplexity.ai,AI Services
+  - DOMAIN-SUFFIX,huggingface.co,AI Services
+  - DOMAIN-SUFFIX,hf.co,AI Services
   - DOMAIN-SUFFIX,github.com,Developer Tools
   - DOMAIN-SUFFIX,githubusercontent.com,Developer Tools
   - DOMAIN-SUFFIX,npmjs.org,Developer Tools
@@ -108,6 +155,12 @@ rules:
   - DOMAIN-SUFFIX,ieee.org,Academic Research
   - DOMAIN-SUFFIX,springer.com,Academic Research
   - DOMAIN-SUFFIX,nature.com,Academic Research
+  - DOMAIN-SUFFIX,bing.com,Microsoft Global
+  - DOMAIN-SUFFIX,bing.net,Microsoft Global
+  - DOMAIN-SUFFIX,bingapis.com,Microsoft Global
+  - DOMAIN-SUFFIX,copilot.microsoft.com,Microsoft Global
+  - DOMAIN-SUFFIX,azure.com,Microsoft Global
+  - DOMAIN-SUFFIX,azureedge.net,Microsoft Global
   - DOMAIN-SUFFIX,microsoft.com,Microsoft Services
   - DOMAIN-SUFFIX,office.com,Microsoft Services
   - DOMAIN-SUFFIX,live.com,Microsoft Services
@@ -123,6 +176,13 @@ rules:
   - DOMAIN-SUFFIX,twitter.com,Social & Messaging
   - DOMAIN-SUFFIX,x.com,Social & Messaging
   - DOMAIN-SUFFIX,youtube.com,Streaming Media
+  - DOMAIN-SUFFIX,googlevideo.com,Streaming Media
+  - DOMAIN-SUFFIX,ytimg.com,Streaming Media
   - DOMAIN-SUFFIX,netflix.com,Streaming Media
+  - DOMAIN-SUFFIX,nflxvideo.net,Streaming Media
   - DOMAIN-SUFFIX,spotify.com,Streaming Media
+  - GEOSITE,cn,Direct Route
+  - GEOIP,CN,Direct Route,no-resolve
+  - NETWORK,udp,UDP Guard
+  - GEOSITE,geolocation-!cn,Catch-All
   - MATCH,Catch-All

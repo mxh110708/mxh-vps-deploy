@@ -50,7 +50,6 @@ config = {
     "max_retries": 5,
     "reconnect_interval": 10,
     "info_report_interval": 15,
-    "protocol_version": 2,
     "disable_compression": False,
     "prefer_ip_version": "4",
 }
@@ -103,7 +102,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now komari-agent.service
+systemctl enable komari-agent.service
+systemctl restart komari-agent.service
 systemctl is-active --quiet komari-agent.service
 if grep -q komari-agent <<< "$(ss -H -lntup 2>/dev/null)"; then
   echo 'Komari Agent unexpectedly opened a listening port.' >&2

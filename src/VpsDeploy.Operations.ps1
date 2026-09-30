@@ -58,7 +58,7 @@ function Assert-MxhNoPendingLocalTransaction {
 
 function Start-MxhMaintenanceTransaction {
     [CmdletBinding()]
-    param([Parameter(Mandatory)] $Context, [Parameter(Mandatory)] [string]$Label)
+    param([Parameter(Mandatory)] $Context, [Parameter(Mandatory)] [string]$Label, [switch]$QuiesceKomariController)
     if ($Context.DryRun) { return [ordered]@{ DryRun = $true; Label = $Label } }
     if ($Label -notmatch '^[A-Za-z0-9-]{1,48}$') { throw '维护事务标签无效。' }
     Assert-MxhNoPendingLocalTransaction $Context
@@ -76,6 +76,7 @@ function Start-MxhMaintenanceTransaction {
     $role = Get-MxhInventoryPrimaryRole -Inventory (Get-MxhProtocolInventory -Plan $Context.Plan -State $Context.State)
     $result = Invoke-VpsRemoteScript -Context $Context -Asset 'protocol-migration-arm-rollback.sh' -Parameters @{
         SOURCE_ROLE = $role; TARGET_ROLE = $role; TIMEOUT_MINUTES = '20'
+        QUIESCE_KOMARI_CONTROLLER = ([bool]$QuiesceKomariController).ToString().ToLowerInvariant()
     } -TimeoutSeconds 300
     $remote = Get-VpsMarkerValue $result.StdOut BACKUP_DIR -Required
     $transaction = [ordered]@{ Label=$Label; LocalBackup=$local; RemoteBackup=$remote; StartedAt=(Get-Date).ToString('o'); Committed=$false }
@@ -748,7 +749,8 @@ function Invoke-MxhKomariLifecycle {
 Agent 是 VPS 上的监控采集端；Controller 是监控面板；Tunnel 连接器用于通过 Cloudflare 访问面板。
 第 2 项会要求站点地址和 Agent Token；第 3、8 项使用项目记录的固定版本，不一定是官方最新版。
 状态审计只读；安装、轮换、升级和卸载会修改当前 VPS。
-Controller 升级会先下载一份完整本地备份，再进入事务；失败会恢复旧二进制和事务快照。
+Controller 升级会停服务创建完整数据备份与一致性事务快照；失败同时恢复数据库、插件/主题数据和旧二进制。
+若 1.5 出现数据库迁移引导，须在面板手动完成后返回复验；取消会回滚，不把迁移页面能打开当成升级已完成。
 脚本验证版本、回环监听、HTTP、服务状态与 Tunnel 服务；登录、TOTP 和主题视觉效果仍需用户在浏览器最终确认。
 '@
     try {
@@ -769,15 +771,17 @@ Controller 升级会先下载一份完整本地备份，再进入事务；失败
         Write-VpsUi '确认短语不匹配，未卸载。' Warning
         continue
     }
-    if($choice -in @(2,3,4,7,8,9)){Start-MxhMaintenanceTransaction $Context 'KomariLifecycle'|Out-Null}
+    if($choice -eq 8){Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerPreflight'} -TimeoutSeconds 60|Out-Null}
+    if($choice -in @(2,3,4,7,8,9)){Start-MxhMaintenanceTransaction $Context 'KomariLifecycle' -QuiesceKomariController:($choice -in @(8,9))|Out-Null}
     try{
         if($choice -eq 2){
             try{$arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture);$asset=$Context.Versions.komari_agent.assets.$arch
                 $r=Invoke-VpsRemoteScript $Context 'komari-agent.sh' @{ENDPOINT=$endpoint;TOKEN=$token;NODE_NAME=[string]$Context.Plan.NodeName;VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200 -SensitiveOutput
-            }finally{$token=$null};$Context.Plan.Komari.Endpoint=$endpoint;$Context.Plan.Komari.Enabled=$true;$Context.State.KomariInstalled=$true
+            }finally{$token=$null};$Context.Plan.Komari.Endpoint=$endpoint;$Context.Plan.Komari.Enabled=$true;$Context.Plan.Komari.AgentVersion=[string]$Context.Versions.komari_agent.version;$Context.State.KomariInstalled=$true
         }elseif($choice -eq 3){
             $arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture);$asset=$Context.Versions.komari_agent.assets.$arch
             Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='AgentUpgrade';VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200|Out-Null
+            $Context.Plan.Komari.AgentVersion=[string]$Context.Versions.komari_agent.version
         }elseif($choice -eq 4){Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='AgentUninstall'}|Out-Null;$Context.Plan.Komari.Enabled=$false;$Context.State.KomariInstalled=$false
         }elseif($choice -eq 5){
             $r=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerBackup'} -TimeoutSeconds 600;$remote=Get-VpsMarkerValue $r.StdOut KOMARI_BACKUP -Required
@@ -792,7 +796,18 @@ Controller 升级会先下载一份完整本地备份，再进入事务；失败
             $arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture);$asset=$Context.Versions.komari_controller.assets.$arch
             $backupResult=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerBackup'} -TimeoutSeconds 600;$remoteBackup=Get-VpsMarkerValue $backupResult.StdOut KOMARI_BACKUP -Required
             $backupDirectory=Join-Path $Context.ArchivePath 'komari-backups';[IO.Directory]::CreateDirectory($backupDirectory)|Out-Null;$localBackup=Join-Path $backupDirectory (Split-Path -Leaf $remoteBackup);Invoke-VpsScpDownload $Context $remoteBackup $localBackup
-            Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerUpgrade';VERSION=[string]$Context.Versions.komari_controller.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200|Out-Null
+            $upgradeResult=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerUpgrade';VERSION=[string]$Context.Versions.komari_controller.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256;BACKUP_FILE=$remoteBackup} -TimeoutSeconds 1200
+            $migration=Get-VpsMarkerValue $upgradeResult.StdOut KOMARI_MIGRATION_REQUIRED -Required
+            while($migration -eq 'true'){
+                Write-VpsUi 'Komari 需要管理员在面板的 /admin/database-migration 完成数据迁移。20 分钟远端回滚保护仍有效；超时或取消会恢复升级前数据。' Warning
+                $migrationChoice=Read-VpsMenu '等待面板数据库迁移' @('已在面板完成，重新检查','取消升级并回滚') 1 -AllowBack -HelpText '不会替你执行数据库迁移或删除历史数据。迁移耗时超过保护窗口时请取消，另行安排完整备份下的维护窗口。'
+                if($migrationChoice -eq 2){throw '用户取消 Komari 数据库迁移，恢复升级前状态。'}
+                $verification=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerVerify';VERSION=[string]$Context.Versions.komari_controller.version} -TimeoutSeconds 120
+                $migration=Get-VpsMarkerValue $verification.StdOut KOMARI_MIGRATION_REQUIRED -Required
+            }
+            if($migration -eq 'deferred'){Write-VpsUi 'Controller 原先未运行，本次只校验并更新程序；数据库迁移将在下次启动后人工完成。' Warning}
+            elseif($migration -ne 'false'){throw '无法确认 Komari 数据库迁移状态，未提交。'}
+            $Context.Plan.Komari.ControllerVersion=[string]$Context.Versions.komari_controller.version
             $audit=Get-MxhHealthAudit $Context;if($audit.Status -eq 'Critical'){throw 'Komari Controller 升级后健康审计出现严重项。'}
             Write-VpsUi "升级前完整备份已下载：$localBackup" Success
         }else{

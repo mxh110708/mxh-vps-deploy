@@ -76,8 +76,8 @@ try {
     }
 
     $genericTemplate=Join-Path $ProjectRoot 'templates\client\sing-box-general.template.json'
-    & $SingBoxPath check -c $genericTemplate
-    if($LASTEXITCODE-ne 0){throw 'generic sing-box authority template check failed'}
+    $genericCheck = Invoke-MxhSingBoxCandidateCheck -ProjectRoot $ProjectRoot -CorePath $SingBoxPath -ConfigPath $genericTemplate
+    if($genericCheck.ExitCode-ne 0){throw "generic sing-box authority template check failed: $($genericCheck.StdErr)"}
     $genericConfig = Get-Content -Raw -LiteralPath $genericTemplate | ConvertFrom-Json -AsHashtable
     $genericMixed = @($genericConfig.inbounds | Where-Object { [string]$_.type -eq 'mixed' })
     $genericTun = @($genericConfig.inbounds | Where-Object { [string]$_.type -eq 'tun' })

@@ -128,11 +128,14 @@ function Get-VpsBundledClientCore {
     $catalog = if ($Core -eq 'mihomo') { $versions.mihomo } else { $versions.sing_box }
     $asset = $catalog.assets.windows_amd64
     if (-not $asset -or -not $asset.name -or -not $asset.sha256) { throw "$Core 的 Windows amd64 资产目录不完整。" }
+    # Windows client compatibility can advance independently of the Linux VPS core.
+    $clientVersion = if ($asset.PSObject.Properties['version']) { [string]$asset.version } else { [string]$catalog.version }
+    if ($clientVersion -notmatch '^\d+\.\d+\.\d+$') { throw "$Core 的客户端验证版本无效。" }
     $manifestPath = Join-Path $ProjectRoot 'vendor\test-cores\windows-amd64\checksums.json'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw '内置测试核心 checksums.json 缺失。' }
     $manifest = Read-VpsJsonHashtable -Path $manifestPath
     $manifestEntry = @($manifest.artifacts | Where-Object { [string]$_.core -eq $Core } | Select-Object -First 1)
-    if (-not $manifestEntry.Count -or [string]$manifestEntry[0].file -ne [string]$asset.name -or
+    if (-not $manifestEntry.Count -or [string]$manifestEntry[0].version -ne $clientVersion -or [string]$manifestEntry[0].file -ne [string]$asset.name -or
         ([string]$manifestEntry[0].sha256).ToLowerInvariant() -ne ([string]$asset.sha256).ToLowerInvariant()) {
         throw "$Core 的 versions.json 与 vendor checksums.json 不一致。"
     }
@@ -142,7 +145,7 @@ function Get-VpsBundledClientCore {
     $expected = ([string]$asset.sha256).ToLowerInvariant()
     if ($actual -ne $expected) { throw "$Core 内置测试核心 SHA-256 不匹配。" }
 
-    $cacheRoot = Join-Path $ProjectRoot (".cache\client-cores\$Core-$([string]$catalog.version)-windows-amd64")
+    $cacheRoot = Join-Path $ProjectRoot (".cache\client-cores\$Core-$clientVersion-windows-amd64")
     $hashMarker = Join-Path $cacheRoot '.archive-sha256'
     $executableName = if ($Core -eq 'mihomo') { 'mihomo*.exe' } else { 'sing-box.exe' }
     $cached = @(Get-ChildItem -LiteralPath $cacheRoot -Recurse -File -Filter $executableName -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -4587,6 +4590,7 @@ Export-ModuleMember -Function @(
     'Test-VpsReusableBootstrapSshPort', 'New-VpsSshPortSelection', 'Test-VpsBootstrapSshPortRetained',
     'Test-VpsSupportedOsRelease', 'Get-VpsSupportedAssetArchitecture', 'Assert-VpsSupportedTarget',
     'Get-VpsBundledClientCore', 'Copy-VpsBundledMihomoGeodata', 'Resolve-VpsClientValidationCore', 'Get-VpsMihomoCorePaths', 'Get-VpsSingBoxCorePath',
+    'New-MxhSingBoxValidationConfig', 'Invoke-MxhSingBoxCandidateCheck', 'Invoke-MxhMihomoCandidateCheck',
     'New-VpsRandomString', 'Test-VpsProject', 'Get-VpsMarkerValue', 'Get-VpsSshArguments',
     'Read-VpsNetworkTuningSettings', 'Get-VpsConservativeNetworkPlan',
     'Get-MxhRealityTargetSettings', 'Set-MxhRealityExternalTarget',

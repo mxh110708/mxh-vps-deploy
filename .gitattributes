@@ -2,10 +2,13 @@
 *.sh text eol=lf
 *.ps1 text eol=lf
 *.psm1 text eol=lf
+*.py text eol=lf
+*.mts text eol=lf
 *.json text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 *.md text eol=lf
 *.cmd text eol=crlf
 *.zip binary
+*.srs binary
 vendor/test-cores/windows-amd64/mihomo-geodata/*.dat binary

@@ -365,6 +365,63 @@ function Invoke-MxhMihomoCandidateCheck {
     return $result
 }
 
+function New-MxhSingBoxValidationConfig {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][string]$DataDirectory
+    )
+    # Never put vendor/cache absolute paths into the portable candidate itself.
+    $config = Read-VpsJsonHashtable -Path $ConfigPath
+    if ($config.Contains('route') -and $config.route.Contains('rule_set')) {
+        $vendorRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot 'vendor/test-cores/windows-amd64'))
+        $manifest = Read-VpsJsonHashtable -Path (Join-Path $vendorRoot 'checksums.json')
+        $entries = @($manifest.data_files | Where-Object { [string]$_.consumer -eq 'sing-box' })
+        if ($entries.Count -ne 5) { throw 'MXH Route 离线公共规则清单必须包含五个规则集。' }
+        foreach ($rule in @($config.route.rule_set)) {
+            if ([string]$rule.type -ne 'remote') { continue }
+            $matched = @($entries | Where-Object {
+                [string]$_.tag -eq [string]$rule.tag -and [string]$_.source -eq [string]$rule.url -and [string]$rule.format -eq 'binary'
+            })
+            if (-not $matched.Count) { continue } # Custom rule sources keep their original semantics.
+            if ($matched.Count -ne 1) { throw '离线公共规则标签重复。' }
+            $entry = $matched[0]
+            $relative = [string]$entry.file
+            if ($relative -ne "mxh-route-public-rules/$([string]$entry.tag).srs") { throw '离线公共规则路径不在白名单。' }
+            $source = [IO.Path]::GetFullPath((Join-Path $vendorRoot $relative))
+            if (-not $source.StartsWith($vendorRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+                -not (Test-Path -LiteralPath $source -PathType Leaf) -or [string]$entry.sha256 -notmatch '^[0-9a-f]{64}$' -or
+                (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$entry.sha256) {
+                throw '离线公共规则文件缺失、越界或 SHA-256 不匹配。'
+            }
+            # Official 1.14.2 check reads the same SRS bytes that MXH Route seeds offline.
+            $rule.type = 'local'
+            $rule.path = $source
+            foreach ($key in @('url', 'download_detour', 'update_interval', 'initial_path')) { $null = $rule.Remove($key) }
+        }
+    }
+    [IO.Directory]::CreateDirectory($DataDirectory) | Out-Null
+    $path = Join-Path $DataDirectory 'validation.private.json'
+    Save-VpsJson -Value $config -Path $path -Private
+    return $path
+}
+
+function Invoke-MxhSingBoxCandidateCheck {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$CorePath,
+        [Parameter(Mandatory)][string]$ConfigPath
+    )
+    $data = Join-Path ([IO.Path]::GetTempPath()) ('mxh-sing-box-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($data) | Out-Null
+    try {
+        $validationPath = New-MxhSingBoxValidationConfig -ProjectRoot $ProjectRoot -ConfigPath $ConfigPath -DataDirectory $data
+        return Invoke-VpsProcess $CorePath @('check', '-D', $data, '-c', $validationPath) -TimeoutSeconds 180
+    }
+    finally { Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 function Test-MxhClientAuthorityPair {
     param(
         [Parameter(Mandatory)][string]$ProjectRoot,
@@ -387,7 +444,7 @@ function Test-MxhClientAuthorityPair {
     $singBox = Resolve-VpsClientValidationCore -Context $context -Core 'sing-box'
     $states['sing-box'] = $singBox
     if ($singBox.Status -eq 'Ready') {
-        $test = Invoke-VpsProcess $singBox.Path @('check', '-c', $SingBoxPath) -TimeoutSeconds 180
+        $test = Invoke-MxhSingBoxCandidateCheck -ProjectRoot $ProjectRoot -CorePath $singBox.Path -ConfigPath $SingBoxPath
         if ($test.ExitCode -ne 0) { throw "sing-box 候选未通过内置稳定核心：$(Get-MxhClientCoreFailureText $test)" }
     }
     foreach ($alpha in @(Get-VpsMihomoCorePaths -ProjectRoot $ProjectRoot | Where-Object { $_ -ne $mihomo.Path })) {

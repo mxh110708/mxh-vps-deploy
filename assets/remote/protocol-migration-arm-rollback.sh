@@ -68,6 +68,16 @@ aux_snapshot KomariAgent komari-agent.service
 aux_snapshot KomariController komari.service
 aux_snapshot Cloudflared cloudflared.service
 
+quiesce_controller="${VPS_PARAM_QUIESCE_KOMARI_CONTROLLER:-false}"
+[[ "$quiesce_controller" == true || "$quiesce_controller" == false ]]
+controller_was_active="$(cat "$backup_dir/KomariController.active")"
+restart_after_snapshot(){ [[ "$quiesce_controller" == false || "$controller_was_active" == false ]] || systemctl start komari.service; }
+if [[ "$quiesce_controller" == true ]]; then
+  for directory in /var/lib/komari /opt/komari; do [[ ! -L "$directory" ]] || { echo 'Unsupported symlinked Komari data directory.' >&2; exit 1; }; done
+  trap restart_after_snapshot EXIT
+  if [[ "$controller_was_active" == true ]]; then systemctl stop komari.service; fi
+fi
+
 candidate_paths=(
   usr/local/bin/xray usr/local/etc/xray usr/local/share/xray
   etc/systemd/system/xray.service etc/systemd/system/xray@.service etc/systemd/system/xray.service.d
@@ -77,7 +87,7 @@ candidate_paths=(
   usr/local/bin/sing-box-anytls etc/systemd/system/sing-box-anytls.service etc/sing-box-anytls var/lib/sing-box-anytls
   usr/local/bin/sing-box etc/systemd/system/sing-box.service etc/systemd/system/sing-box.service.d etc/sing-box var/lib/sing-box
   usr/local/bin/komari-agent etc/komari-agent etc/systemd/system/komari-agent.service var/lib/komari-agent
-  usr/local/bin/komari opt/komari var/lib/komari etc/systemd/system/komari.service
+  usr/local/bin/komari usr/bin/komari opt/komari var/lib/komari etc/systemd/system/komari.service
   usr/local/bin/cloudflared usr/bin/cloudflared etc/systemd/system/cloudflared.service
 )
 existing_paths=()
@@ -86,6 +96,10 @@ for relative in "${candidate_paths[@]}"; do
 done
 if (( ${#existing_paths[@]} > 0 )); then
   tar --numeric-owner -czpf "$backup_dir/protocol-files.tar.gz" -C / "${existing_paths[@]}"
+fi
+if [[ "$quiesce_controller" == true ]]; then
+  touch "$backup_dir/KomariController.quiesced"
+  restart_after_snapshot; trap - EXIT
 fi
 chmod -R go-rwx "$backup_dir"
 
@@ -127,6 +141,15 @@ for role in RealityEntry AnyTlsEntry ShadowsocksLanding; do
   if [[ "$(cat "$backup_dir/${role}.installed")" == 'false' ]]; then cleanup_role "$role"; fi
 done
 if [[ -f "$backup_dir/protocol-files.tar.gz" ]]; then
+  if [[ -f "$backup_dir/KomariController.quiesced" ]]; then
+    systemctl stop komari.service >/dev/null 2>&1 || true
+    failed_dir="$(mktemp -d "$backup_dir/failed-komari-data-XXXXXXXX")"
+    for directory in /var/lib/komari /opt/komari; do
+      [[ -d "$directory" ]] || continue
+      [[ ! -L "$directory" && "$(readlink -f "$directory")" == "$directory" ]] || exit 1
+      leaf="${directory#/}"; mv "$directory" "$failed_dir/${leaf//\//-}"
+    done
+  fi
   tar --numeric-owner -xzpf "$backup_dir/protocol-files.tar.gz" -C /
 fi
 if [[ -f "$backup_dir/nftables.conf" ]]; then

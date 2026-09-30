@@ -33,7 +33,9 @@ Assert-True ([string]$manifest.xray.version -match '^\d+\.\d+\.\d+$') 'Xray pinn
 Assert-True ([string]$manifest.xray.installer_commit -match '^[0-9a-f]{40}$') 'Xray installer commit'
 Assert-True ([string]$manifest.xray.installer_sha256 -match '^[0-9a-f]{64}$') 'Xray installer SHA-256'
 Assert-True ([string]$manifest.komari_agent.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'Komari amd64 SHA-256'
-Assert-True ([string]$manifest.komari_controller.version -eq '1.4.3') 'Komari controller pinned latest stable baseline'
+Assert-True ([string]$manifest.komari_controller.version -eq '1.5.1') 'Komari controller pinned latest stable baseline'
+Assert-True ([string]$manifest.komari_agent.version -eq '1.5.11') 'Komari agent pinned latest stable baseline'
+Assert-True ([string]$manifest.sing_box.assets.windows_amd64.version -eq '1.14.2' -and [string]$manifest.sing_box.version -eq '1.14.0') 'MXH Route client compatibility does not silently upgrade the Linux VPS core'
 Assert-True ([string]$manifest.komari_controller.assets.amd64.name -eq 'komari-linux-amd64') 'Komari controller amd64 asset name'
 Assert-True ([string]$manifest.komari_controller.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'Komari controller amd64 SHA-256'
 Assert-True ([string]$manifest.komari_controller.assets.arm64.sha256 -match '^[0-9a-f]{64}$') 'Komari controller arm64 SHA-256'
@@ -48,7 +50,8 @@ foreach ($artifact in @($vendorManifest.artifacts)) {
     Assert-True (Test-Path -LiteralPath $archive -PathType Leaf) "vendored archive exists: $($artifact.core)"
     Assert-True ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -eq [string]$artifact.sha256) "vendored archive checksum matches: $($artifact.core)"
 }
-Assert-True (@($vendorManifest.data_files).Count -eq 2) 'vendor manifest contains both required Mihomo GeoData files'
+Assert-True (@($vendorManifest.data_files | Where-Object consumer -eq 'mihomo').Count -eq 2) 'vendor manifest contains both required Mihomo GeoData files'
+Assert-True (@($vendorManifest.data_files | Where-Object consumer -eq 'sing-box').Count -eq 5) 'vendor manifest contains all five MXH Route offline public rules'
 foreach ($dataFile in @($vendorManifest.data_files)) {
     $path = Join-Path $ProjectRoot ('vendor\test-cores\windows-amd64\' + [string]$dataFile.file)
     Assert-True (Test-Path -LiteralPath $path -PathType Leaf) "vendored data file exists: $($dataFile.file)"
@@ -214,6 +217,11 @@ Assert-True ($lifecycleUninstall -match 'systemctl is-enabled' -and $lifecycleUn
 $backupPrune = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\protocol-backup-prune.sh')
 Assert-True ($backupPrune -match 'mxh-protocol-migration-rollback\.timer' -and $backupPrune -match 'protocol-lifecycle') 'backup cleanup protects active rollback and limits its remote scope'
 $komariMaintenance = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\maintenance-komari.sh')
+$agentUpgradeSection = [regex]::Match($komariMaintenance, '(?s)\n  AgentUpgrade\).*?\n    ;;').Value
+Assert-True (-not [string]::IsNullOrWhiteSpace($agentUpgradeSection) -and $agentUpgradeSection -notmatch '--version') 'Agent upgrade never invokes the unsupported version interface'
+Assert-True ([regex]::Matches($agentUpgradeSection, 'sha256sum --check --status').Count -eq 3) 'Agent upgrade verifies downloaded, installed and running binary checksums'
+Assert-True ($agentUpgradeSection -match 'MainPID' -and $agentUpgradeSection -match '"/proc/\$\{pid\}/exe" -ef /usr/local/bin/komari-agent') 'Agent upgrade checks the active service process uses the replaced binary'
+Assert-True ($agentUpgradeSection -match 'for _ in \{1\.\.10\}' -and $agentUpgradeSection -match 'if \[\[ "\$was_active" == true \]\]') 'Agent process verification is bounded and never starts an inactive service'
 Assert-True ($komariMaintenance -match 'tunnel_was_enabled=false; tunnel_was_active=false' -and $komariMaintenance -match '\[\[ "\$tunnel_was_active" == false \]\] \|\| systemctl start cloudflared\.service') 'Controller restore rollback returns cloudflared to its pre-restore enabled and active state'
 Assert-True ($komariMaintenance -match 'for _ in \{1\.\.30\}; do grep -Fq ''127\.0\.0\.1:25774''' -and $komariMaintenance -match "curl --silent --output /dev/null --write-out '%\{http_code\}'") 'Controller restore waits for the real listener and validates loopback HTTP before committing'
 $localHttpsSetup = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\local-https-target.sh')
@@ -1722,7 +1730,13 @@ Write-Host "All tests passed: $passed assertions" -ForegroundColor Green
 & (Join-Path $ProjectRoot 'tests/Test-Workbench.ps1') -ProjectRoot $ProjectRoot
 & (Join-Path $ProjectRoot 'tests/Test-SshKeyAccess.ps1') -ProjectRoot $ProjectRoot
 & (Join-Path $ProjectRoot 'tests/Test-MenuCopy.ps1') -ProjectRoot $ProjectRoot
+if($pythonCommandForClient){
+    & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_client_compatibility.py')
+    if($LASTEXITCODE -ne 0){throw 'Client template compatibility tests failed.'}
+}
 if($bash -and $pythonCommandForClient){
     & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_remote_transactions.py') --bash $bash
     if($LASTEXITCODE -ne 0){throw 'Remote transaction guard tests failed.'}
+    & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_komari_lifecycle.py') --bash $bash
+    if($LASTEXITCODE -ne 0){throw 'Komari lifecycle compatibility tests failed.'}
 }

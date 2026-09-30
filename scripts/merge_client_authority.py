@@ -7,6 +7,7 @@ import copy
 import json
 from pathlib import Path
 from ruamel.yaml import YAML
+from client_compatibility import serialize_profile
 
 
 def load_fragments(directory: Path, roles: set[str]):
@@ -85,10 +86,6 @@ def main():
             raise SystemExit("entry group not found exactly once in Clash config")
         current = list(groups[0].get("proxies") or [])
         groups[0]["proxies"] = current + [name for name in proxy_names if name not in current]
-    clash_out = args.output / "Clash_General.candidate.yaml"
-    with clash_out.open("w", encoding="utf-8", newline="\n") as handle:
-        yaml.dump(clash, handle)
-
     sing = json.loads(args.sing_box.read_text(encoding="utf-8"))
     if args.remove_prefix:
         removed_tags = {str(item.get("tag")) for item in sing.get("outbounds", [])
@@ -107,7 +104,11 @@ def main():
         current = list(selectors[0].get("outbounds") or [])
         selectors[0]["outbounds"] = current + [tag for tag in outbound_tags if tag not in current]
     sing_out = args.output / "sing-box-general.candidate.json"
-    sing_out.write_text(json.dumps(sing, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    sing_text = serialize_profile(sing)
+    clash_out = args.output / "Clash_General.candidate.yaml"
+    with clash_out.open("w", encoding="utf-8", newline="\n") as handle:
+        yaml.dump(clash, handle)
+    sing_out.write_text(sing_text, encoding="utf-8")
 
     manifest = {
         "roles": sorted(roles), "entry_group": args.entry_group,

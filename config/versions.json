@@ -9,29 +9,29 @@
     "installer_url": "https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
   },
   "komari_agent": {
-    "version": "1.2.60",
+    "version": "1.5.11",
     "endpoint_default": "",
     "assets": {
       "amd64": {
         "name": "komari-agent-linux-amd64",
-        "sha256": "113af112a914b918f315fa6cd3a98e8c0f932900f776c4c412b2a79477180859"
+        "sha256": "78c28d89e523816baea010c0ed0714f245f508ffdaca0540f5c9f230f7053c8c"
       },
       "arm64": {
         "name": "komari-agent-linux-arm64",
-        "sha256": "8d98966365848435f756d00435b42654d56557f5f783c4b16ba83ed413038007"
+        "sha256": "ff8e33dc12ef2b5738fa291a58498bd15dcbf8ef51966ab65fd67679a0abc87d"
       }
     }
   },
   "komari_controller": {
-    "version": "1.4.3",
+    "version": "1.5.1",
     "assets": {
       "amd64": {
         "name": "komari-linux-amd64",
-        "sha256": "0ecded3f54270e98efd4d8853ed45f82239e2182d9f0f671c489bb4b4c3d14db"
+        "sha256": "469d5bf8299667639fd9ad4c5523344abee2287337a448d886775b3dce9817d2"
       },
       "arm64": {
         "name": "komari-linux-arm64",
-        "sha256": "587b2743be982656ec620f546a1c134e6c61122f51746b873d1b3b1c52ef02a1"
+        "sha256": "21eca252151c3099a093c02130f6750ae6b860cf78cf8e4b50fc002c7007552f"
       }
     }
   },
@@ -47,8 +47,9 @@
         "sha256": "04d9b40bc98dc55b6f509ce3292145c65478f65866bea64826ebb2f382385088"
       },
       "windows_amd64": {
-        "name": "sing-box-1.14.0-windows-amd64.zip",
-        "sha256": "3ffb56267da14e287be48bd10cf7e6505260125bad940b75101fbb4d5d58e5d6"
+        "version": "1.14.2",
+        "name": "sing-box-1.14.2-windows-amd64.zip",
+        "sha256": "c2d8bfff918755808781dfdeeb8581b6c91eb3a243d9a7b55483cfc0c0684d32"
       }
     }
   },
@@ -62,6 +63,17 @@
       "windows_amd64": {
         "name": "mihomo-windows-amd64-v1.19.30.zip",
         "sha256": "22c09fd67673895ef7cd6b1820563918275c3d316f2462b306208675118db3c0"
+      }
+    }
+  },
+  "client_compatibility": {
+    "mxh_route": {
+      "version": "1.14.2-mxh.7",
+      "core_version": "1.14.2",
+      "release_url": "https://github.com/mxh110708/mxh-route-desktop/releases/tag/v1.14.2-mxh.7",
+      "public_rules_bundle": {
+        "source": "https://raw.githubusercontent.com/mxh110708/mxh-route-desktop/61715f8b20e7e95a068e71b67a80ed058d692774/resources/public-rules-v1.json",
+        "sha256": "859c99058f5c9a481f01a8048dce72cf7ce1f623175c85815866b06e8fc29839"
       }
     }
   },

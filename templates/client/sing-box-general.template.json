@@ -7,10 +7,25 @@
     "servers": [
       {
         "type": "local",
-        "tag": "local"
+        "tag": "dns-direct"
+      },
+      {
+        "type": "https",
+        "tag": "dns-proxy",
+        "server": "1.1.1.1",
+        "server_port": 443,
+        "path": "/dns-query",
+        "detour": "Default Exit"
       }
     ],
-    "final": "local"
+    "rules": [
+      { "clash_mode": "Direct", "action": "route", "server": "dns-direct" },
+      { "clash_mode": "Global", "action": "route", "server": "dns-proxy" },
+      { "rule_set": ["geosite-private", "geosite-cn"], "action": "route", "server": "dns-direct" }
+    ],
+    "final": "dns-proxy",
+    "strategy": "prefer_ipv4",
+    "reverse_mapping": true
   },
   "inbounds": [
     {
@@ -67,20 +82,41 @@
     "rules": [
       { "action": "sniff" },
       { "protocol": "dns", "action": "hijack-dns" },
+      { "clash_mode": "Direct", "action": "route", "outbound": "DIRECT" },
+      { "clash_mode": "Global", "action": "route", "outbound": "Default Exit" },
       { "port": [25, 3306], "action": "route", "outbound": "Legacy Ports" },
       { "network": "udp", "port": 443, "action": "route", "outbound": "QUIC Guard" },
       { "network": "udp", "port": [3478, 3479, 3480, 3481], "action": "route", "outbound": "WebRTC Guard" },
-      { "domain_suffix": ["openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "perplexity.ai"], "action": "route", "outbound": "AI Services" },
+      { "rule_set": "geosite-category-ads-all", "action": "route", "outbound": "Ad Block" },
+      { "ip_is_private": true, "action": "route", "outbound": "Direct Route" },
+      { "rule_set": "geosite-private", "action": "route", "outbound": "Direct Route" },
+      { "domain_suffix": ["openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", "anthropic.com", "claude.ai", "perplexity.ai", "huggingface.co", "hf.co"], "action": "route", "outbound": "AI Services" },
       { "domain_suffix": ["github.com", "githubusercontent.com", "npmjs.org", "pypi.org", "docker.com", "docker.io"], "action": "route", "outbound": "Developer Tools" },
       { "domain_suffix": ["arxiv.org", "ieee.org", "springer.com", "nature.com"], "action": "route", "outbound": "Academic Research" },
+      { "domain_suffix": ["bing.com", "bing.net", "bingapis.com", "copilot.microsoft.com", "azure.com", "azureedge.net"], "action": "route", "outbound": "Microsoft Global" },
       { "domain_suffix": ["microsoft.com", "office.com", "live.com"], "action": "route", "outbound": "Microsoft Services" },
       { "domain_suffix": ["apple.com", "icloud.com"], "action": "route", "outbound": "Apple Services" },
       { "domain_suffix": ["xbox.com", "xboxlive.com", "steampowered.com", "steamcommunity.com"], "action": "route", "outbound": "Game Platforms" },
       { "domain_suffix": ["steamcontent.com"], "action": "route", "outbound": "Game Downloads" },
       { "domain_suffix": ["telegram.org", "t.me", "twitter.com", "x.com"], "action": "route", "outbound": "Social & Messaging" },
-      { "domain_suffix": ["youtube.com", "netflix.com", "spotify.com"], "action": "route", "outbound": "Streaming Media" }
+      { "domain_suffix": ["youtube.com", "googlevideo.com", "ytimg.com", "netflix.com", "nflxvideo.net", "spotify.com"], "action": "route", "outbound": "Streaming Media" },
+      { "rule_set": ["geosite-cn", "geoip-cn"], "action": "route", "outbound": "Direct Route" },
+      { "network": "udp", "action": "route", "outbound": "UDP Guard" },
+      { "rule_set": "geosite-geolocation-not-cn", "action": "route", "outbound": "Catch-All" }
+    ],
+    "rule_set": [
+      { "type": "remote", "tag": "geosite-category-ads-all", "format": "binary", "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ads-all.srs", "download_detour": "Default Exit", "update_interval": "1d" },
+      { "type": "remote", "tag": "geosite-private", "format": "binary", "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/private.srs", "download_detour": "Default Exit", "update_interval": "1d" },
+      { "type": "remote", "tag": "geosite-cn", "format": "binary", "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs", "download_detour": "Default Exit", "update_interval": "1d" },
+      { "type": "remote", "tag": "geoip-cn", "format": "binary", "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs", "download_detour": "Default Exit", "update_interval": "1d" },
+      { "type": "remote", "tag": "geosite-geolocation-not-cn", "format": "binary", "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/geolocation-!cn.srs", "download_detour": "Default Exit", "update_interval": "1d" }
     ],
     "final": "Catch-All",
+    "default_domain_resolver": "dns-direct",
     "auto_detect_interface": true
+  },
+  "experimental": {
+    "cache_file": { "enabled": true },
+    "clash_api": { "default_mode": "rule" }
   }
 }
