@@ -1,0 +1,162 @@
+"""Real snapshot/archive restore in a disposable filesystem; services are fake."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+
+ROOT=Path(__file__).resolve().parents[1]
+BASH=None
+
+
+def shell_path(path):
+    value=Path(path).as_posix()
+    return '/'+value[0].lower()+value[2:] if os.name=='nt' and value[1:2]==':' else value
+
+
+PREAMBLE=r'''
+set -E
+trap 'printf "Fixture command failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+flock(){ return 0; }
+systemctl(){
+  echo "$*" >> "$TEST_ROOT/calls"
+  local service="${@: -1}" key
+  key="${service//[^a-zA-Z0-9]/_}"
+  case "$1" in
+    cat) [[ "$service" == sing-box.service || "$service" == komari.service ]];;
+    is-active) [[ -f "$TEST_ROOT/active-$key" ]];;
+    is-enabled) [[ "$service" == sing-box.service || "$service" == komari.service ]];;
+    stop|disable) [[ "$service" == "${MOCK_STOP_STILL_ACTIVE:-}" ]] || rm -f "$TEST_ROOT/active-$key"; return 0;;
+    start|restart) touch "$TEST_ROOT/active-$key";;
+    enable) [[ "$*" != *--now* ]] || touch "$TEST_ROOT/active-$key";;
+    *) return 0;;
+  esac
+}
+sysctl(){ echo "sysctl $*" >> "$TEST_ROOT/calls"; }
+nft(){ echo "nft $*" >> "$TEST_ROOT/calls"; }
+nginx(){ return 0; }
+tar(){
+  local args=()
+  while (($#)); do if [[ "$1" == -C && "$2" == / ]]; then args+=(-C "$TEST_ROOT");shift 2; else args+=("$1");shift;fi;done
+  command tar "${args[@]}"
+}
+'''
+if os.name=='nt':
+    # Git Bash cannot change NTFS ACLs inside the Windows sandbox; Linux CI keeps real modes.
+    PREAMBLE+='\ninstall(){ mkdir -p "${@: -1}"; }\nchmod(){ return 0; }\n'
+
+
+class ScopedRollbackTests(unittest.TestCase):
+    def setUp(self):
+        self.folder=tempfile.TemporaryDirectory(prefix='scoped-rollback-',dir=ROOT/'.tmp')
+        self.root=Path(self.folder.name)
+        for relative,content in {'etc/sing-box/config.json':'old-protocol','usr/local/bin/sing-box':'fixture-binary','etc/systemd/system/sing-box.service':'fixture-unit','opt/komari/data/komari.db':'old-monitor','opt/komari/komari':'fixture-controller','etc/systemd/system/komari.service':'fixture-controller-unit'}.items():
+            path=self.root/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(content);path.chmod(0o755)
+        for name in ('sing_box_service','komari_service'):
+            (self.root/('active-'+name)).touch()
+        self.env=dict(os.environ,TEST_ROOT=shell_path(self.root),VPS_PARAM_SOURCE_ROLE='ShadowsocksLanding',VPS_PARAM_TARGET_ROLE='ShadowsocksLanding',VPS_PARAM_TIMEOUT_MINUTES='20')
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def run_payload(self,source):
+        return subprocess.run([BASH,'--noprofile','--norc','-s'],input=PREAMBLE+source,text=True,encoding='utf-8',errors='replace',capture_output=True,timeout=20,env=self.env)
+
+    def arm(self,components):
+        source=(ROOT/'assets/remote/protocol-migration-arm-rollback.sh').read_text()
+        for prefix in ('/usr/local','/usr/bin','/etc','/var/lib','/var/www','/opt','/root'):
+            source=source.replace(prefix,shell_path(self.root)+prefix)
+        source=source.replace('"/$relative"','"$TEST_ROOT/$relative"').replace('"/${relative:?}"','"$TEST_ROOT/${relative:?}"')
+        self.env['VPS_PARAM_COMPONENTS']=components
+        result=self.run_payload(source)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.backup=next((self.root/'root/vps-deploy-backups').glob('*/protocol-lifecycle'))
+        return result
+
+    def restore(self,argument='--transaction'):
+        helper=self.root/'usr/local/libexec/mxh-protocol-migration-rollback'
+        source=f'source "{shell_path(helper)}" "{shell_path(self.backup)}" {argument}\n'
+        result=self.run_payload(source)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_protocol_snapshot_excludes_monitor_and_rollback_leaves_live_data(self):
+        self.arm('Protocols,Firewall,Network')
+        with tarfile.open(self.backup/'protocol-files.tar.gz') as archive:
+            self.assertTrue(all('komari' not in item.name for item in archive.getmembers()))
+        (self.root/'opt/komari/data/komari.db').write_text('new-monitor')
+        (self.root/'opt/komari/data/metrics.db').write_text('new-metrics')
+        (self.root/'etc/sing-box/config.json').write_text('new-protocol')
+        (self.root/'calls').write_text('')
+        self.restore()
+        self.assertEqual((self.root/'etc/sing-box/config.json').read_text(),'old-protocol')
+        self.assertEqual((self.root/'opt/komari/data/komari.db').read_text(),'new-monitor')
+        self.assertTrue((self.root/'opt/komari/data/metrics.db').exists())
+        self.assertNotIn('komari.service',(self.root/'calls').read_text())
+
+    def test_monitor_only_decommission_produces_downloadable_empty_archive(self):
+        for relative in ('etc/sing-box/config.json','usr/local/bin/sing-box','etc/systemd/system/sing-box.service'):
+            (self.root/relative).unlink()
+        (self.root/'etc/sing-box').rmdir()
+        (self.root/'active-sing_box_service').unlink()
+        self.arm('Protocols,Network,Firewall,KomariAgent')
+        archive_path=self.backup/'protocol-files.tar.gz'
+        self.assertTrue(archive_path.is_file())
+        with tarfile.open(archive_path) as archive:
+            self.assertEqual(archive.getmembers(),[])
+        (self.root/'opt/komari/data/komari.db').write_text('live-monitor')
+        (self.root/'calls').write_text('')
+        self.restore()
+        self.assertEqual((self.root/'opt/komari/data/komari.db').read_text(),'live-monitor')
+        self.assertTrue((self.root/'active-komari_service').exists())
+        self.assertNotIn('komari.service',(self.root/'calls').read_text())
+
+    def test_controller_rollback_quarantines_new_metrics_before_restore(self):
+        self.arm('KomariController')
+        (self.root/'opt/komari/data/komari.db').write_text('migrated-monitor')
+        (self.root/'opt/komari/data/metrics.db').write_text('new-metrics')
+        self.restore()
+        self.assertEqual((self.root/'opt/komari/data/komari.db').read_text(),'old-monitor')
+        self.assertFalse((self.root/'opt/komari/data/metrics.db').exists())
+        self.assertEqual(len(list(self.backup.glob('failed-komari-data-*/**/metrics.db'))),1)
+
+    def test_historical_full_protocol_restore_filters_monitor_files(self):
+        self.arm('Protocols,KomariController')
+        (self.root/'opt/komari/data/komari.db').write_text('new-monitor')
+        (self.root/'etc/sing-box/config.json').write_text('new-protocol')
+        (self.root/'calls').write_text('')
+        self.restore('--protocol-only')
+        self.assertEqual((self.root/'etc/sing-box/config.json').read_text(),'old-protocol')
+        self.assertEqual((self.root/'opt/komari/data/komari.db').read_text(),'new-monitor')
+        self.assertNotIn('komari.service',(self.root/'calls').read_text())
+
+    def test_controller_rollback_refuses_to_replace_live_database(self):
+        self.arm('KomariController')
+        (self.root/'opt/komari/data/komari.db').write_text('new-monitor')
+        self.env['MOCK_STOP_STILL_ACTIVE']='komari.service'
+        helper=self.root/'usr/local/libexec/mxh-protocol-migration-rollback'
+        result=self.run_payload(f'source "{shell_path(helper)}" "{shell_path(self.backup)}" --transaction\n')
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual((self.root/'opt/komari/data/komari.db').read_text(),'new-monitor')
+        self.assertFalse((self.backup/'rollback-executed').exists())
+        self.assertFalse(list(self.backup.glob('failed-komari-data-*')))
+
+    def test_protocol_rollback_refuses_to_replace_config_of_unstopped_service(self):
+        self.arm('Protocols')
+        (self.root/'etc/sing-box/config.json').write_text('new-protocol')
+        self.env['MOCK_STOP_STILL_ACTIVE']='sing-box.service'
+        helper=self.root/'usr/local/libexec/mxh-protocol-migration-rollback'
+        result=self.run_payload(f'source "{shell_path(helper)}" "{shell_path(self.backup)}" --transaction\n')
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual((self.root/'etc/sing-box/config.json').read_text(),'new-protocol')
+        self.assertFalse((self.backup/'rollback-executed').exists())
+
+
+if __name__=='__main__':
+    parser=argparse.ArgumentParser();parser.add_argument('--bash',required=True)
+    args,remaining=parser.parse_known_args();BASH=args.bash
+    (ROOT/'.tmp').mkdir(exist_ok=True)
+    unittest.main(argv=[sys.argv[0],*remaining],verbosity=2)

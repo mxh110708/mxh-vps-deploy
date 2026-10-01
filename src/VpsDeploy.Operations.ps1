@@ -58,7 +58,8 @@ function Assert-MxhNoPendingLocalTransaction {
 
 function Start-MxhMaintenanceTransaction {
     [CmdletBinding()]
-    param([Parameter(Mandatory)] $Context, [Parameter(Mandatory)] [string]$Label, [switch]$QuiesceKomariController)
+    param([Parameter(Mandatory)] $Context, [Parameter(Mandatory)] [string]$Label, [switch]$QuiesceKomariController,
+        [ValidateSet('Protocols','Network','Firewall','KomariAgent','KomariController','Cloudflared')][string[]]$Components=@('Protocols','Network','Firewall'))
     if ($Context.DryRun) { return [ordered]@{ DryRun = $true; Label = $Label } }
     if ($Label -notmatch '^[A-Za-z0-9-]{1,48}$') { throw '维护事务标签无效。' }
     Assert-MxhNoPendingLocalTransaction $Context
@@ -74,12 +75,14 @@ function Start-MxhMaintenanceTransaction {
         if (Test-Path -LiteralPath $path -PathType Container) { Copy-Item -LiteralPath $path -Destination (Join-Path $local $directory) -Recurse }
     }
     $role = Get-MxhInventoryPrimaryRole -Inventory (Get-MxhProtocolInventory -Plan $Context.Plan -State $Context.State)
+    if ($QuiesceKomariController -and 'KomariController' -notin $Components) { $Components += 'KomariController' }
     $result = Invoke-VpsRemoteScript -Context $Context -Asset 'protocol-migration-arm-rollback.sh' -Parameters @{
         SOURCE_ROLE = $role; TARGET_ROLE = $role; TIMEOUT_MINUTES = '20'
         QUIESCE_KOMARI_CONTROLLER = ([bool]$QuiesceKomariController).ToString().ToLowerInvariant()
+        COMPONENTS = ($Components | Sort-Object -Unique) -join ','
     } -TimeoutSeconds 300
     $remote = Get-VpsMarkerValue $result.StdOut BACKUP_DIR -Required
-    $transaction = [ordered]@{ Label=$Label; LocalBackup=$local; RemoteBackup=$remote; StartedAt=(Get-Date).ToString('o'); Committed=$false }
+    $transaction = [ordered]@{ Label=$Label; Components=@($Components); LocalBackup=$local; RemoteBackup=$remote; StartedAt=(Get-Date).ToString('o'); Committed=$false }
     Save-VpsJson -Value $transaction -Path (Join-Path $local 'maintenance-transaction.json') -Private
     $Context.State.MaintenanceTransaction = $transaction
     Save-MxhMaintenanceContext $Context
@@ -228,7 +231,13 @@ function Get-MxhHealthAudit {
     if ($Context.DryRun) {
         return [ordered]@{ SchemaVersion=1; DryRun=$true; Findings=@(); Status='DryRun' }
     }
-    $result = Invoke-VpsRemoteScript -Context $Context -Asset 'maintenance-health-audit.sh' -TimeoutSeconds 300
+    $agentReleases = @{}
+    if ($Context.PSObject.Properties['Versions'] -and $Context.Versions.komari_agent) {
+        foreach ($asset in $Context.Versions.komari_agent.assets.PSObject.Properties) {
+            $agentReleases[[string]$asset.Value.sha256] = [string]$Context.Versions.komari_agent.version
+        }
+    }
+    $result = Invoke-VpsRemoteScript -Context $Context -Asset 'maintenance-health-audit.sh' -Parameters @{AGENT_RELEASES_JSON=($agentReleases|ConvertTo-Json -Compress)} -TimeoutSeconds 300
     $audit = (Get-VpsMarkerValue $result.StdOut HEALTH_AUDIT -Required) | ConvertFrom-Json -AsHashtable
     $findings = [Collections.Generic.List[object]]::new()
     $add = { param($severity,$code,$message) $findings.Add([ordered]@{ Severity=$severity; Code=$code; Message=$message }) }
@@ -247,10 +256,42 @@ function Get-MxhHealthAudit {
         foreach ($field in @('Installed','Enabled','Active')) {
             if ([bool]$expected[$field] -ne [bool]$actual[$field]) { & $add Critical 'PROTOCOL_STATE_DRIFT' "$role 的 $field 与本地清单不一致。" }
         }
+        if ($expected.Active -and $actual.Contains('ProcessMatchesBinary') -and $actual.ProcessMatchesBinary -eq $false) {
+            & $add Critical 'RUNNING_BINARY_MISMATCH' "$role 的运行进程未使用受管程序。"
+        }
+    }
+    $requireListener = {
+        param([int]$port,[string]$transport,[string]$label)
+        if ($port -lt 1) { & $add Critical 'LISTENER_PLAN_MISSING' "$label 缺少有效监听端口。"; return }
+        if ($audit.Contains('Listeners')) {
+            if ($port -notin @($audit.Listeners[$transport])) { & $add Critical 'REQUIRED_LISTENER_MISSING' "$label 缺少计划内 $transport 监听。" }
+        } elseif ($audit.Contains('ListenerPorts')) {
+            if ($port -notin @($audit.ListenerPorts)) { & $add Critical 'REQUIRED_LISTENER_MISSING' "$label 缺少计划内监听。" }
+            if ($transport -eq 'Udp') { & $add Warning 'LISTENER_CHECK_INCOMPLETE' '旧审计快照没有独立 UDP 监听证据。' }
+        } else { & $add Warning 'LISTENER_CHECK_INCOMPLETE' '审计快照没有监听证据，不能确认为健康。' }
+    }
+    foreach ($port in $expectedPorts) { & $requireListener $port Tcp 'SSH' }
+    if ($inventory.RealityEntry.Active) {
+        & $requireListener ([int]$Context.Plan.Ports.XrayPrimary) Tcp 'Reality'
+        if ($Context.Plan.Ports.XrayBackup) { & $requireListener ([int]$Context.Plan.Ports.XrayBackup) Tcp 'Reality 备用入口' }
+        if ($Context.Plan.Reality.Contains('TargetMode') -and $Context.Plan.Reality.TargetMode -eq 'LocalOwnedTls') { & $requireListener ([int]$Context.Plan.Reality.LocalHttpsPort) Tcp 'Reality 本机 HTTPS 目标' }
+    }
+    if ($inventory.AnyTlsEntry.Active) { & $requireListener ([int]$Context.Plan.Ports.AnyTlsPrimary) Tcp 'AnyTLS' }
+    if ($inventory.ShadowsocksLanding.Active) {
+        & $requireListener ([int]$Context.Plan.Ports.LandingShadowsocks) Tcp 'Shadowsocks'
+        & $requireListener ([int]$Context.Plan.Ports.LandingShadowsocks) Udp 'Shadowsocks'
     }
     if ($audit.Nftables.Present -and -not $audit.Nftables.Valid) { & $add Critical 'NFTABLES_INVALID' 'nftables 持久化配置语法无效。' }
-    if ($inventory.AnyTlsEntry.Installed -and (-not $audit.Certificate.Present -or [int]$audit.Certificate.DaysRemaining -lt 21)) {
-        & $add Warning 'TLS_CERT_EXPIRY' 'AnyTLS 证书不存在或剩余不足 21 天。'
+    $certificateRoles = @()
+    if ($inventory.AnyTlsEntry.Installed) { $certificateRoles += 'AnyTls' }
+    if ($inventory.RealityEntry.Installed -and $Context.Plan.Reality.Contains('TargetMode') -and $Context.Plan.Reality.TargetMode -eq 'LocalOwnedTls') { $certificateRoles += 'Reality' }
+    foreach ($certificateRole in $certificateRoles) {
+        $cert = if ($audit.Contains('Certificates')) { $audit.Certificates[$certificateRole] } elseif ($certificateRole -eq 'AnyTls') { $audit.Certificate } else { $null }
+        if (-not $cert -or -not $cert.Present -or $null -eq $cert.DaysRemaining -or [int]$cert.DaysRemaining -lt 0) { & $add Critical 'TLS_CERT_INVALID' "$certificateRole 的受管证书缺失、不可解析或已过期。" }
+        elseif ([int]$cert.DaysRemaining -lt 21) { & $add Warning 'TLS_CERT_EXPIRY' "$certificateRole 证书剩余不足 21 天。" }
+    }
+    if ($certificateRoles.Count -and (-not $audit.Timers.CertbotRenewEnabled -or ($audit.Timers.Contains('CertbotRenewActive') -and -not $audit.Timers.CertbotRenewActive))) {
+        & $add Warning 'CERTBOT_RENEW_UNAVAILABLE' '受管证书的自动续期计时器未启用或未运行。'
     }
     if ($audit.Timers.RollbackActive -and -not $IgnoreActiveRollbackTimer) { & $add Warning 'ROLLBACK_TIMER_ACTIVE' '存在尚未提交的自动回滚计时器。' }
     if ($Context.State.Contains('HealthBaseline')) {
@@ -262,10 +303,27 @@ function Get-MxhHealthAudit {
     $expectedAgentInstalled=$Context.State.Contains('KomariInstalled') -and [bool]$Context.State.KomariInstalled
     if($expectedAgentInstalled -ne [bool]$audit.Services.KomariAgent.Installed){& $add Warning 'KOMARI_AGENT_DRIFT' 'Komari Agent 安装状态与本地清单不一致。'}
     if([bool]$Context.Plan.Komari.Enabled -ne [bool]$audit.Services.KomariAgent.Active){& $add Warning 'KOMARI_AGENT_STATE_DRIFT' 'Komari Agent 运行状态与本地计划不一致。'}
+    if ($expectedAgentInstalled -and -not $audit.Versions.KomariAgent) { & $add Warning 'KOMARI_AGENT_VERSION_UNKNOWN' 'Agent 文件哈希不属于当前已知资产，未执行 Agent 查询版本。' }
+    foreach ($component in @('KomariAgent','KomariController','Cloudflared')) {
+        $actual=$audit.Services[$component]
+        if ($actual.Active -and $actual.Contains('ProcessMatchesBinary') -and $actual.ProcessMatchesBinary -eq $false) { & $add Critical 'RUNNING_BINARY_MISMATCH' "$component 的运行进程与受管程序不一致。" }
+        if ($component -ne 'KomariAgent' -and $Context.State.Contains($component)) {
+            $expected=$Context.State[$component]
+            foreach ($field in @('Installed','Enabled','Active')) {
+                if ($expected.Contains($field) -and [bool]$expected[$field] -ne [bool]$actual[$field]) { & $add Warning 'KOMARI_SERVICE_STATE_DRIFT' "$component 的 $field 与本地记录不同。" }
+            }
+        }
+    }
+    if ($audit.Services.KomariController.Active) { & $requireListener 25774 Tcp 'Komari Controller' }
+    if ($audit.Contains('ChecksIncomplete') -and @($audit.ChecksIncomplete).Count) { & $add Warning 'AUDIT_CHECK_INCOMPLETE' '部分只读检查超时或不可用，不能确认为健康。' }
     if($inventory.RealityEntry.Installed -and [string]$audit.Versions.Xray -notmatch [regex]::Escape([string]$Context.Plan.Reality.XrayVersion)){& $add Warning 'XRAY_VERSION_DRIFT' 'Xray 版本与固定计划不一致。'}
     if($inventory.AnyTlsEntry.Installed -and [string]$audit.Versions.SingBoxAnyTls -notmatch [regex]::Escape([string]$Context.Plan.AnyTls.SingBoxVersion)){& $add Warning 'SINGBOX_VERSION_DRIFT' 'AnyTLS sing-box 版本与固定计划不一致。'}
     if($inventory.ShadowsocksLanding.Installed -and [string]$audit.Versions.SingBox -notmatch [regex]::Escape([string]$Context.Plan.Shadowsocks.SingBoxVersion)){& $add Warning 'SINGBOX_VERSION_DRIFT' 'Shadowsocks sing-box 版本与固定计划不一致。'}
-    if($Context.State.Contains('KomariController') -and [bool]$Context.State.KomariController.Installed -and [string]$audit.Versions.KomariController -notmatch [regex]::Escape([string]$Context.Versions.komari_controller.version)){& $add Warning 'KOMARI_CONTROLLER_VERSION_DRIFT' 'Komari Controller 版本与固定目录不一致。'}
+    if($Context.State.Contains('KomariController') -and [bool]$Context.State.KomariController.Installed){
+        $expectedControllerVersion=if($Context.Plan.Komari.Contains('ControllerVersion')){[string]$Context.Plan.Komari.ControllerVersion}else{''}
+        if(-not $audit.Versions.KomariController){& $add Warning 'KOMARI_CONTROLLER_VERSION_UNKNOWN' '无法确认 Controller 服务实际使用的程序版本。'}
+        elseif($expectedControllerVersion -and [string]$audit.Versions.KomariController -notmatch [regex]::Escape($expectedControllerVersion)){& $add Warning 'KOMARI_CONTROLLER_VERSION_DRIFT' 'Komari Controller 版本与实例计划不一致。'}
+    }
     $status = if (@($findings | Where-Object Severity -eq Critical).Count) {'Critical'} elseif ($findings.Count) {'Warning'} else {'Healthy'}
     if ($InitializeBaseline -and $status -eq 'Healthy') {
         $Context.State.HealthBaseline = [ordered]@{ EstablishedAt=(Get-Date).ToString('o'); Hashes=Copy-MxhHashtable $audit.Hashes }
@@ -328,6 +386,12 @@ function New-MxhRestoreMetadata {
             throw '恢复点使用旧 SSH 端口，完整恢复其防火墙可能切断当前连接。请选择“只恢复代理配置和密钥／密码”，或使用 SSH 端口变更后的备份。未修改服务器。'
         }
         $newPlan=Copy-MxhHashtable $Plan;$newState=Copy-MxhHashtable $State;$newSecrets=Copy-MxhHashtable $Secrets
+        # Monitoring is only restored through its own quiesced workflow.
+        $newPlan.Komari=Copy-MxhHashtable $Context.Plan.Komari
+        foreach($key in @($newState.Keys|Where-Object{$_ -like 'Komari*' -or $_ -like 'Cloudflared*'})){$newState.Remove($key)|Out-Null}
+        foreach($key in @($Context.State.Keys|Where-Object{$_ -like 'Komari*' -or $_ -like 'Cloudflared*'})){$newState[$key]=$Context.State[$key]}
+        foreach($key in @($newSecrets.Keys|Where-Object{$_ -like 'Komari*' -or $_ -like 'Cloudflared*'})){$newSecrets.Remove($key)|Out-Null}
+        foreach($key in @($Context.Secrets.Keys|Where-Object{$_ -like 'Komari*' -or $_ -like 'Cloudflared*'})){$newSecrets[$key]=$Context.Secrets[$key]}
         # The protocol snapshot does not restore SSH identity, server identity or local paths.
         foreach($key in @('Server','Paths','Bootstrap','SshKey','AdminUser','Provider','Instance','NodeName','Import')){
             if($Context.Plan.Contains($key)){$newPlan[$key]=$Context.Plan[$key]}
@@ -356,7 +420,7 @@ function Invoke-MxhManualRestoreCenter {
     })
     $maintenanceRoot=Join-Path $Context.ArchivePath 'maintenance-backups'
     $candidates+=@(Get-ChildItem $maintenanceRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-        $metadata=Join-Path $_.FullName 'maintenance-transaction.json';if(Test-Path $metadata){$m=Read-VpsJsonHashtable $metadata;if($m.RemoteBackup){[pscustomobject]@{Directory=$_.FullName;Remote=[string]$m.RemoteBackup;Name=$_.Name;Time=$_.LastWriteTimeUtc}}}
+        $metadata=Join-Path $_.FullName 'maintenance-transaction.json';if(Test-Path $metadata){$m=Read-VpsJsonHashtable $metadata;if($m.RemoteBackup -and (-not $m.Contains('Components') -or 'Protocols' -in $m.Components)){[pscustomobject]@{Directory=$_.FullName;Remote=[string]$m.RemoteBackup;Name=$_.Name;Time=$_.LastWriteTimeUtc}}}
     })
     $candidates=@($candidates|Sort-Object Time -Descending)
     if(-not $candidates.Count){Write-VpsUi '没有找到可验证的本地/远端成对协议备份。' Warning; return}
@@ -367,7 +431,7 @@ function Invoke-MxhManualRestoreCenter {
     while ($true) {
     $scopeChoice=Read-VpsMenu '选择恢复范围' @('只恢复代理配置和密钥／密码','恢复协议相关文件和运行设置') 1 -AllowBack -HelpText @'
 1 只恢复配置：保留当前服务启停、防火墙和程序版本；若安装的协议、端口或证书设置不兼容，会停止恢复。
-2 恢复协议相关文件和设置：恢复备份中的程序、配置、服务启停、防火墙和网络参数；可能包含 Komari 等被记录的组件。备份与当前 SSH 端口不同会拒绝恢复，避免旧防火墙切断当前连接。
+2 恢复协议相关文件和设置：恢复代理程序、配置、服务启停、防火墙和网络参数；即使旧备份包含 Komari，也不会恢复监控数据。Komari 请使用专用恢复入口。备份与当前 SSH 端口不同会拒绝恢复。
 两项都不是系统重装，不恢复 SSH 登录身份；执行前会备份当前状态。
 '@
     try {
@@ -451,6 +515,40 @@ function Invoke-MxhManualRestoreCenter {
     }
 }
 
+function New-MxhRotatedProtocolConfig {
+    param([Parameter(Mandatory)][Collections.IDictionary]$Config,[Parameter(Mandatory)]$OldSecrets,
+        [Parameter(Mandatory)]$NewSecrets,[ValidateSet('RealityEntry','AnyTlsEntry','ShadowsocksLanding')][string]$Role)
+    $result=Copy-MxhHashtable $Config
+    if($Role -eq 'RealityEntry'){
+        $inbounds=@($result.inbounds|Where-Object{$_.protocol -eq 'vless' -and $_.streamSettings.security -eq 'reality'})
+        if(-not $inbounds.Count){throw '现有 Reality 配置布局无法安全轮换。'}
+        foreach($inbound in $inbounds){
+            $clients=@($inbound.settings.clients)
+            if($clients.Count -ne 1 -or $clients[0].id -ne $OldSecrets.Xray.Uuid -or $inbound.streamSettings.realitySettings.privateKey -ne $OldSecrets.Xray.RealityPrivateKey){throw 'Reality 用户或密钥已变化，停止轮换；先重新核对实例。'}
+            $clients[0].id=[string]$NewSecrets.Xray.Uuid
+            $inbound.streamSettings.realitySettings.privateKey=[string]$NewSecrets.Xray.RealityPrivateKey
+            $ids=@($inbound.streamSettings.realitySettings.shortIds)
+            if([string]$OldSecrets.Xray.ShortId -notin $ids){throw 'Reality shortId 已变化，停止轮换。'}
+            $inbound.streamSettings.realitySettings.shortIds=@($ids|ForEach-Object{if($_ -eq $OldSecrets.Xray.ShortId){[string]$NewSecrets.Xray.ShortId}else{$_}})
+        }
+    }elseif($Role -eq 'AnyTlsEntry'){
+        $inbounds=@($result.inbounds|Where-Object{$_.type -eq 'anytls'})
+        if($inbounds.Count -ne 1 -or @($inbounds[0].users).Count -ne 1 -or $inbounds[0].users[0].password -ne $OldSecrets.AnyTls.Password){throw 'AnyTLS 用户布局或密码已变化，停止轮换。'}
+        $inbounds[0].users[0].password=[string]$NewSecrets.AnyTls.Password
+    }else{
+        $inbounds=@($result.inbounds|Where-Object{$_.type -eq 'shadowsocks'})
+        if($inbounds.Count -ne 1 -or $inbounds[0].password -ne $OldSecrets.Shadowsocks.ServerKey){throw 'Shadowsocks 服务端密钥或布局已变化，停止轮换。'}
+        $names=@($inbounds[0].users|ForEach-Object{$_.name})
+        if('ipv4-client' -notin $names -or @($names|Sort-Object -Unique).Count -ne $names.Count -or @($names|Where-Object{$_ -notin @('ipv4-client','ipv6-client')}).Count){throw 'Shadowsocks 包含未识别或重复用户，停止轮换。'}
+        foreach($user in $inbounds[0].users){
+            $key=if($user.name -eq 'ipv4-client'){'PrimaryUserKey'}else{'SecondaryUserKey'}
+            if(-not $NewSecrets.Shadowsocks[$key] -or $user.password -ne $OldSecrets.Shadowsocks[$key]){throw 'Shadowsocks 用户凭据已变化，停止轮换。'}
+            $user.password=[string]$NewSecrets.Shadowsocks[$key]
+        }
+    }
+    return $result
+}
+
 function Invoke-MxhCredentialRotation {
     param($Context)
     while ($true) {
@@ -472,14 +570,18 @@ function Invoke-MxhCredentialRotation {
     } elseif($role -eq 'AnyTlsEntry'){
         $candidateSecrets.AnyTls.Password=New-VpsRandomString 32
     } else {
-        $candidateSecrets.Shadowsocks.PrimaryUserKey=New-MxhRandomBase64Key 16
-        if([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled){$candidateSecrets.Shadowsocks.SecondaryUserKey=New-MxhRandomBase64Key 16}
+        $keyBytes=switch([string]$Context.Plan.Shadowsocks.Method){'2022-blake3-aes-128-gcm'{16};'2022-blake3-aes-256-gcm'{32};'2022-blake3-chacha20-poly1305'{32};default{throw 'Shadowsocks 加密方法不支持安全轮换。'}}
+        $candidateSecrets.Shadowsocks.PrimaryUserKey=New-MxhRandomBase64Key $keyBytes
+        if([bool]$Context.Plan.Shadowsocks.SecondaryIpv6Enabled){$candidateSecrets.Shadowsocks.SecondaryUserKey=New-MxhRandomBase64Key $keyBytes}
     }
     $candidate=[pscustomobject]@{ProjectRoot=$Context.ProjectRoot;Plan=$Context.Plan;ArchivePath=$Context.ArchivePath;PlanPath=$Context.PlanPath;SecretsPath=$Context.SecretsPath;StatePath=$Context.StatePath;LogPath=$Context.LogPath;Secrets=$candidateSecrets;State=$Context.State;DryRun=$false;NonInteractive=$false;Versions=$Context.Versions}
-    $config=if($role -eq 'RealityEntry'){New-MxhXrayServerConfig $candidate}elseif($role -eq 'AnyTlsEntry'){New-MxhAnyTlsServerConfig $candidate}else{New-MxhShadowsocksServerConfig $candidate}
+    $current=Invoke-VpsRemoteScript $Context 'maintenance-protocol-config-read.sh' @{ROLE=$role} -TimeoutSeconds 60 -SensitiveOutput
+    $original=(Get-VpsMarkerValue $current.StdOut SERVER_CONFIG -Required)|ConvertFrom-Json -AsHashtable
+    $originalHash=Get-VpsMarkerValue $current.StdOut SERVER_CONFIG_SHA256 -Required
+    $config=New-MxhRotatedProtocolConfig $original $Context.Secrets $candidateSecrets $role
     Start-MxhMaintenanceTransaction $Context 'CredentialRotation'|Out-Null
     try {
-        $r=Invoke-VpsRemoteScript $Context 'maintenance-protocol-config-apply.sh' @{ROLE=$role;CONFIG_JSON=($config|ConvertTo-Json -Depth 40);WAS_ACTIVE='true'} -TimeoutSeconds 300 -SensitiveOutput
+        $r=Invoke-VpsRemoteScript $Context 'maintenance-protocol-config-apply.sh' @{ROLE=$role;CONFIG_JSON=($config|ConvertTo-Json -Depth 40);EXPECTED_CONFIG_SHA256=$originalHash;WAS_ACTIVE='true'} -TimeoutSeconds 300 -SensitiveOutput
         if($r.StdOut -notmatch 'VPSDEPLOY_CREDENTIAL_CONFIG_APPLIED'){throw '远端未确认候选凭据配置。'}
         $modulePath=if($role -eq 'RealityEntry'){'modules\90-ClientExport.ps1'}elseif($role -eq 'AnyTlsEntry'){'modules\91-AnyTlsClientExport.ps1'}else{'modules\92-LandingClientExport.ps1'}
         $module=&(Join-Path $Context.ProjectRoot $modulePath); & $module.Invoke $candidate
@@ -627,7 +729,7 @@ function Invoke-MxhFirewallMaintenance {
         $new6=ConvertTo-VpsIpAllowlist (Read-VpsText '可信入口 IPv6，逗号分隔' -Default ($new6-join',') -AllowEmpty -AllowBack) IPv6
         if(-not $new4.Count -and -not $new6.Count){throw 'Shadowsocks 白名单不能同时为空。'}
     }
-    Start-MxhMaintenanceTransaction $Context 'FirewallMaintenance'|Out-Null
+    Start-MxhMaintenanceTransaction $Context 'FirewallMaintenance' -Components Firewall|Out-Null
     try{
         if($mode -eq 'PreserveExisting'){$Context.Plan.Firewall.Mode='ManagedNftables'}
         $Context.Plan.Shadowsocks.TrustedEntryIPv4s=@($new4);$Context.Plan.Shadowsocks.TrustedEntryIPv6s=@($new6)
@@ -639,6 +741,61 @@ function Invoke-MxhFirewallMaintenance {
     return
     } catch { if (Test-VpsWizardBackError $_) { continue }; throw }
     }
+}
+
+function Update-MxhKomariServiceState {
+    param([Parameter(Mandatory)]$Context)
+    $result=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='Status'} -TimeoutSeconds 60
+    foreach($item in @(@{Unit='komari-agent.service';Key='KomariAgent'},@{Unit='komari.service';Key='KomariController'},@{Unit='cloudflared.service';Key='Cloudflared'})) {
+        $match=[regex]::Match($result.StdOut,'(?m)^'+[regex]::Escape($item.Unit)+'=(true|false),(true|false),(true|false)\r?$')
+        if(-not $match.Success){throw '无法同步 Komari 实际服务状态，尚未提交。'}
+        $state=@{Installed=$match.Groups[1].Value -eq 'true';Enabled=$match.Groups[2].Value -eq 'true';Active=$match.Groups[3].Value -eq 'true'}
+        if($item.Key -eq 'KomariAgent'){$Context.State.KomariInstalled=$state.Installed;$Context.Plan.Komari.Enabled=$state.Active}
+        else{$Context.State[$item.Key]=$state}
+    }
+}
+
+function Invoke-MxhKomariUpgrade {
+    param([Parameter(Mandatory)]$Context,[ValidateSet('KomariAgent','KomariController')][string]$Component)
+    if($Context.DryRun){Write-VpsUi "DryRun：$Component 共用升级预检、备份、迁移确认与回滚流程。" Info;return}
+    if($Component -eq 'KomariController'){Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerPreflight'} -TimeoutSeconds 60|Out-Null}
+    Start-MxhMaintenanceTransaction $Context 'KomariUpgrade' -Components $Component -QuiesceKomariController:($Component -eq 'KomariController')|Out-Null
+    try {
+        $arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture)
+        $catalog=if($Component -eq 'KomariAgent'){$Context.Versions.komari_agent}else{$Context.Versions.komari_controller}
+        $asset=$catalog.assets.$arch
+        $parameters=@{ACTION=if($Component -eq 'KomariAgent'){'AgentUpgrade'}else{'ControllerUpgrade'};VERSION=[string]$catalog.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256}
+        if($Component -eq 'KomariController'){
+            $backup=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerBackup';INCLUDE_TUNNEL='false'} -TimeoutSeconds 600
+            $remote=Get-VpsMarkerValue $backup.StdOut KOMARI_BACKUP -Required
+            $directory=Join-Path $Context.ArchivePath 'komari-backups';[IO.Directory]::CreateDirectory($directory)|Out-Null
+            $local=Join-Path $directory (Split-Path -Leaf $remote);Invoke-VpsScpDownload $Context $remote $local
+            $parameters.BACKUP_FILE=$remote
+        }
+        $result=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' $parameters -TimeoutSeconds 1200
+        if($result.StdOut -notmatch 'VPSDEPLOY_KOMARI_LIFECYCLE_OK'){throw 'Komari 程序更新未确认。'}
+        if($Component -eq 'KomariController'){
+            $migration=Get-VpsMarkerValue $result.StdOut KOMARI_MIGRATION_REQUIRED -Required
+            while($migration -eq 'true'){
+                Write-VpsUi '请在面板 /admin/database-migration 完成迁移，再返回复验。20 分钟回滚保护仍有效；取消或超时会恢复升级前数据。' Warning
+                $choice=Read-VpsMenu '等待面板数据库迁移' @('已在面板完成，重新检查','取消升级并回滚') 1 -AllowBack -HelpText '不会自动迁移或删除历史数据。超过保护期限时，后续命令会拒绝写入。'
+                if($choice -eq 2){throw '用户取消 Komari 数据库迁移。'}
+                $verification=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerVerify';VERSION=[string]$catalog.version} -TimeoutSeconds 120
+                $migration=Get-VpsMarkerValue $verification.StdOut KOMARI_MIGRATION_REQUIRED -Required
+            }
+            if($migration -eq 'deferred'){Write-VpsUi '原服务未运行，数据库迁移将在下次启动后人工完成。' Warning}
+            elseif($migration -ne 'false'){throw '无法确认数据库迁移状态，未提交。'}
+            $Context.Plan.Komari.ControllerVersion=[string]$catalog.version
+            Write-VpsUi "升级前一致性备份已下载：$local" Success
+        }else{$Context.Plan.Komari.AgentVersion=[string]$catalog.version}
+        Update-MxhKomariServiceState $Context
+        $report=Get-MxhHealthAudit $Context -IgnoreActiveRollbackTimer
+        if($report.Status -eq 'Critical'){throw 'Komari 升级后健康检查存在严重异常。'}
+        Complete-MxhMaintenanceTransaction $Context
+        $Context.State.LastControlledUpgrade=@{Component=$Component;At=(Get-Date).ToString('o');Catalog='versions.json'}
+        Save-MxhMaintenanceContext $Context
+        Write-VpsUi '程序、实际运行状态和本地记录已核对；浏览器登录与主题仍需人工确认。' Success
+    }catch{Undo-MxhMaintenanceTransaction $Context $_.Exception.Message;throw}
 }
 
 function Invoke-MxhControlledUpgrade {
@@ -673,17 +830,14 @@ function Invoke-MxhControlledUpgrade {
         }
     }
     if($Context.DryRun){Write-VpsUi "DryRun：将下载并校验固定资产、配置检查、同版本可重复安装、失败自动回滚：$role" Success;return}
+    if($role -in @('KomariAgent','KomariController')){Invoke-MxhKomariUpgrade $Context $role;return}
     Start-MxhMaintenanceTransaction $Context 'ControlledUpgrade'|Out-Null
     try{
         $arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture)
         if($role -eq 'RealityEntry'){
             Invoke-VpsRemoteScript $Context 'xray-install.sh' @{VERSION=$targetVersion;INSTALLER_URL=[string]$Context.Versions.xray.installer_url;INSTALLER_SHA256=[string]$Context.Versions.xray.installer_sha256} -TimeoutSeconds 1200|Out-Null
             $Context.Plan.Reality.XrayVersion=$targetVersion;$Context.Plan.Reality.XrayVersionChannel=$targetChannel
-            $target=Get-MxhRealityTargetSettings -Plan $Context.Plan
-            $configJson=(New-MxhXrayServerConfig -Context $Context)|ConvertTo-Json -Depth 30
-            $apply=Invoke-VpsRemoteScript $Context 'xray-apply-config.sh' @{CONFIG_JSON=$configJson;PRIMARY_PORT=[string]$Context.Plan.Ports.XrayPrimary;BACKUP_PORT=[string]$Context.Plan.Ports.XrayBackup;TARGET=[string]$target.TargetAddress} -TimeoutSeconds 600 -SensitiveOutput
-            if(-not $Context.State.Contains('BackupDirectories')){$Context.State.BackupDirectories=@{}}
-            $Context.State.BackupDirectories.Xray=Get-VpsMarkerValue $apply.StdOut BACKUP_DIR -Required
+            # Binary-only upgrade: preserve all existing users, routing and dialer fields.
         }elseif($role -in @('AnyTlsEntry','ShadowsocksLanding')){
             $asset=$Context.Versions.sing_box.assets.$arch; $script=if($role -eq 'AnyTlsEntry'){'sing-box-anytls-install.sh'}else{'sing-box-install.sh'}
             $params=@{VERSION=[string]$Context.Versions.sing_box.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256}
@@ -691,17 +845,6 @@ function Invoke-MxhControlledUpgrade {
             Invoke-VpsRemoteScript $Context $script $params -TimeoutSeconds 1200|Out-Null
             if($role -eq 'AnyTlsEntry'){$Context.Plan.AnyTls.SingBoxVersion=[string]$Context.Versions.sing_box.version}
             else{$Context.Plan.Shadowsocks.SingBoxVersion=[string]$Context.Versions.sing_box.version}
-        }elseif($role -eq 'KomariAgent'){
-            $asset=$Context.Versions.komari_agent.assets.$arch
-            $r=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='AgentUpgrade';VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200
-            if($r.StdOut -notmatch 'VPSDEPLOY_KOMARI_LIFECYCLE_OK'){throw 'Komari Agent 升级未确认。'}
-        }else{
-            $asset=$Context.Versions.komari_controller.assets.$arch
-            $backupResult=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerBackup'} -TimeoutSeconds 600;$remoteBackup=Get-VpsMarkerValue $backupResult.StdOut KOMARI_BACKUP -Required
-            $backupDirectory=Join-Path $Context.ArchivePath 'komari-backups';[IO.Directory]::CreateDirectory($backupDirectory)|Out-Null;$localBackup=Join-Path $backupDirectory (Split-Path -Leaf $remoteBackup);Invoke-VpsScpDownload $Context $remoteBackup $localBackup
-            $r=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerUpgrade';VERSION=[string]$Context.Versions.komari_controller.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200
-            if($r.StdOut -notmatch 'VPSDEPLOY_KOMARI_LIFECYCLE_OK'){throw 'Komari Controller 升级未确认。'}
-            Write-VpsUi "Controller 升级前完整备份已下载：$localBackup" Success
         }
         if($role -notin @('KomariAgent','KomariController')){
             $stateResult=Invoke-VpsRemoteScript $Context 'protocol-lifecycle-apply-state.sh' @{
@@ -712,21 +855,27 @@ function Invoke-MxhControlledUpgrade {
             } -TimeoutSeconds 300
             if($stateResult.StdOut -notmatch 'VPSDEPLOY_PROTOCOL_STATE_APPLIED'){throw '升级后原服务启停状态恢复未确认。'}
         }
+        $protocolValidations=@()
         if($role -eq 'RealityEntry'){
             $clientModule=& (Join-Path $Context.ProjectRoot 'modules\90-ClientExport.ps1')
             & $clientModule.Invoke $Context
-            Invoke-MxhRealClientValidation -Context $Context -Protocol Reality|Out-Null
+            $protocolValidations+=Invoke-MxhRealClientValidation -Context $Context -Protocol Reality
         }elseif($role -eq 'AnyTlsEntry'){
             $clientModule=& (Join-Path $Context.ProjectRoot 'modules\91-AnyTlsClientExport.ps1')
             & $clientModule.Invoke $Context
-            Invoke-MxhRealClientValidation -Context $Context -Protocol AnyTLS|Out-Null
+            $protocolValidations+=Invoke-MxhRealClientValidation -Context $Context -Protocol AnyTLS
         }elseif($role -eq 'ShadowsocksLanding'){
-            Invoke-MxhShadowsocksRealValidation -Context $Context|Out-Null
-            Invoke-MxhShadowsocksExternalValidation -Context $Context|Out-Null
+            $protocolValidations+=Invoke-MxhShadowsocksRealValidation -Context $Context
+            $protocolValidations+=Invoke-MxhShadowsocksExternalValidation -Context $Context
         }
-        $report=Get-MxhHealthAudit $Context;if($report.Status -eq 'Critical'){throw '升级后健康审计出现严重项。'}
-        Complete-MxhMaintenanceTransaction $Context;$Context.State.LastControlledUpgrade=[ordered]@{Component=$role;At=(Get-Date).ToString('o');Catalog='versions.json'};Save-MxhMaintenanceContext $Context
-        Write-VpsUi '固定资产校验、安装、配置检查、服务复验和真实协议验收均已完成。' Success
+        $report=Get-MxhHealthAudit $Context -IgnoreActiveRollbackTimer;if($report.Status -eq 'Critical'){throw '升级后健康审计出现严重项。'}
+        $validationStatus=if($protocolValidations.Count -gt 0 -and -not @($protocolValidations|Where-Object Status -ne 'Passed').Count){'Passed'}else{'Incomplete'}
+        Complete-MxhMaintenanceTransaction $Context;$Context.State.LastControlledUpgrade=[ordered]@{Component=$role;At=(Get-Date).ToString('o');Catalog='versions.json';ValidationStatus=$validationStatus};Save-MxhMaintenanceContext $Context
+        if($validationStatus -eq 'Passed'){
+            Write-VpsUi '固定资产校验、安装、配置检查、服务复验和真实协议验收均已完成。' Success
+        }else{
+            Write-VpsUi '更新已完成，但部分协议验收未通过完整执行；跳过项已记入私有记录，不计为验收通过。' Warning
+        }
     }catch{Undo-MxhMaintenanceTransaction $Context $_.Exception.Message;throw}
     return
     } catch { if (Test-VpsWizardBackError $_) { continue }; throw }
@@ -740,6 +889,30 @@ function Invoke-MxhClientCandidateMerge {
     $instanceRoot=Split-Path -Parent $providerDirectory
     Write-VpsUi "将打开独立客户端配置设计器；当前实例可从受管计划列表提取：$($Context.Plan.NodeName)" Info
     Invoke-MxhClientAuthorityDesigner -ProjectRoot $Context.ProjectRoot -InstanceRoot $instanceRoot -DryRun:$Context.DryRun
+}
+
+function Get-MxhKomariBackupComponents {
+    param([Parameter(Mandatory)][string]$Path)
+    Add-Type -AssemblyName System.Formats.Tar
+    $stream=[IO.File]::OpenRead($Path)
+    $gzip=[IO.Compression.GZipStream]::new($stream,[IO.Compression.CompressionMode]::Decompress)
+    $reader=[System.Formats.Tar.TarReader]::new($gzip,$true)
+    $tunnelNames=@('etc/systemd/system/cloudflared.service','usr/local/bin/cloudflared','usr/bin/cloudflared')
+    $found=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    try{
+        while($null -ne ($entry=$reader.GetNextEntry())){
+            $name=$entry.Name
+            while($name.StartsWith('./',[StringComparison]::Ordinal)){$name=$name.Substring(2)}
+            if($name -in $tunnelNames){$found.Add($name)|Out-Null}
+        }
+    }finally{$reader.Dispose();$gzip.Dispose();$stream.Dispose()}
+    if($found.Count -gt 0){
+        if(-not $found.Contains($tunnelNames[0]) -or (-not $found.Contains($tunnelNames[1]) -and -not $found.Contains($tunnelNames[2]))){
+            throw '备份中的隧道文件不完整，已停止恢复；请选择同时包含隧道服务和程序的备份。'
+        }
+        return @('KomariController','Cloudflared')
+    }
+    return @('KomariController')
 }
 
 function Invoke-MxhKomariLifecycle {
@@ -771,51 +944,49 @@ Controller 升级会停服务创建完整数据备份与一致性事务快照；
         Write-VpsUi '确认短语不匹配，未卸载。' Warning
         continue
     }
-    if($choice -eq 8){Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerPreflight'} -TimeoutSeconds 60|Out-Null}
-    if($choice -in @(2,3,4,7,8,9)){Start-MxhMaintenanceTransaction $Context 'KomariLifecycle' -QuiesceKomariController:($choice -in @(8,9))|Out-Null}
+    if($choice -in @(3,8)){Invoke-MxhKomariUpgrade $Context $(if($choice -eq 3){'KomariAgent'}else{'KomariController'});return}
+    if($choice -eq 6){
+        $file=Read-VpsText 'Controller 备份 tar.gz 完整路径' -AllowBack -Validate{param($v)Test-VpsExistingInputPath -Value $v -PathType Leaf} -ValidationMessage '找不到备份文件，或路径混用了 / 与 \。'
+        $file=ConvertTo-VpsInputPath -Value $file
+        if((Split-Path -Leaf $file) -notmatch '^komari-controller-\d{8}-\d{6}\.tar\.gz$'){throw '请选择本工具生成的 komari-controller-日期-时间.tar.gz 备份。'}
+        $backupHash=Get-MxhFileFingerprint $file
+        $restoreComponents=@(Get-MxhKomariBackupComponents -Path $file)
+        Write-VpsUi $(if('Cloudflared' -in $restoreComponents){'恢复范围：主控及备份内的隧道文件；恢复期间隧道可能短暂中断。'}else{'恢复范围：仅主控；当前隧道文件及运行状态保持不变。'}) Info
+        $activate=Read-VpsYesNo '恢复后启用 Controller？（同机验证可选否）' $false -AllowBack
+        if((Get-MxhFileFingerprint $file) -ne $backupHash){throw '备份在读取或确认期间发生变化，已停止恢复；请重新选择备份。'}
+        $remote='/root/'+(Split-Path -Leaf $file)
+        Invoke-VpsScpUpload $Context $file $remote
+    }
+    if($choice -in @(2,4,6,7,9)){
+        $components=if($choice -in @(2,4)){@('KomariAgent')}elseif($choice -eq 7){@('Cloudflared')}elseif($choice -eq 6){$restoreComponents}else{@('KomariController','Cloudflared')}
+        Start-MxhMaintenanceTransaction $Context 'KomariLifecycle' -Components $components -QuiesceKomariController:($choice -in @(6,9))|Out-Null
+    }
     try{
         if($choice -eq 2){
             try{$arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture);$asset=$Context.Versions.komari_agent.assets.$arch
                 $r=Invoke-VpsRemoteScript $Context 'komari-agent.sh' @{ENDPOINT=$endpoint;TOKEN=$token;NODE_NAME=[string]$Context.Plan.NodeName;VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200 -SensitiveOutput
             }finally{$token=$null};$Context.Plan.Komari.Endpoint=$endpoint;$Context.Plan.Komari.Enabled=$true;$Context.Plan.Komari.AgentVersion=[string]$Context.Versions.komari_agent.version;$Context.State.KomariInstalled=$true
-        }elseif($choice -eq 3){
-            $arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture);$asset=$Context.Versions.komari_agent.assets.$arch
-            Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='AgentUpgrade';VERSION=[string]$Context.Versions.komari_agent.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256} -TimeoutSeconds 1200|Out-Null
-            $Context.Plan.Komari.AgentVersion=[string]$Context.Versions.komari_agent.version
-        }elseif($choice -eq 4){Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='AgentUninstall'}|Out-Null;$Context.Plan.Komari.Enabled=$false;$Context.State.KomariInstalled=$false
+        }elseif($choice -eq 4){Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='AgentUninstall'}|Out-Null;$Context.Plan.Komari.Enabled=$false;$Context.State.KomariInstalled=$false;$Context.Plan.Komari.Remove('AgentVersion')|Out-Null
         }elseif($choice -eq 5){
             $r=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerBackup'} -TimeoutSeconds 600;$remote=Get-VpsMarkerValue $r.StdOut KOMARI_BACKUP -Required
             $dir=Join-Path $Context.ArchivePath 'komari-backups';[IO.Directory]::CreateDirectory($dir)|Out-Null;$local=Join-Path $dir (Split-Path -Leaf $remote);Invoke-VpsScpDownload $Context $remote $local;Write-VpsUi "Controller 备份已下载：$local" Success;return
         }elseif($choice -eq 6){
-            $file=Read-VpsText 'Controller 备份 tar.gz 完整路径' -AllowBack -Validate{param($v)Test-VpsExistingInputPath -Value $v -PathType Leaf} -ValidationMessage '找不到备份文件，或路径混用了 / 与 \。';$activate=Read-VpsYesNo '恢复后启用 Controller？（同机验证可选否）' $false -AllowBack
-            $file=ConvertTo-VpsInputPath -Value $file;$remote='/root/'+(Split-Path -Leaf $file);Invoke-VpsScpUpload $Context $file $remote
-            Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerRestore';BACKUP_FILE=$remote;FINAL_ACTIVE=$activate.ToString().ToLowerInvariant()} -TimeoutSeconds 600|Out-Null;Write-VpsUi 'Controller 数据已恢复并在回环地址完成启动验证；最终启停状态按选择应用，Tunnel 未自动启动。' Success;return
+            $restore=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerRestore';BACKUP_FILE=$remote;BACKUP_SHA256=$backupHash;FINAL_ACTIVE=$activate.ToString().ToLowerInvariant()} -TimeoutSeconds 600
+            if($restore.StdOut -notmatch 'VPSDEPLOY_KOMARI_LIFECYCLE_OK'){throw 'Controller 恢复未确认。'}
+            $Context.Plan.Komari.ControllerVersion=Get-VpsMarkerValue $restore.StdOut KOMARI_RESTORED_VERSION -Required
+            Write-VpsUi '数据已隔离还原，服务已完成启动检查；隧道仅在备份包含时还原，否则保留现状。浏览器登录与历史数据仍需确认。' Success
         }elseif($choice -eq 7){
             try{Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='TunnelRotate';TUNNEL_TOKEN=$token} -TimeoutSeconds 300 -SensitiveOutput|Out-Null}finally{$token=$null}
-        }elseif($choice -eq 8){
-            $arch=Get-VpsSupportedAssetArchitecture -Architecture ([string]$Context.State.Audit.Architecture);$asset=$Context.Versions.komari_controller.assets.$arch
-            $backupResult=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerBackup'} -TimeoutSeconds 600;$remoteBackup=Get-VpsMarkerValue $backupResult.StdOut KOMARI_BACKUP -Required
-            $backupDirectory=Join-Path $Context.ArchivePath 'komari-backups';[IO.Directory]::CreateDirectory($backupDirectory)|Out-Null;$localBackup=Join-Path $backupDirectory (Split-Path -Leaf $remoteBackup);Invoke-VpsScpDownload $Context $remoteBackup $localBackup
-            $upgradeResult=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerUpgrade';VERSION=[string]$Context.Versions.komari_controller.version;ASSET_NAME=[string]$asset.name;SHA256=[string]$asset.sha256;BACKUP_FILE=$remoteBackup} -TimeoutSeconds 1200
-            $migration=Get-VpsMarkerValue $upgradeResult.StdOut KOMARI_MIGRATION_REQUIRED -Required
-            while($migration -eq 'true'){
-                Write-VpsUi 'Komari 需要管理员在面板的 /admin/database-migration 完成数据迁移。20 分钟远端回滚保护仍有效；超时或取消会恢复升级前数据。' Warning
-                $migrationChoice=Read-VpsMenu '等待面板数据库迁移' @('已在面板完成，重新检查','取消升级并回滚') 1 -AllowBack -HelpText '不会替你执行数据库迁移或删除历史数据。迁移耗时超过保护窗口时请取消，另行安排完整备份下的维护窗口。'
-                if($migrationChoice -eq 2){throw '用户取消 Komari 数据库迁移，恢复升级前状态。'}
-                $verification=Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerVerify';VERSION=[string]$Context.Versions.komari_controller.version} -TimeoutSeconds 120
-                $migration=Get-VpsMarkerValue $verification.StdOut KOMARI_MIGRATION_REQUIRED -Required
-            }
-            if($migration -eq 'deferred'){Write-VpsUi 'Controller 原先未运行，本次只校验并更新程序；数据库迁移将在下次启动后人工完成。' Warning}
-            elseif($migration -ne 'false'){throw '无法确认 Komari 数据库迁移状态，未提交。'}
-            $Context.Plan.Komari.ControllerVersion=[string]$Context.Versions.komari_controller.version
-            $audit=Get-MxhHealthAudit $Context;if($audit.Status -eq 'Critical'){throw 'Komari Controller 升级后健康审计出现严重项。'}
-            Write-VpsUi "升级前完整备份已下载：$localBackup" Success
         }else{
             Invoke-VpsRemoteScript $Context 'maintenance-komari.sh' @{ACTION='ControllerUninstall'} -TimeoutSeconds 300|Out-Null
+            $Context.Plan.Komari.Remove('ControllerVersion')|Out-Null
         }
-        if($choice -in @(2,3,4,7,8,9)){Complete-MxhMaintenanceTransaction $Context;Save-MxhMaintenanceContext $Context}
+        if($choice -in @(2,4,6,7,9)){
+            Update-MxhKomariServiceState $Context
+            Complete-MxhMaintenanceTransaction $Context;Save-MxhMaintenanceContext $Context
+        }
         Write-VpsUi 'Komari 生命周期操作已提交。' Success
-    }catch{if($choice -in @(2,3,4,7,8,9)){Undo-MxhMaintenanceTransaction $Context $_.Exception.Message};throw}
+    }catch{if($choice -in @(2,4,6,7,9)){Undo-MxhMaintenanceTransaction $Context $_.Exception.Message};throw}
     return
     } catch { if (Test-VpsWizardBackError $_) { continue }; throw }
     }
@@ -851,12 +1022,14 @@ function Invoke-MxhDecommission {
         Protect-VpsPrivateFile $clashCandidate;Protect-VpsPrivateFile (Join-Path $out 'sing-box-general.candidate.json')
         Write-VpsUi "已先生成客户端节点删除候选：$out" Success
     }
-    $transaction=Start-MxhMaintenanceTransaction $Context 'DecommissionFinal'
+    $components=@('Protocols','Network','Firewall','KomariAgent')
+    if($removeController){$components+=@('KomariController','Cloudflared')}
+    $transaction=Start-MxhMaintenanceTransaction $Context 'DecommissionFinal' -Components $components -QuiesceKomariController:$removeController
     $agentWasInstalled=$Context.State.Contains('KomariInstalled') -and [bool]$Context.State.KomariInstalled
-    $backupDir=Join-Path $Context.ArchivePath 'decommission-backup';[IO.Directory]::CreateDirectory($backupDir)|Out-Null
-    Invoke-VpsScpDownload $Context ($transaction.RemoteBackup+'/protocol-files.tar.gz') (Join-Path $backupDir ((Get-Date -Format yyyyMMdd-HHmmss)+'-managed-files.tar.gz'))
     $decommissionCommitted=$false
     try{
+        $backupDir=Join-Path $Context.ArchivePath 'decommission-backup';[IO.Directory]::CreateDirectory($backupDir)|Out-Null
+        Invoke-VpsScpDownload $Context ($transaction.RemoteBackup+'/protocol-files.tar.gz') (Join-Path $backupDir ((Get-Date -Format yyyyMMdd-HHmmss)+'-managed-files.tar.gz'))
         $r=Invoke-VpsRemoteScript $Context 'maintenance-decommission.sh' @{SCOPE=$scope;REMOVE_CONTROLLER=$removeController.ToString().ToLowerInvariant()} -TimeoutSeconds 300
         if($r.StdOut -notmatch 'VPSDEPLOY_DECOMMISSION_OK'){throw '退役动作未确认。'}
         foreach($role in Get-MxhManagedProtocolRoles){$Context.Plan.ProtocolInventory[$role].Enabled=$false;$Context.Plan.ProtocolInventory[$role].Active=$false;if($scope -eq 'RemoveManaged'){$Context.Plan.ProtocolInventory[$role].Installed=$false}}

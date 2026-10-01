@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,6 +102,11 @@ systemctl() {
         (self.backup / 'rollback-executed').touch()
         self.assertNotEqual(self.run_script('maintenance-transaction-commit.sh').returncode, 0)
 
+    def test_commit_after_deadline_is_refused(self):
+        (self.backup/'deadline-epoch').write_text(str(int(time.time())-30))
+        self.assertNotEqual(self.run_script('maintenance-transaction-commit.sh').returncode,0)
+        self.assertTrue(self.owner.exists())
+
     def test_running_rollback_blocks_commit(self):
         result = self.run_script('maintenance-transaction-commit.sh', active='mxh-protocol-migration-rollback.service')
         self.assertNotEqual(result.returncode, 0)
@@ -131,6 +137,26 @@ systemctl() {
         result = self.run_script('maintenance-transaction-status.sh', action='ReleaseUnarmed', active='mxh-ssh-maintenance-rollback.timer')
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(self.owner.exists())
+
+    def mutation(self, *, expired=False, changed_owner=False):
+        source=(ROOT/'assets/remote/maintenance-mutation-guard.sh').read_text()
+        source=source.replace('/var/lib/mxh-vps-deploy',shell_path(self.state)).replace('/root/vps-deploy-backups',shell_path(self.root/'backups'))
+        (self.backup/'deadline-epoch').write_text(str(int(time.time())+(-30 if expired else 300)))
+        if changed_owner:
+            self.owner.write_text('different-owner')
+        env=dict(os.environ,VPS_PARAM_EXPECTED_TRANSACTION=shell_path(self.backup))
+        return subprocess.run([BASH,'--noprofile','--norc','-s'],input='flock(){ return 0; }\n'+source+'\nvps_begin_mutation || exit 1\nprintf WRITE_ALLOWED\\n\n',text=True,capture_output=True,timeout=10,env=env)
+
+    def test_expired_write_is_refused_before_mutation(self):
+        result=self.mutation(expired=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('WRITE_ALLOWED',result.stdout)
+
+    def test_changed_owner_is_refused_before_mutation(self):
+        self.assertNotEqual(self.mutation(changed_owner=True).returncode,0)
+
+    def test_current_transaction_allows_write(self):
+        self.assertEqual(self.mutation().returncode,0)
 
 
 class MaintenanceRuntimeTests(unittest.TestCase):
@@ -182,6 +208,7 @@ systemctl() {
                       VPS_PARAM_SHADOWSOCKS_ENABLED='false', VPS_PARAM_RESTART_ROLE='AnyTlsEntry')
         result, calls = self.run_isolated('protocol-lifecycle-apply-state.sh', preamble, params)
         self.assertEqual(result.returncode, 0, result.stderr)
+
         self.assertIn('restart sing-box-anytls.service', calls)
         self.assertNotIn('restart xray.service', calls)
         result, _ = self.run_isolated('protocol-lifecycle-apply-state.sh', preamble, params, matching_process=False)
@@ -191,6 +218,12 @@ systemctl() {
         result, calls = self.run_isolated('protocol-lifecycle-apply-state.sh', preamble, params)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('restart ', calls)
+
+    def test_rotation_rejects_external_config_change_before_restart(self):
+        result,calls=self.run_isolated('maintenance-protocol-config-apply.sh','systemctl(){ echo "$*" >> "$CALLS"; }\n',
+            {'VPS_PARAM_ROLE':'AnyTlsEntry','VPS_PARAM_CONFIG_JSON':'{}','VPS_PARAM_EXPECTED_CONFIG_SHA256':'0'*64,'VPS_PARAM_WAS_ACTIVE':'true'})
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('restart ',calls)
 
     def test_config_restore_checks_nginx_before_reload(self):
         preamble = '''

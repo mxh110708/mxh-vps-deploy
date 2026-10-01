@@ -36,15 +36,15 @@
     }
   },
   "sing_box": {
-    "version": "1.14.0",
+    "version": "1.14.2",
     "assets": {
       "amd64": {
-        "name": "sing-box-1.14.0-linux-amd64.tar.gz",
-        "sha256": "2375de6999f4f56ab46b4fc5ddf26a6aba1d3e61a0f4e7ddec2f4690457d5f63"
+        "name": "sing-box-1.14.2-linux-amd64.tar.gz",
+        "sha256": "a684484d7477d1437282ee411f4d131d0340aaad60a7868841ebd5d87dd8a0c6"
       },
       "arm64": {
-        "name": "sing-box-1.14.0-linux-arm64.tar.gz",
-        "sha256": "04d9b40bc98dc55b6f509ce3292145c65478f65866bea64826ebb2f382385088"
+        "name": "sing-box-1.14.2-linux-arm64.tar.gz",
+        "sha256": "b43a1fb1bda131c6653576741ce527eb2bdeab7c9308ca90ee8b972abb7e4a7f"
       },
       "windows_amd64": {
         "version": "1.14.2",
@@ -54,15 +54,15 @@
     }
   },
   "mihomo": {
-    "version": "1.19.30",
+    "version": "1.19.32",
     "assets": {
       "amd64": {
-        "name": "mihomo-linux-amd64-v1.19.30.gz",
-        "sha256": "cf06ce2c7d1421bdbda14ee4a5b6046672dc35ebf8eecd8e77504ec3c0ed9a84"
+        "name": "mihomo-linux-amd64-v1.19.32.gz",
+        "sha256": "8451100836c9eda194331c2babfad490b2faf30cebc1a04b0e76fd8ac2d35d10"
       },
       "windows_amd64": {
-        "name": "mihomo-windows-amd64-v1.19.30.zip",
-        "sha256": "22c09fd67673895ef7cd6b1820563918275c3d316f2462b306208675118db3c0"
+        "name": "mihomo-windows-amd64-v1.19.32.zip",
+        "sha256": "1ac84e795b5b915446e20139677fb6cc013a0778e876e8d4c96f994750b4c4a3"
       }
     }
   },

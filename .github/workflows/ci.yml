@@ -43,14 +43,22 @@ jobs:
           done
           python3 tests/test_remote_transactions.py --bash /bin/bash
           python3 tests/test_komari_lifecycle.py --bash /bin/bash
+          python3 tests/test_health_audit.py
+          python3 tests/test_scoped_rollback.py --bash /bin/bash
+          python3 tests/test_import_contracts.py --bash /bin/bash
+          python3 tests/test_linux_core_upgrade.py
 
   powershell:
+    name: Windows client and PowerShell checks (Python ${{ matrix.python }})
     runs-on: windows-latest
+    strategy:
+      matrix:
+        python: ['3.9', '3.13']
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.13'
+          python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: requirements-client-merge.txt
       - name: Install pinned client-config dependency

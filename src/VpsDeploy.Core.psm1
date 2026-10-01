@@ -102,7 +102,8 @@ function Test-VpsClientCoreExecutable {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateSet('mihomo', 'sing-box')][string]$Core,
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$Path,
+        [string]$ExpectedVersion
     )
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "测试核心不存在：$Path" }
     $arguments = if ($Core -eq 'mihomo') { @('-v') } else { @('version') }
@@ -112,14 +113,31 @@ function Test-VpsClientCoreExecutable {
     if ($versionText -notmatch [regex]::Escape($(if ($Core -eq 'mihomo') { 'Mihomo' } else { 'sing-box' }))) {
         throw "$Core 测试核心返回了无法识别的版本信息。"
     }
+    if ($ExpectedVersion -and $versionText -notmatch ('(?im)^(?:Mihomo (?:Meta )?v?|sing-box version )'+[regex]::Escape($ExpectedVersion)+'(?:\s|$)')) {
+        throw "$Core 可执行文件版本与固定目录不一致。"
+    }
     return $versionText
+}
+
+function Get-VpsArchiveExecutableMetadata {
+    param([Parameter(Mandatory)][string]$Archive,[ValidateSet('mihomo','sing-box')][string]$Core)
+    $zip=[IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        $entries=@($zip.Entries | Where-Object {if($Core -eq 'mihomo'){$_.Name -like 'mihomo*.exe'}else{$_.Name -eq 'sing-box.exe'}})
+        if($entries.Count -ne 1 -or $entries[0].FullName -notmatch '^([A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+\.exe$'){throw '核心压缩包的可执行文件布局无效。'}
+        $stream=$entries[0].Open()
+        try {$hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant()}
+        finally {$stream.Dispose()}
+        return @{RelativePath=$entries[0].FullName;Sha256=$hash}
+    }finally {$zip.Dispose()}
 }
 
 function Get-VpsBundledClientCore {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ProjectRoot,
-        [Parameter(Mandatory)][ValidateSet('mihomo', 'sing-box')][string]$Core
+        [Parameter(Mandatory)][ValidateSet('mihomo', 'sing-box')][string]$Core,
+        [switch]$ForceRebuild
     )
     if (-not $IsWindows -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) {
         throw '项目内置测试核心仅支持 Windows amd64 控制端。'
@@ -145,21 +163,28 @@ function Get-VpsBundledClientCore {
     $expected = ([string]$asset.sha256).ToLowerInvariant()
     if ($actual -ne $expected) { throw "$Core 内置测试核心 SHA-256 不匹配。" }
 
-    $cacheRoot = Join-Path $ProjectRoot (".cache\client-cores\$Core-$clientVersion-windows-amd64")
+    $metadata=Get-VpsArchiveExecutableMetadata -Archive $archive -Core $Core
+    $cacheParent=[IO.Path]::GetFullPath((Join-Path $ProjectRoot '.cache/client-cores'))
+    $cacheRoot = [IO.Path]::GetFullPath((Join-Path $cacheParent "$Core-$clientVersion-windows-amd64"))
+    if(-not $cacheRoot.StartsWith($cacheParent+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '核心缓存路径越界。'}
     $hashMarker = Join-Path $cacheRoot '.archive-sha256'
-    $executableName = if ($Core -eq 'mihomo') { 'mihomo*.exe' } else { 'sing-box.exe' }
-    $cached = @(Get-ChildItem -LiteralPath $cacheRoot -Recurse -File -Filter $executableName -ErrorAction SilentlyContinue | Select-Object -First 1)
-    $markerValue = if (Test-Path -LiteralPath $hashMarker -PathType Leaf) { (Get-Content -Raw -LiteralPath $hashMarker).Trim() } else { '' }
-    if (-not $cached.Count -or $markerValue -ne $expected) {
-        if (Test-Path -LiteralPath $cacheRoot) { Remove-Item -LiteralPath $cacheRoot -Recurse -Force }
-        [IO.Directory]::CreateDirectory($cacheRoot) | Out-Null
-        Expand-Archive -LiteralPath $archive -DestinationPath $cacheRoot -Force
-        $cached = @(Get-ChildItem -LiteralPath $cacheRoot -Recurse -File -Filter $executableName | Select-Object -First 1)
-        if (-not $cached.Count) { throw "$Core 压缩包中没有预期的可执行文件。" }
-        [IO.File]::WriteAllText($hashMarker, $expected + "`n", [Text.UTF8Encoding]::new($false))
-    }
-    Test-VpsClientCoreExecutable -Core $Core -Path $cached[0].FullName | Out-Null
-    return $cached[0].FullName
+    $cached=Join-Path $cacheRoot $metadata.RelativePath
+    [IO.Directory]::CreateDirectory($cacheParent)|Out-Null
+    $lock=[IO.File]::Open($cacheRoot+'.lock','OpenOrCreate','ReadWrite','None')
+    try {
+        if((Test-Path -LiteralPath $cacheRoot) -and ((Get-Item -LiteralPath $cacheRoot).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw '拒绝使用重解析点作为核心缓存目录。'}
+        $markerValue = if (Test-Path -LiteralPath $hashMarker -PathType Leaf) { (Get-Content -Raw -LiteralPath $hashMarker).Trim() } else { '' }
+        $cachedHash=if(Test-Path -LiteralPath $cached -PathType Leaf){(Get-FileHash -LiteralPath $cached -Algorithm SHA256).Hash.ToLowerInvariant()}else{''}
+        if ($ForceRebuild -or $cachedHash -ne $metadata.Sha256 -or $markerValue -ne $expected) {
+            if (Test-Path -LiteralPath $cacheRoot) { Remove-Item -LiteralPath $cacheRoot -Recurse -Force }
+            [IO.Directory]::CreateDirectory($cacheRoot) | Out-Null
+            Expand-Archive -LiteralPath $archive -DestinationPath $cacheRoot -Force
+            if((Get-FileHash -LiteralPath $cached -Algorithm SHA256).Hash.ToLowerInvariant() -ne $metadata.Sha256){throw '解压后的核心文件 SHA-256 不匹配。'}
+            [IO.File]::WriteAllText($hashMarker, $expected + "`n", [Text.UTF8Encoding]::new($false))
+        }
+        Test-VpsClientCoreExecutable -Core $Core -Path $cached -ExpectedVersion $clientVersion | Out-Null
+        return $cached
+    }finally {$lock.Dispose()}
 }
 
 function Copy-VpsBundledMihomoGeodata {
@@ -203,9 +228,10 @@ function Resolve-VpsClientValidationCore {
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)][ValidateSet('mihomo', 'sing-box')][string]$Core
     )
+    $forceRebuild=$false
     while ($true) {
         try {
-            $path = Get-VpsBundledClientCore -ProjectRoot $Context.ProjectRoot -Core $Core
+            $path = Get-VpsBundledClientCore -ProjectRoot $Context.ProjectRoot -Core $Core -ForceRebuild:$forceRebuild
             return [ordered]@{ Core = $Core; Status = 'Ready'; Path = $path; Source = 'BundledVerified'; ResolvedAt = (Get-Date).ToString('o') }
         }
         catch {
@@ -217,14 +243,15 @@ function Resolve-VpsClientValidationCore {
                 '手动选择该核心的可执行文件',
                 '明确跳过该核心验收（记录为 SkippedByUser，不算通过）'
             ) 1 -AllowBack
-            if ($choice -eq 1) { continue }
+            if ($choice -eq 1) { $forceRebuild=$true; continue }
             if ($choice -eq 2) {
                 $manual = Read-VpsText "$Core 可执行文件路径" -AllowBack -Validate {
                     param($value) Test-VpsExistingInputPath -Value $value -PathType Leaf
                 } -ValidationMessage '找不到文件；路径可全用 / 或全用 \，但不能混用。'
                 $manual = (Resolve-Path -LiteralPath (ConvertTo-VpsInputPath -Value $manual)).Path
-                Test-VpsClientCoreExecutable -Core $Core -Path $manual | Out-Null
-                return [ordered]@{ Core = $Core; Status = 'Ready'; Path = $manual; Source = 'Manual'; ResolvedAt = (Get-Date).ToString('o') }
+                $versionText=Test-VpsClientCoreExecutable -Core $Core -Path $manual
+                Write-VpsUi '手动核心不属于固定资产校验结果；后续仍需执行配置和真实连接检查。' Warning
+                return [ordered]@{ Core = $Core; Status = 'Ready'; Path = $manual; Source = 'Manual'; VersionText=$versionText; ResolvedAt = (Get-Date).ToString('o') }
             }
             $confirmation = Read-VpsText "输入 SKIP-$($Core.ToUpperInvariant()) 确认跳过" -AllowBack
             if ($confirmation -cne "SKIP-$($Core.ToUpperInvariant())") { Write-VpsUi '确认短语不匹配，未跳过。' Warning; continue }
@@ -2405,7 +2432,8 @@ function New-VpsRemoteScriptPayload {
         $exportLine = 'export VPS_PARAM_' + $name + '="$(printf ''%s'' ''' + $encoded + ''' | base64 -d)"'
         [void]$preamble.Append($exportLine + "`n")
     }
-    return "(`n" + $preamble.ToString() + (Get-VpsRemoteAsset -Context $Context -Name $Asset) + "`n)`n"
+    $guard=if($Parameters.Contains('EXPECTED_TRANSACTION')){(Get-VpsRemoteAsset -Context $Context -Name 'maintenance-mutation-guard.sh')+"`nvps_begin_mutation || exit 1`n"}else{''}
+    return "(`nset -euo pipefail`n" + $preamble.ToString() + $guard + (Get-VpsRemoteAsset -Context $Context -Name $Asset) + "`n)`n"
 }
 
 function Invoke-VpsRemoteScript {
@@ -2423,6 +2451,17 @@ function Invoke-VpsRemoteScript {
     )
 
     if (-not $Port) { $Port = [int]$Context.State.CurrentManagementPort }
+    $mutatingAssets=@('xray-install.sh','xray-apply-config.sh','sing-box-install.sh','sing-box-anytls-install.sh','sing-box-apply-config.sh',
+        'anytls-apply-config.sh','komari-agent.sh','maintenance-komari.sh','maintenance-protocol-config-apply.sh','maintenance-restore-apply.sh',
+        'protocol-lifecycle-apply-state.sh','protocol-lifecycle-uninstall.sh','nftables-apply.sh','network-tuning.sh',
+        'certbot-dns-setup.sh','local-https-target.sh','maintenance-decommission.sh')
+    $readOnlyKomari=$Asset -eq 'maintenance-komari.sh' -and $Parameters['ACTION'] -in @('Status','ControllerPreflight','ControllerVerify')
+    if($Asset -in $mutatingAssets -and -not $readOnlyKomari){
+        $expected=$null
+        if($Context.State.Contains('MaintenanceTransaction') -and -not $Context.State.MaintenanceTransaction.Committed){$expected=[string]$Context.State.MaintenanceTransaction.RemoteBackup}
+        elseif($Context.State.Contains('Migration') -and $Context.State.Migration.Contains('RollbackArmed') -and $Context.State.Migration.RollbackArmed){$expected=[string]$Context.State.Migration.RemoteBackupDirectory}
+        if($expected){$copy=@{};foreach($key in $Parameters.Keys){$copy[$key]=$Parameters[$key]};$copy.EXPECTED_TRANSACTION=$expected;$Parameters=$copy}
+    }
     $script = New-VpsRemoteScriptPayload -Context $Context -Asset $Asset -Parameters $Parameters
     if ([string]::IsNullOrWhiteSpace($ProgressActivity)) {
         $ProgressActivity = "远程步骤执行中：$Asset"
@@ -2829,8 +2868,10 @@ function New-MxhShadowsocksServerConfig {
         $ipv6Outbound = [ordered]@{
             type = 'direct'
             tag = 'direct-ipv6'
-            inet6_bind_address = [string]$Context.Plan.Shadowsocks.SecondaryIpv6Address
             domain_resolver = [ordered]@{ server = 'local'; strategy = 'ipv6_only' }
+        }
+        if ($Context.Plan.Shadowsocks.SecondaryIpv6Address) {
+            $ipv6Outbound.inet6_bind_address = [string]$Context.Plan.Shadowsocks.SecondaryIpv6Address
         }
         if ($Context.Plan.Shadowsocks.SecondaryBindInterface) {
             $ipv6Outbound.bind_interface = [string]$Context.Plan.Shadowsocks.SecondaryBindInterface

@@ -5,12 +5,14 @@ No real systemctl, network request, user account, database or VPS is used.
 import argparse
 import base64
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,21 +33,37 @@ python3(){
 }
 systemctl(){
   echo "$*" >> "$CALLS"
+  local service="${@: -1}" state_file="$TEST_ROOT/active" binary="$SERVICE_BINARY" pid=123
+  if [[ "$service" == cloudflared.service ]]; then
+    state_file="$TEST_ROOT/tunnel-active"; binary="$TEST_ROOT/usr/local/bin/cloudflared"; pid=234
+  fi
   case "$1" in
-    is-active) [[ "$(cat "$TEST_ROOT/active")" == true ]] ;;
-    is-enabled) [[ "$WAS_ENABLED" == true ]] ;;
-    stop) echo false > "$TEST_ROOT/active" ;;
+    cat) [[ "$service" != cloudflared.service || -f "$TEST_ROOT/etc/systemd/system/cloudflared.service" ]] ;;
+    is-active) [[ "$(cat "$state_file")" == true ]] ;;
+    is-enabled) if [[ "$service" == cloudflared.service ]]; then [[ "$TUNNEL_ENABLED" == true ]]; else [[ "$WAS_ENABLED" == true ]]; fi ;;
+    stop|disable)
+      if [[ "$1" == stop || "$*" == *--now* ]] && [[ "$SERVICE_STOP_STILL_ACTIVE" != true ]]; then echo false > "$state_file"; fi
+      return 0 ;;
     start|restart)
-      if [[ "$SERVICE_START_FAILS" == true ]]; then echo false > "$TEST_ROOT/active"; return 1; fi
-      echo true > "$TEST_ROOT/active"
-      [[ "$STALE_PID" == true ]] || ln -f "$SERVICE_BINARY" "$TEST_ROOT/proc/123/exe"
-      if [[ "$*" == *komari.service* ]] && grep -Fq 'new-upgrade' "$SERVICE_BINARY"; then
+      if [[ "$SERVICE_START_FAILS" == true ]]; then echo false > "$state_file"; return 1; fi
+      if [[ "$service" == cloudflared.service && "$TUNNEL_START_FAILS" == true && ! -e "$TEST_ROOT/tunnel-start-failed" ]]; then
+        touch "$TEST_ROOT/tunnel-start-failed"; echo false > "$state_file"; return 1
+      fi
+      echo true > "$state_file"
+      [[ "$STALE_PID" == true ]] || ln -f "$binary" "$TEST_ROOT/proc/$pid/exe"
+      if [[ "$VPS_PARAM_ACTION" == TunnelRotate ]]; then printf 'cloudflared\0tunnel\0--token\0%s\0' "$VPS_PARAM_TUNNEL_TOKEN" > "$TEST_ROOT/proc/$pid/cmdline"; fi
+      if [[ "$*" == *komari.service* ]] && grep -Fq 'new-upgrade' "$binary"; then
         echo migrated > "$TEST_ROOT/opt/komari/data/komari.db"
         echo new-metrics > "$TEST_ROOT/opt/komari/data/metrics.db"
       fi ;;
+    enable)
+      if [[ "$*" == *--now* ]]; then
+        echo true > "$state_file"
+        [[ "$STALE_PID" == true ]] || ln -f "$binary" "$TEST_ROOT/proc/$pid/exe"
+      fi ;;
     show)
-      if [[ "$*" == *ExecStart* ]]; then printf '{ path=%s ; argv[]=%s server %s ; }\n' "$SERVICE_BINARY" "$SERVICE_BINARY" "$EXTRA_DB_ARGUMENTS"
-      elif [[ "$*" == *MainPID* ]]; then echo 123
+      if [[ "$*" == *ExecStart* ]]; then printf '{ path=%s ; argv[]=%s server %s ; }\n' "$binary" "$binary" "$EXTRA_DB_ARGUMENTS"
+      elif [[ "$*" == *MainPID* ]]; then echo "$pid"
       else echo "$TEST_ROOT/opt/komari"; fi ;;
     *) return 0 ;;
   esac
@@ -88,21 +106,29 @@ curl(){
 class KomariLifecycleTests(unittest.TestCase):
     def run_case(self, action, *, active=True, enabled=True, migration_code='404', body='{}', home_code='200', bad_version=False,
                  extra_db_arguments='', version_code='200', version_body=None, binary_location='opt/komari/komari', stale_pid=False,
-                 bad_checksum=False, corrupt_install=False, service_start_fails=False):
+                 bad_checksum=False, corrupt_install=False, service_start_fails=False, unsafe_archive=False, service_stop_still_active=False,
+                 tunnel=False, include_tunnel=False, incomplete_tunnel=False, tunnel_active=True, tunnel_enabled=True,
+                 tunnel_start_fails=False, project_backup=False, final_active=True):
         with tempfile.TemporaryDirectory(prefix='komari-lifecycle-', dir=ROOT / '.tmp') as folder:
             root = Path(folder)
             script = (ROOT / 'assets/remote/maintenance-komari.sh').read_text(encoding='utf-8')
             for prefix in ('/usr/local', '/usr/bin', '/etc', '/var/lib', '/opt', '/root', '/proc'):
                 script = script.replace(prefix, shell_path(root) + prefix)
             script = script.replace('"/$p"', '"$TEST_ROOT/$p"')
-            for relative in ('opt/komari/data/plugin', 'opt/komari/data/plguin-data', 'opt/komari/data/theme', 'root/vps-deploy-backups', 'etc/komari-agent', 'usr/local/bin', 'proc/123', 'tmp'):
+            for relative in ('opt/komari/data/plugin', 'opt/komari/data/plguin-data', 'opt/komari/data/theme', 'root/vps-deploy-backups', 'etc/komari-agent', 'etc/systemd/system', 'usr/local/bin', 'proc/123', 'proc/234', 'tmp'):
                 (root / relative).mkdir(parents=True, exist_ok=True)
             (root / 'active').write_text(str(active).lower())
+            (root / 'tunnel-active').write_text(str(tunnel_active and (tunnel or action == 'TunnelRotate')).lower())
             (root / 'opt/komari/data/komari.db').write_text('old-db')
             (root / 'opt/komari/data/plugin/fixture').write_text('old-plugin')
-            old_binary = root / ('usr/local/bin/komari-agent' if action == 'AgentUpgrade' else binary_location)
+            old_binary = root / ('usr/local/bin/komari-agent' if action == 'AgentUpgrade' else 'usr/local/bin/cloudflared' if action=='TunnelRotate' else binary_location)
             old_binary.write_text('#!/usr/bin/env bash\necho "Komari Monitor 1.4.3"\n')
             old_binary.chmod(0o755)
+            tunnel_binary = root / 'usr/local/bin/cloudflared'
+            tunnel_unit = root / 'etc/systemd/system/cloudflared.service'
+            if tunnel:
+                tunnel_binary.write_text('archived-tunnel-binary'); tunnel_binary.chmod(0o755)
+                tunnel_unit.write_text('archived-tunnel-unit')
             token_config = root / 'etc/komari-agent/config.json'
             token_config.write_text('{"token":"fixture-token","disable_web_ssh":true}')
             before_token = token_config.read_bytes()
@@ -113,28 +139,68 @@ class KomariLifecycleTests(unittest.TestCase):
                 # of this fixture is a preflight bug, not a successful version check.
                 new_text = '#!/usr/bin/env bash\n# new-upgrade\necho "agent-binary-executed" >> "$CALLS"\necho "unsupported agent preflight invocation" >&2\nexit 64\n'
             new_binary = root / 'new-binary'
-            new_binary.write_text(new_text, newline='\n')
+            with new_binary.open('w', encoding='utf-8', newline='\n') as output:
+                output.write(new_text)
             backup = root / 'root/komari-controller-20260930-010101.tar.gz'
-            packed = subprocess.run([BASH, '-c', 'tar -czpf "$2" -C "$1" opt/komari usr/local/bin', '--', shell_path(root), shell_path(backup)], capture_output=True, text=True)
+            members = ['opt/komari']
+            if not old_binary.is_relative_to(root / 'opt/komari') and action != 'AgentUpgrade':
+                members.append(old_binary.relative_to(root).as_posix())
+            if include_tunnel:
+                members.append(tunnel_binary.relative_to(root).as_posix())
+                if not incomplete_tunnel:
+                    members.append(tunnel_unit.relative_to(root).as_posix())
+            packed = subprocess.run([BASH, '-c', 'root="$1"; archive="$2"; shift 2; tar -czpf "$archive" -C "$root" "$@"', '--', shell_path(root), shell_path(backup), *members], capture_output=True, text=True)
             self.assertEqual(packed.returncode, 0, packed.stderr)
+            if action=='ControllerRestore':
+                (root/'opt/komari/data/komari.db').write_text('new-db')
+                (root/'opt/komari/data/metrics.db').write_text('new-metrics')
+                if tunnel:
+                    tunnel_binary.write_text('current-tunnel-binary'); tunnel_unit.write_text('current-tunnel-unit')
+            if unsafe_archive:
+                with tarfile.open(backup,'w:gz') as archive:
+                    member=tarfile.TarInfo('../escape');member.size=1
+                    archive.addfile(member,io.BytesIO(b'x'))
             environment = dict(os.environ, TEST_ROOT=shell_path(root), TEST_NATIVE_ROOT=root.as_posix(), CALLS=shell_path(root / 'calls'),
                 TMPDIR=shell_path(root / 'tmp'), TEST_PYTHON=shell_path(sys.executable), WAS_ENABLED=str(enabled).lower(), MIGRATION_CODE=migration_code,
                 MIGRATION_BODY=body, HOME_CODE=home_code, EXTRA_DB_ARGUMENTS=extra_db_arguments, VERSION_CODE=version_code,
                 VERSION_BODY=version_body if version_body is not None else json.dumps({'data': {'version': version}}),
                 SERVICE_BINARY=shell_path(old_binary), STALE_PID=str(stale_pid).lower(), VPS_PARAM_ACTION=action, VPS_PARAM_VERSION=version,
                 CORRUPT_INSTALL=str(corrupt_install).lower(), SERVICE_START_FAILS=str(service_start_fails).lower(),
+                SERVICE_STOP_STILL_ACTIVE=str(service_stop_still_active).lower(),
+                TUNNEL_ENABLED=str(tunnel_enabled).lower(), TUNNEL_START_FAILS=str(tunnel_start_fails).lower(),
+                VPS_PARAM_FINAL_ACTIVE=str(final_active).lower(), VPS_PARAM_INCLUDE_TUNNEL='false',
+                VPS_PARAM_TUNNEL_TOKEN='fixture-rotated-token',PATH=shell_path(root/'usr/local/bin')+os.pathsep+os.environ['PATH'],
                 VPS_PARAM_ASSET_NAME='komari-agent-linux-amd64' if action == 'AgentUpgrade' else 'komari-linux-amd64',
                 VPS_PARAM_SHA256='0' * 64 if bad_checksum else hashlib.sha256(new_binary.read_bytes()).hexdigest(), VPS_PARAM_BACKUP_FILE=shell_path(backup))
             if action == 'ControllerVerify':
-                old_binary.write_text(new_text, newline='\n'); old_binary.chmod(0o755)
+                with old_binary.open('w', encoding='utf-8', newline='\n') as output:
+                    output.write(new_text)
+                old_binary.chmod(0o755)
             os.link(old_binary, root / 'proc/123/exe')
+            if tunnel_binary.exists():
+                os.link(tunnel_binary, root / 'proc/234/exe')
+            if project_backup:
+                (root/'opt/komari/data/komari.db').write_text('old-db')
+                (root/'opt/komari/data/metrics.db').unlink()
+                backup_env = dict(environment, VPS_PARAM_ACTION='ControllerBackup')
+                backup_result = subprocess.run([BASH, '--noprofile', '--norc', '-s'], input=PREAMBLE + script,
+                    capture_output=True, text=True, encoding='utf-8', timeout=20, env=backup_env)
+                self.assertEqual(backup_result.returncode, 0, backup_result.stderr)
+                marker = next(line for line in backup_result.stdout.splitlines() if line.startswith('VPSDEPLOY_KOMARI_BACKUP_B64='))
+                environment['VPS_PARAM_BACKUP_FILE'] = base64.b64decode(marker.split('=', 1)[1]).decode()
+                (root/'opt/komari/data/komari.db').write_text('new-db')
+                (root/'opt/komari/data/metrics.db').write_text('new-metrics')
             result = subprocess.run([BASH, '--noprofile', '--norc', '-s'], input=PREAMBLE + script,
                                     capture_output=True, text=True, encoding='utf-8', timeout=20, env=environment)
             calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
             current = (root / 'opt/komari/data/komari.db').read_text()
             result.binary_contents = old_binary.read_text()
-            result.service_active = (root / 'active').read_text().strip() == 'true'
+            result.service_active = (root / ('tunnel-active' if action == 'TunnelRotate' else 'active')).read_text().strip() == 'true'
+            result.tunnel_active = (root / 'tunnel-active').read_text().strip() == 'true'
+            result.tunnel_binary = tunnel_binary.read_text() if tunnel_binary.exists() else None
+            result.tunnel_unit = tunnel_unit.read_text() if tunnel_unit.exists() else None
             result.quarantined_metrics = len(list((root / 'root/vps-deploy-backups').glob('komari-failed-upgrade-*/**/metrics.db')))
+            result.restore_quarantine_metrics=len(list((root/'root/vps-deploy-backups').glob('komari-controller-restore-*/previous-data-*/**/metrics.db')))
             return result, calls, current, (root / 'opt/komari/data/metrics.db').exists(), before_token == token_config.read_bytes()
 
     def marker(self, output):
@@ -145,6 +211,93 @@ class KomariLifecycleTests(unittest.TestCase):
         result, _, _, _, _ = self.run_case('ControllerUpgrade', migration_code='200', body=json.dumps({'data': {'mode': 'metric_store_restructure'}}))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.marker(result.stdout), 'true')
+
+    def test_manual_restore_removes_new_metrics_and_reports_actual_old_version(self):
+        result,_,database,metrics,_=self.run_case('ControllerRestore')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(database,'old-db');self.assertFalse(metrics)
+        self.assertEqual(result.restore_quarantine_metrics,1)
+        line=next(line for line in result.stdout.splitlines() if line.startswith('VPSDEPLOY_KOMARI_RESTORED_VERSION_B64='))
+        self.assertEqual(base64.b64decode(line.split('=',1)[1]).decode(),'1.4.3')
+
+    def test_failed_manual_restore_recovers_the_current_database_and_metrics(self):
+        result,_,database,metrics,_=self.run_case('ControllerRestore',home_code='500')
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(database,'new-db');self.assertTrue(metrics)
+
+    def test_project_controller_only_backup_restore_leaves_current_tunnel_untouched(self):
+        result,calls,database,_,_=self.run_case('ControllerRestore',tunnel=True,project_backup=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(database,'old-db')
+        self.assertEqual(result.tunnel_binary,'current-tunnel-binary')
+        self.assertEqual(result.tunnel_unit,'current-tunnel-unit')
+        self.assertTrue(result.tunnel_active)
+        self.assertNotIn('cloudflared.service',calls)
+
+    def test_failed_controller_only_restore_does_not_restart_or_replace_tunnel(self):
+        result,calls,database,metrics,_=self.run_case('ControllerRestore',tunnel=True,home_code='500')
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(database,'new-db');self.assertTrue(metrics)
+        self.assertEqual(result.tunnel_binary,'current-tunnel-binary')
+        self.assertEqual(result.tunnel_unit,'current-tunnel-unit')
+        self.assertTrue(result.tunnel_active)
+        self.assertNotIn('cloudflared.service',calls)
+
+    def test_controller_only_restore_preserves_inactive_tunnel_and_final_controller_state(self):
+        result,calls,_,_,_=self.run_case('ControllerRestore',tunnel=True,tunnel_active=False,tunnel_enabled=False,final_active=False)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertFalse(result.tunnel_active);self.assertFalse(result.service_active)
+        self.assertEqual(result.tunnel_unit,'current-tunnel-unit')
+        self.assertNotIn('cloudflared.service',calls)
+
+    def test_full_restore_replaces_and_restarts_only_included_tunnel(self):
+        result,calls,database,_,_=self.run_case('ControllerRestore',tunnel=True,include_tunnel=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(database,'old-db')
+        self.assertEqual(result.tunnel_binary,'archived-tunnel-binary')
+        self.assertEqual(result.tunnel_unit,'archived-tunnel-unit')
+        self.assertTrue(result.tunnel_active)
+        self.assertIn('start cloudflared.service',calls)
+
+    def test_full_restore_tunnel_restart_failure_rolls_back_current_files_and_data(self):
+        result,_,database,metrics,_=self.run_case('ControllerRestore',tunnel=True,include_tunnel=True,tunnel_start_fails=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('VPSDEPLOY_KOMARI_LIFECYCLE_OK',result.stdout)
+        self.assertEqual(database,'new-db');self.assertTrue(metrics)
+        self.assertEqual(result.tunnel_binary,'current-tunnel-binary')
+        self.assertEqual(result.tunnel_unit,'current-tunnel-unit')
+        self.assertTrue(result.tunnel_active)
+
+    def test_partial_tunnel_archive_is_rejected_before_stopping_services(self):
+        result,calls,database,metrics,_=self.run_case('ControllerRestore',tunnel=True,include_tunnel=True,incomplete_tunnel=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('stop ',calls);self.assertNotIn('disable ',calls)
+        self.assertEqual(database,'new-db');self.assertTrue(metrics)
+        self.assertEqual(result.tunnel_unit,'current-tunnel-unit')
+
+    def test_full_restore_does_not_start_an_inactive_tunnel(self):
+        result,calls,_,_,_=self.run_case('ControllerRestore',tunnel=True,include_tunnel=True,tunnel_active=False,tunnel_enabled=False)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertFalse(result.tunnel_active)
+        self.assertIn('disable cloudflared.service',calls)
+        self.assertNotIn('start cloudflared.service',calls)
+
+    def test_unsafe_manual_archive_is_rejected_before_service_changes(self):
+        result,calls,database,metrics,_=self.run_case('ControllerRestore',unsafe_archive=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('stop ',calls);self.assertNotIn('enable ',calls)
+        self.assertEqual(database,'new-db');self.assertTrue(metrics)
+
+    def test_tunnel_rotation_restarts_the_live_process(self):
+        result,calls,_,_,_=self.run_case('TunnelRotate')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('restart cloudflared.service',calls)
+        self.assertNotIn('enable --now cloudflared.service',calls)
+
+    def test_failed_tunnel_restart_cannot_commit_rotation(self):
+        result,_,_,_,_=self.run_case('TunnelRotate',service_start_fails=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('VPSDEPLOY_KOMARI_LIFECYCLE_OK',result.stdout)
 
     def test_normal_controller_is_verified(self):
         result, _, _, _, _ = self.run_case('ControllerUpgrade')
@@ -296,6 +449,19 @@ class KomariLifecycleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLess(calls.index('stop komari.service'), calls.index('start komari.service'))
         self.assertEqual(database, 'old-db')
+
+    def test_backup_refuses_to_copy_database_if_service_did_not_stop(self):
+        result, _, database, _, _ = self.run_case('ControllerBackup', service_stop_still_active=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(database, 'old-db')
+        self.assertNotIn('VPSDEPLOY_KOMARI_BACKUP_B64=', result.stdout)
+
+    def test_restore_refuses_to_replace_database_if_service_did_not_stop(self):
+        result, _, database, metrics, _ = self.run_case('ControllerRestore', service_stop_still_active=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(database, 'new-db')
+        self.assertTrue(metrics)
+        self.assertEqual(result.restore_quarantine_metrics, 0)
 
 
 if __name__ == '__main__':

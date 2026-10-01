@@ -3,10 +3,10 @@
   "artifacts": [
     {
       "core": "mihomo",
-      "version": "1.19.30",
-      "file": "mihomo-windows-amd64-v1.19.30.zip",
-      "sha256": "22c09fd67673895ef7cd6b1820563918275c3d316f2462b306208675118db3c0",
-      "source": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-windows-amd64-v1.19.30.zip"
+      "version": "1.19.32",
+      "file": "mihomo-windows-amd64-v1.19.32.zip",
+      "sha256": "1ac84e795b5b915446e20139677fb6cc013a0778e876e8d4c96f994750b4c4a3",
+      "source": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.32/mihomo-windows-amd64-v1.19.32.zip"
     },
     {
       "core": "sing-box",
@@ -20,18 +20,18 @@
     {
       "consumer": "mihomo",
       "release_tag": "latest",
-      "published_at": "2026-08-31T00:44:45Z",
+      "published_at": "2026-10-01T01:25:25Z",
       "file": "mihomo-geodata/GeoSite.dat",
-      "sha256": "13b7cde1c317da9b65a145c1678587ab0dff88c3bd9738e5d1faa0af5ee17c12",
-      "source": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
+      "sha256": "012e87fb009b46a89a649ab5127f866e4525c40084da5841b01935770a636d69",
+      "source": "https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/assets/602161892"
     },
     {
       "consumer": "mihomo",
       "release_tag": "latest",
-      "published_at": "2026-08-31T00:44:45Z",
+      "published_at": "2026-10-01T01:25:25Z",
       "file": "mihomo-geodata/GeoIP.dat",
-      "sha256": "0d5d2ba0c5a5c58027fd1347a6afd57c9470799b6bb3cbc274fd4657ed8de382",
-      "source": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat"
+      "sha256": "3e21484fe4b72d788439e6f16a29bf7967892dd9e82f17e087608837cb260639",
+      "source": "https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/assets/602161826"
     },
     {
       "consumer": "sing-box",

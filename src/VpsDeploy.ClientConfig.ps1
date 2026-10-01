@@ -465,6 +465,36 @@ function Test-MxhForbiddenAuthorityPath {
     return $full -match '(?i)[\\/]AppData[\\/].*clash-verge|io\.github\.clash-verge'
 }
 
+function Get-MxhClientSourceFingerprints {
+    param([string[]]$BasePaths,[object[]]$FragmentSources=@())
+    $paths=@($BasePaths)
+    foreach($fragment in $FragmentSources){
+        if($fragment -isnot [Collections.IDictionary] -or -not $fragment.Contains('fragment_dir') -or [string]::IsNullOrWhiteSpace([string]$fragment.fragment_dir)){
+            throw '受管片段缺少来源目录，请重新选择来源。'
+        }
+        $paths+=([string]$fragment.fragment_dir)
+    }
+    $fingerprints=@{}
+    foreach($path in $paths | Sort-Object -Unique){
+        if(Test-Path -LiteralPath $path -PathType Leaf){$fingerprints[$path]=Get-MxhFileFingerprint $path}
+        elseif(Test-Path -LiteralPath $path -PathType Container){
+            foreach($file in Get-ChildItem -LiteralPath $path -File -Recurse){$fingerprints[$file.FullName]=Get-MxhFileFingerprint $file.FullName}
+        }else{throw '配置来源已经不存在，请重新读取来源后生成候选。'}
+    }
+    return $fingerprints
+}
+
+function Publish-MxhCheckedAuthorityPair {
+    param([Parameter(Mandatory)][string]$CandidateClash,[Parameter(Mandatory)][string]$CandidateSingBox,
+        [Parameter(Mandatory)][string]$TargetClash,[Parameter(Mandatory)][string]$TargetSingBox,
+        [Parameter(Mandatory)][string]$BackupRoot,[Parameter(Mandatory)]$States,
+        [Parameter(Mandatory)][hashtable]$Expected,[Parameter(Mandatory)][hashtable]$ExpectedCandidates,
+        [Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$Sources)
+    if($States.mihomo.Status -ne 'Ready' -or $States['sing-box'].Status -ne 'Ready'){throw '存在跳过的核心校验，仅保留候选，不允许发布。'}
+    foreach($source in $Sources.Keys){if((Get-MxhFileFingerprint $source) -ne $Sources[$source]){throw '来源文件已变化，未发布，请重新生成。'}}
+    Publish-MxhAuthorityPair $CandidateClash $CandidateSingBox $TargetClash $TargetSingBox $BackupRoot -Expected $Expected -ExpectedCandidates $ExpectedCandidates
+}
+
 function Publish-MxhAuthorityPair {
     param(
         [Parameter(Mandatory)][string]$CandidateClash,
@@ -702,7 +732,6 @@ function Invoke-MxhBuildClientAuthority {
         $targetClash=Read-VpsText '要覆盖的 Clash 权威 YAML 完整路径' -Default $targetClashDefault -AllowBack -Validate{param($v)(Test-VpsPathSeparatorStyle -Value $v) -and -not(Test-MxhForbiddenAuthorityPath (ConvertTo-VpsInputPath -Value $v))} -ValidationMessage '路径可全用 / 或全用 \，但不能混用；且不能指向 Clash Verge AppData。'
         $targetSing=Read-VpsText '要覆盖的 sing-box 权威 JSON 完整路径' -Default $targetSingDefault -AllowBack -Validate{param($v)(Test-VpsPathSeparatorStyle -Value $v) -and -not(Test-MxhForbiddenAuthorityPath (ConvertTo-VpsInputPath -Value $v))} -ValidationMessage '路径可全用 / 或全用 \，但不能混用；且不能指向 Clash Verge AppData。'
         $targetClash=ConvertTo-VpsInputPath -Value $targetClash;$targetSing=ConvertTo-VpsInputPath -Value $targetSing
-        if(-not(Read-VpsYesNo '确认仅在全部校验通过后备份并覆盖这两份权威配置？' $false -AllowBack)){throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)}
     }else{
         $newDir=Read-VpsText '新配置保存目录' -Default (Join-Path $outputRoot ('generated-'+$stamp)) -AllowBack -Validate ${function:Test-VpsArchiveRoot} -ValidationMessage '请输入完整绝对路径；可全用 / 或全用 \，但不能混用。'
         $newDir=ConvertTo-VpsInputPath -Value $newDir
@@ -712,6 +741,8 @@ function Invoke-MxhBuildClientAuthority {
         if((Test-Path -LiteralPath $targetClash) -or (Test-Path -LiteralPath $targetSing)){throw '生成新配置模式不会覆盖现有文件；请更换目录或文件名。'}
     }
     if ($DryRun) { Write-VpsUi "DryRun：将从 $($fragmentSources.Count) 个受管片段、$($manualNodes.Count) 个手动节点和 $($existingNodeRefs.Count) 个现有节点生成、验证并写入 $targetClash 与 $targetSing。" Success; return }
+    $expectedTargets=@{Clash=Get-MxhFileFingerprint $targetClash;SingBox=Get-MxhFileFingerprint $targetSing}
+    $expectedSources=Get-MxhClientSourceFingerprints -BasePaths @($clash,$sing) -FragmentSources @($fragmentSources)
     [IO.Directory]::CreateDirectory($output) | Out-Null
     $removeGroups = @($originalRegions | Where-Object { $_ -notin @($activeRegions) })
     $spec = [ordered]@{schema_version=1;source_mode=$sourceMode;output_mode=$(if($outputMode-eq 1){'OverwriteAuthority'}else{'GenerateNew'});fragment_sources=@($fragmentSources);manual_nodes=@($manualNodes);existing_node_refs=@($existingNodeRefs);groups=@($groups);remove_groups=$removeGroups;group_order=$groupOrder}
@@ -725,17 +756,13 @@ function Invoke-MxhBuildClientAuthority {
     Get-Content -Raw $singCandidate | ConvertFrom-Json | Out-Null
     $singBytes = (Get-Item -LiteralPath $singCandidate).Length
     if ($singBytes -ge 4MB) { throw "sing-box 候选为 $singBytes 字节，超过桌面端 4 MiB 安全上限；请减少内联规则或节点。" }
+    $expectedCandidates=@{Clash=Get-MxhFileFingerprint $candidate;SingBox=Get-MxhFileFingerprint $singCandidate}
     $coreStates = Test-MxhClientAuthorityPair -ProjectRoot $ProjectRoot -ClashPath $candidate -SingBoxPath $singCandidate
-    $backupRoot=Join-Path $outputRoot ('backups\'+$stamp)
-    if($outputMode -eq 1){
-        $published=Publish-MxhAuthorityPair -CandidateClash $candidate -CandidateSingBox $singCandidate -TargetClash $targetClash.Trim('"') -TargetSingBox $targetSing.Trim('"') -BackupRoot $backupRoot
-    }else{
-        [IO.Directory]::CreateDirectory((Split-Path -Parent $targetClash))|Out-Null
-        Copy-Item -LiteralPath $candidate -Destination $targetClash
-        Copy-Item -LiteralPath $singCandidate -Destination $targetSing
-        Copy-Item -LiteralPath (Join-Path $output 'candidate-manifest.json') -Destination (Join-Path (Split-Path -Parent $targetClash) 'generation-manifest.json')
-        Copy-Item -LiteralPath $specPath -Destination (Join-Path (Split-Path -Parent $targetClash) 'client-layout-spec.private.json')
-    }
+    if($coreStates.mihomo.Status -ne 'Ready' -or $coreStates['sing-box'].Status -ne 'Ready'){throw '存在跳过的核心校验，仅保留候选，不允许发布。'}
+    Write-VpsUi "Clash：$targetClash；sing-box：$targetSing。双核心已校验；指纹、备份和恢复与工作台一致。生成记录保留在：$output" Info
+    if(-not(Read-VpsYesNo '确认发布这两份已完成双核心校验的配置？' $false -AllowBack)){return}
+    $backupRoot=Join-Path $ProjectRoot ('private/client-publish/'+[Guid]::NewGuid().ToString('N'))
+    $published=Publish-MxhCheckedAuthorityPair -CandidateClash $candidate -CandidateSingBox $singCandidate -TargetClash $targetClash.Trim('"') -TargetSingBox $targetSing.Trim('"') -BackupRoot $backupRoot -Expected $expectedTargets -ExpectedCandidates $expectedCandidates -Sources $expectedSources -States $coreStates
     $layout.region_groups=@($regions);$layout.default_exit_members=@($exitMembers);$layout.authority_defaults.source_mode=$sourceMode
     if($sourceMode -eq 'ExistingAuthority'){$layout.authority_defaults.clash=$clash.Trim('"');$layout.authority_defaults.sing_box=$sing.Trim('"')}
     if($outputMode -eq 1){$layout.authority_defaults.clash=$targetClash.Trim('"');$layout.authority_defaults.sing_box=$targetSing.Trim('"')}

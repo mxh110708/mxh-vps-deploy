@@ -7,8 +7,9 @@ set -euo pipefail
 
 temporary="$(mktemp)"
 trap 'rm -f "$temporary"' EXIT
-curl --fail --location --silent --show-error --retry 3 --output "$temporary" "$VPS_PARAM_INSTALLER_URL"
+curl --fail --location --silent --show-error --connect-timeout 15 --max-time 180 --retry 3 --output "$temporary" "$VPS_PARAM_INSTALLER_URL"
 printf '%s  %s\n' "$VPS_PARAM_INSTALLER_SHA256" "$temporary" | sha256sum --check --status
+if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
 bash "$temporary" install --version "v${VPS_PARAM_VERSION#v}"
 
 actual="$(/usr/local/bin/xray version | awk 'NR==1 {print $2}')"

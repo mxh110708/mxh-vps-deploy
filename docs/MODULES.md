@@ -114,7 +114,7 @@ Reality 计划还记录 `XrayVersionChannel` 与解析后的 `XrayVersion`。`Fi
 
 - `Start/Get/Complete/Undo-MxhMaintenanceTransaction`：本地 `maintenance-backups` 与远端 `protocol-lifecycle` 成对快照，20 分钟独立回滚；
 - `Get-MxhHealthAudit`：读取脱敏服务/监听/版本/证书/文件哈希并和 `HealthBaseline` 比较；
-- 手动恢复、凭据轮换、防火墙、固定资产升级、Komari 和退役：所有远端修改都必须先事务化；协议受控升级重新生成当前测试配置并复用完整真实协议验收后才提交；
+- 手动恢复、凭据轮换、防火墙、固定资产升级、Komari 和退役：远端修改先建立按组件限定的事务；升级保留现有服务端配置，凭据轮换只修改已识别的凭据字段，并复用真实协议验收；Komari 两个更新入口共用一致性备份、迁移与状态核对；
 - SSH 维护单独使用 `mxh-ssh-maintenance-rollback.timer`，因为错误端口或公钥不能依赖普通协议回滚连接；
 - 客户端候选由 `scripts/merge_client_authority.py` 使用 ruamel.yaml round-trip 处理 Clash、标准 JSON 处理 sing-box，只写实例 `client-candidates`/`decommission-client-candidate`。
 

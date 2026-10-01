@@ -16,11 +16,12 @@ archive="$(mktemp)"
 stage="$(mktemp -d)"
 trap 'rm -f "$archive"; rm -rf "$stage"' EXIT
 url="https://github.com/SagerNet/sing-box/releases/download/v${VPS_PARAM_VERSION#v}/${VPS_PARAM_ASSET_NAME}"
-curl --fail --location --silent --show-error --retry 3 --output "$archive" "$url"
+curl --fail --location --silent --show-error --connect-timeout 15 --max-time 180 --retry 3 --output "$archive" "$url"
 printf '%s  %s\n' "$VPS_PARAM_SHA256" "$archive" | sha256sum --check --status
 tar -xzf "$archive" -C "$stage"
 binary="$(find "$stage" -type f -name sing-box -print -quit)"
 [[ -n "$binary" ]] || { echo 'sing-box binary is missing from release archive.' >&2; exit 1; }
+if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
 install -o root -g root -m 0755 "$binary" /usr/local/bin/sing-box-anytls
 
 getent group sing-box-anytls >/dev/null 2>&1 || groupadd --system sing-box-anytls

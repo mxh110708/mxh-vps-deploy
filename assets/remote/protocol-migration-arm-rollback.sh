@@ -25,12 +25,20 @@ stamp="$(date -u +%Y%m%d-%H%M%S)"
 backup_dir="/root/vps-deploy-backups/${stamp}/protocol-lifecycle"
 [[ ! -e "$backup_dir" ]] || { echo 'Snapshot timestamp collision; retry later.' >&2; exit 1; }
 install -d -m 0700 "$backup_dir"
+components="${VPS_PARAM_COMPONENTS:-Protocols,Network,Firewall}"
+IFS=',' read -r -a component_list <<<"$components"
+((${#component_list[@]} > 0))
+for component in "${component_list[@]}"; do
+  case "$component" in Protocols|Network|Firewall|KomariAgent|KomariController|Cloudflared) ;; *) echo 'Unsupported transaction component.' >&2; exit 1 ;; esac
+done
+scope_has(){ [[ ",$components," == *",$1,"* ]]; }
+printf '%s\n' "$components" > "$backup_dir/components"
 printf '%s\n' "$backup_dir" > "$owner"
 chmod 0600 "$owner"
-if [[ -f /etc/nftables.conf ]]; then cp -a /etc/nftables.conf "$backup_dir/nftables.conf"; fi
-if [[ -f /etc/sysctl.d/99-mxh-vps-deploy.conf ]]; then
+if scope_has Firewall && [[ -f /etc/nftables.conf ]]; then cp -a /etc/nftables.conf "$backup_dir/nftables.conf"; fi
+if scope_has Network && [[ -f /etc/sysctl.d/99-mxh-vps-deploy.conf ]]; then
   cp -a /etc/sysctl.d/99-mxh-vps-deploy.conf "$backup_dir/99-mxh-vps-deploy.conf"
-else
+elif scope_has Network; then
   touch "$backup_dir/sysctl-config-was-absent"
 fi
 printf '%s\n' "$VPS_PARAM_SOURCE_ROLE" > "$backup_dir/source-role"
@@ -70,15 +78,19 @@ aux_snapshot Cloudflared cloudflared.service
 
 quiesce_controller="${VPS_PARAM_QUIESCE_KOMARI_CONTROLLER:-false}"
 [[ "$quiesce_controller" == true || "$quiesce_controller" == false ]]
+if scope_has KomariController; then quiesce_controller=true; fi
+[[ "$quiesce_controller" == false ]] || scope_has KomariController
 controller_was_active="$(cat "$backup_dir/KomariController.active")"
 restart_after_snapshot(){ [[ "$quiesce_controller" == false || "$controller_was_active" == false ]] || systemctl start komari.service; }
 if [[ "$quiesce_controller" == true ]]; then
   for directory in /var/lib/komari /opt/komari; do [[ ! -L "$directory" ]] || { echo 'Unsupported symlinked Komari data directory.' >&2; exit 1; }; done
   trap restart_after_snapshot EXIT
   if [[ "$controller_was_active" == true ]]; then systemctl stop komari.service; fi
+  ! systemctl is-active --quiet komari.service || { echo 'Controller is still running; consistent snapshot refused.' >&2; exit 1; }
 fi
 
-candidate_paths=(
+candidate_paths=()
+if scope_has Protocols; then candidate_paths+=(
   usr/local/bin/xray usr/local/etc/xray usr/local/share/xray
   etc/systemd/system/xray.service etc/systemd/system/xray@.service etc/systemd/system/xray.service.d
   etc/nginx/sites-available/mxh-reality-target etc/nginx/sites-enabled/mxh-reality-target var/www/mxh-reality-target
@@ -86,16 +98,21 @@ candidate_paths=(
   usr/local/libexec/mxh-certbot-deploy
   usr/local/bin/sing-box-anytls etc/systemd/system/sing-box-anytls.service etc/sing-box-anytls var/lib/sing-box-anytls
   usr/local/bin/sing-box etc/systemd/system/sing-box.service etc/systemd/system/sing-box.service.d etc/sing-box var/lib/sing-box
-  usr/local/bin/komari-agent etc/komari-agent etc/systemd/system/komari-agent.service var/lib/komari-agent
-  usr/local/bin/komari usr/bin/komari opt/komari var/lib/komari etc/systemd/system/komari.service
-  usr/local/bin/cloudflared usr/bin/cloudflared etc/systemd/system/cloudflared.service
-)
+); fi
+if scope_has KomariAgent; then candidate_paths+=(usr/local/bin/komari-agent etc/komari-agent etc/systemd/system/komari-agent.service var/lib/komari-agent); fi
+if scope_has KomariController; then candidate_paths+=(usr/local/bin/komari usr/bin/komari opt/komari var/lib/komari etc/systemd/system/komari.service); fi
+if scope_has Cloudflared; then candidate_paths+=(usr/local/bin/cloudflared usr/bin/cloudflared etc/systemd/system/cloudflared.service); fi
 existing_paths=()
 for relative in "${candidate_paths[@]}"; do
   if [[ -e "/$relative" || -L "/$relative" ]]; then existing_paths+=("$relative"); fi
 done
+printf '%s\n' "${existing_paths[@]}" > "$backup_dir/existing-paths"
 if (( ${#existing_paths[@]} > 0 )); then
   tar --numeric-owner -czpf "$backup_dir/protocol-files.tar.gz" -C / "${existing_paths[@]}"
+else
+  # A monitor-only host can have no files in the selected maintenance scope.
+  # Still produce a valid archive for download and the common restore path.
+  tar --numeric-owner -czpf "$backup_dir/protocol-files.tar.gz" -C / --files-from /dev/null
 fi
 if [[ "$quiesce_controller" == true ]]; then
   touch "$backup_dir/KomariController.quiesced"
@@ -108,8 +125,16 @@ cat > /usr/local/libexec/mxh-protocol-migration-rollback <<'ROLLBACK'
 #!/usr/bin/env bash
 set -euo pipefail
 backup_dir="$1"
-exec 9>/var/lib/mxh-vps-deploy/transaction.lock
-flock -w 30 9 || exit 1
+components="$(cat "$backup_dir/components" 2>/dev/null || printf '%s' 'Protocols,Network,Firewall,KomariAgent,KomariController,Cloudflared')"
+protocol_only=false
+if [[ "${2:-}" == '--protocol-only' ]]; then
+  components='Protocols,Network,Firewall'; protocol_only=true
+fi
+scope_has(){ [[ ",$components," == *",$1,"* ]]; }
+if [[ "${VPS_TRANSACTION_LOCK_HELD:-false}" != true ]]; then
+  exec 9>/var/lib/mxh-vps-deploy/transaction.lock
+  flock -w 30 9 || exit 1
+fi
 if [[ "${2:-}" == '--transaction' ]]; then
   [[ ! -f "$backup_dir/transaction-committed" ]] || exit 0
   [[ "$(cat /var/lib/mxh-vps-deploy/transaction.owner)" == "$backup_dir" ]]
@@ -134,15 +159,27 @@ cleanup_role() {
   esac
 }
 
+if scope_has Protocols; then
 for service in xray.service sing-box-anytls.service sing-box.service; do
   systemctl disable --now "$service" >/dev/null 2>&1 || true
+  if systemctl is-active --quiet "$service"; then echo 'Protocol service did not stop; rollback refused.' >&2; exit 1; fi
 done
 for role in RealityEntry AnyTlsEntry ShadowsocksLanding; do
   if [[ "$(cat "$backup_dir/${role}.installed")" == 'false' ]]; then cleanup_role "$role"; fi
 done
+fi
+if scope_has KomariAgent; then
+  systemctl stop komari-agent.service >/dev/null 2>&1 || true
+  ! systemctl is-active --quiet komari-agent.service || exit 1
+fi
+if scope_has Cloudflared; then
+  systemctl stop cloudflared.service >/dev/null 2>&1 || true
+  ! systemctl is-active --quiet cloudflared.service || exit 1
+fi
 if [[ -f "$backup_dir/protocol-files.tar.gz" ]]; then
-  if [[ -f "$backup_dir/KomariController.quiesced" ]]; then
+  if scope_has KomariController; then
     systemctl stop komari.service >/dev/null 2>&1 || true
+    ! systemctl is-active --quiet komari.service || { echo 'Controller is still running; database restore refused.' >&2; exit 1; }
     failed_dir="$(mktemp -d "$backup_dir/failed-komari-data-XXXXXXXX")"
     for directory in /var/lib/komari /opt/komari; do
       [[ -d "$directory" ]] || continue
@@ -150,7 +187,21 @@ if [[ -f "$backup_dir/protocol-files.tar.gz" ]]; then
       leaf="${directory#/}"; mv "$directory" "$failed_dir/${leaf//\//-}"
     done
   fi
-  tar --numeric-owner -xzpf "$backup_dir/protocol-files.tar.gz" -C /
+  if [[ "$protocol_only" == true ]]; then
+    # Historical snapshots also contain monitoring data, which is outside a protocol restore.
+    members="$(mktemp)"
+    tar -tzpf "$backup_dir/protocol-files.tar.gz" | while IFS= read -r member; do
+      case "$member" in
+        usr/local/bin/xray|usr/local/bin/sing-box|usr/local/bin/sing-box-anytls|usr/local/etc/xray/*|usr/local/share/xray/*|etc/sing-box/*|etc/sing-box-anytls/*|var/lib/sing-box/*|var/lib/sing-box-anytls/*|etc/mxh-tls/*|etc/letsencrypt/*|var/www/mxh-reality-target/*|etc/nginx/sites-available/mxh-reality-target|etc/nginx/sites-enabled/mxh-reality-target|etc/systemd/system/xray.service|etc/systemd/system/xray@.service|etc/systemd/system/xray.service.d/*|etc/systemd/system/sing-box.service|etc/systemd/system/sing-box.service.d/*|etc/systemd/system/sing-box-anytls.service|etc/systemd/system/mxh-certbot-renew.timer|etc/systemd/system/mxh-certbot-renew.service|usr/local/libexec/mxh-certbot-deploy)
+          [[ "$member" != /* && "/$member/" != *'/../'* ]] || exit 1
+          printf '%s\n' "$member" ;;
+      esac
+    done > "$members"
+    tar --numeric-owner --no-recursion -xzpf "$backup_dir/protocol-files.tar.gz" -C / -T "$members"
+    rm -f "$members"
+  else
+    tar --numeric-owner -xzpf "$backup_dir/protocol-files.tar.gz" -C /
+  fi
 fi
 if [[ -f "$backup_dir/nftables.conf" ]]; then
   cp -a "$backup_dir/nftables.conf" /etc/nftables.conf
@@ -162,7 +213,7 @@ if [[ -f "$backup_dir/99-mxh-vps-deploy.conf" ]]; then
 elif [[ -f "$backup_dir/sysctl-config-was-absent" ]]; then
   rm -f /etc/sysctl.d/99-mxh-vps-deploy.conf
 fi
-sysctl --system >/dev/null
+if scope_has Network; then sysctl --system >/dev/null; fi
 systemctl daemon-reload
 
 restore_service() {
@@ -174,10 +225,12 @@ restore_service() {
   if [[ "$enabled" == 'true' ]]; then systemctl is-enabled --quiet "$service"; else ! systemctl is-enabled --quiet "$service" 2>/dev/null; fi
   if [[ "$active" == 'true' ]]; then systemctl is-active --quiet "$service"; else ! systemctl is-active --quiet "$service" 2>/dev/null; fi
 }
-restore_service RealityEntry xray.service
-restore_service AnyTlsEntry sing-box-anytls.service
-restore_service ShadowsocksLanding sing-box.service
-if command -v nginx >/dev/null 2>&1; then
+if scope_has Protocols; then
+  restore_service RealityEntry xray.service
+  restore_service AnyTlsEntry sing-box-anytls.service
+  restore_service ShadowsocksLanding sing-box.service
+fi
+if scope_has Protocols && command -v nginx >/dev/null 2>&1; then
   nginx_enabled="$(cat "$backup_dir/NginxRealityTarget.enabled")"
   nginx_active="$(cat "$backup_dir/NginxRealityTarget.active")"
   if [[ "$nginx_enabled" == 'true' ]]; then systemctl enable nginx.service >/dev/null; else systemctl disable nginx.service >/dev/null 2>&1 || true; fi
@@ -193,20 +246,25 @@ restore_aux() {
   unit="$(cat "$backup_dir/${name}.unit")"; enabled="$(cat "$backup_dir/${name}.enabled")"; active="$(cat "$backup_dir/${name}.active")"
   if [[ "$unit" == 'false' ]]; then
     systemctl disable --now "$service" >/dev/null 2>&1 || true
+    local paths=() relative
     case "$name" in
-      KomariAgent) rm -f /usr/local/bin/komari-agent /etc/systemd/system/komari-agent.service; rm -rf /etc/komari-agent /var/lib/komari-agent ;;
-      KomariController) rm -f /usr/local/bin/komari /etc/systemd/system/komari.service; rm -rf /opt/komari /var/lib/komari ;;
-      Cloudflared) rm -f /usr/local/bin/cloudflared /etc/systemd/system/cloudflared.service ;;
+      KomariAgent) paths=(usr/local/bin/komari-agent etc/systemd/system/komari-agent.service etc/komari-agent var/lib/komari-agent) ;;
+      KomariController) paths=(usr/local/bin/komari usr/bin/komari etc/systemd/system/komari.service opt/komari var/lib/komari) ;;
+      Cloudflared) paths=(usr/local/bin/cloudflared usr/bin/cloudflared etc/systemd/system/cloudflared.service) ;;
     esac
+    for relative in "${paths[@]}"; do
+      if [[ -f "$backup_dir/existing-paths" ]] && grep -Fxq "$relative" "$backup_dir/existing-paths"; then continue; fi
+      rm -rf -- "/${relative:?}"
+    done
     systemctl daemon-reload
     return
   fi
   if [[ "$enabled" == 'true' ]]; then systemctl enable "$service" >/dev/null; else systemctl disable "$service" >/dev/null 2>&1 || true; fi
   if [[ "$active" == 'true' ]]; then systemctl start "$service"; else systemctl stop "$service" >/dev/null 2>&1 || true; fi
 }
-restore_aux KomariAgent komari-agent.service
-restore_aux KomariController komari.service
-restore_aux Cloudflared cloudflared.service
+if scope_has KomariAgent; then restore_aux KomariAgent komari-agent.service; fi
+if scope_has KomariController; then restore_aux KomariController komari.service; fi
+if scope_has Cloudflared; then restore_aux Cloudflared cloudflared.service; fi
 date -u +%FT%TZ > "$backup_dir/rollback-executed"
 if [[ "${2:-}" == '--transaction' ]]; then
   rm -f /var/lib/mxh-vps-deploy/transaction.owner
@@ -217,10 +275,13 @@ chmod 0750 /usr/local/libexec/mxh-protocol-migration-rollback
 cat > /etc/systemd/system/mxh-protocol-migration-rollback.service <<EOF
 [Unit]
 Description=Rollback an unconfirmed MXH protocol lifecycle change
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/libexec/mxh-protocol-migration-rollback $backup_dir --transaction
+Restart=on-failure
+RestartSec=5s
 EOF
 cat > /etc/systemd/system/mxh-protocol-migration-rollback.timer <<EOF
 [Unit]
@@ -236,6 +297,7 @@ WantedBy=timers.target
 EOF
 chmod 0644 /etc/systemd/system/mxh-protocol-migration-rollback.service \
   /etc/systemd/system/mxh-protocol-migration-rollback.timer
+printf '%s\n' "$(( $(date +%s) + VPS_PARAM_TIMEOUT_MINUTES * 60 ))" > "$backup_dir/deadline-epoch"
 systemctl daemon-reload
 systemctl enable --now mxh-protocol-migration-rollback.timer >/dev/null
 systemctl is-active --quiet mxh-protocol-migration-rollback.timer

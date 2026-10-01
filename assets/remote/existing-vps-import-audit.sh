@@ -81,8 +81,8 @@ if inventory["RealityEntry"]["Installed"]:
         stream = inbound["streamSettings"]
         reality = stream.get("realitySettings") or {}
         clients = (inbound.get("settings") or {}).get("clients") or []
-        if not clients:
-            raise RuntimeError("Reality inbound has no client")
+        if len(clients) != 1:
+            raise RuntimeError("Reality import requires one managed client per inbound; multiple clients require manual selection")
         client = clients[0]
         names = reality.get("serverNames") or []
         short_ids = reality.get("shortIds") or []
@@ -136,7 +136,7 @@ if inventory["RealityEntry"]["Installed"]:
 if inventory["AnyTlsEntry"]["Installed"]:
     config = json.loads(Path("/etc/sing-box-anytls/config.json").read_text(encoding="utf-8"))
     inbounds = [item for item in config.get("inbounds", []) if item.get("type") == "anytls"]
-    if len(inbounds) != 1 or not (inbounds[0].get("users") or []):
+    if len(inbounds) != 1 or len(inbounds[0].get("users") or []) != 1:
         raise RuntimeError("unsupported AnyTLS config layout")
     inbound = inbounds[0]
     tls = inbound.get("tls") or {}
@@ -176,12 +176,27 @@ if inventory["ShadowsocksLanding"]["Installed"]:
     users = inbound.get("users") or []
     if not users or not inbound.get("password"):
         raise RuntimeError("Shadowsocks users or server key are missing")
+    if any(item.get("name") not in ("ipv4-client", "ipv6-client") for item in users) or len({item.get("name") for item in users}) != len(users):
+        raise RuntimeError("Shadowsocks import requires unique ipv4-client / ipv6-client users")
     secondary = next((item for item in users if item.get("name") == "ipv6-client"), None)
-    primary = next((item for item in users if item.get("name") == "ipv4-client"), users[0])
+    primary = next((item for item in users if item.get("name") == "ipv4-client"), None)
+    if primary is None:
+        raise RuntimeError("Shadowsocks ipv4-client is missing")
+    ipv6_rules = [rule for rule in (config.get("route") or {}).get("rules", [])
+                  if "ipv6-client" in rule.get("auth_user", []) and rule.get("action", "route") in ("", "route")]
+    ipv6_outbound = None
+    if secondary is not None:
+        if len(ipv6_rules) != 1:
+            raise RuntimeError("Cannot identify the Shadowsocks IPv6 client's route")
+        ipv6_outbound = next((item for item in config.get("outbounds", []) if item.get("tag") == ipv6_rules[0].get("outbound")), None)
+        if not ipv6_outbound or ipv6_outbound.get("type") != "direct":
+            raise RuntimeError("Unsupported Shadowsocks IPv6 egress layout")
     protocols["ShadowsocksLanding"] = {
         "Port": int(inbound.get("listen_port")),
         "Method": str(inbound.get("method")),
         "SecondaryIpv6Enabled": secondary is not None,
+        "SecondaryIpv6Address": (ipv6_outbound or {}).get("inet6_bind_address"),
+        "SecondaryBindInterface": (ipv6_outbound or {}).get("bind_interface"),
         "SingBoxVersion": run("/usr/local/bin/sing-box", "version", check=True).stdout.splitlines()[0].split()[2],
         "Secrets": {
             "ServerKey": str(inbound["password"]),

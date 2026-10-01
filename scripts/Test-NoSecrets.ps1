@@ -6,8 +6,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$excludedDirectories = @('.git', '.test-output', '.tmp', 'TestResults')
-$textExtensions = @('.ps1', '.psm1', '.psd1', '.sh', '.md', '.json', '.yml', '.yaml', '.txt', '.cmd')
+$excludedDirectories = @('.git', '.test-output', '.tmp', 'TestResults', '.cache', '__pycache__', 'private', 'data', 'state', 'logs', 'exports')
+$textExtensions = @('.ps1', '.psm1', '.psd1', '.sh', '.md', '.json', '.yml', '.yaml', '.txt', '.cmd', '.py', '.toml', '.ini')
+$privatePaths = '(?i)(^|/)(private|data|state|logs|exports|\.cache|\.tmp|\.test-output|TestResults)/|\.private\.(json|txt)$|(^|/)(root\.txt|params\.json|id_ed25519|id_rsa)$|\.(key|pem)$|^config/(client-layout|app-defaults)\.local\.json$'
 $patterns = [ordered]@{
     'Private key block' = '-----BEGIN (?:OPENSSH |RSA |EC )?PRIVATE KEY-----'
     'ECH server key block' = '-----BEGIN ECH KEYS-----\s*[A-Za-z0-9+/=\r\n]{80,}\s*-----END ECH KEYS-----'
@@ -20,9 +21,29 @@ $patterns = [ordered]@{
 }
 
 $findings = [Collections.Generic.List[object]]::new()
-$files = Get-ChildItem -LiteralPath $ProjectRoot -Recurse -File | Where-Object {
-    $_.Extension -in $textExtensions -and
-    -not ($_.FullName.Split([IO.Path]::DirectorySeparatorChar) | Where-Object { $_ -in $excludedDirectories })
+$ProjectRoot=[IO.Path]::GetFullPath($ProjectRoot)
+$git=Get-Command git -ErrorAction SilentlyContinue
+$gitRoot=if($git){& $git.Source -C $ProjectRoot rev-parse --show-toplevel 2>$null}else{''}
+$useGit=$git -and $LASTEXITCODE -eq 0 -and $gitRoot -and [IO.Path]::GetFullPath([string]$gitRoot) -eq $ProjectRoot
+if($useGit){
+    # Honor .gitignore for local runtime files, but never hide a private file in the index.
+    $paths=@(& $git.Source -c core.quotepath=false -c core.excludesFile= -C $ProjectRoot ls-files --cached --others --exclude-standard 2>$null|Sort-Object -Unique)
+    if($LASTEXITCODE -ne 0){throw '无法读取 Git 文件清单，保密检查未通过。'}
+    $files=@(foreach($relative in $paths){
+        if($relative -match $privatePaths){$findings.Add([pscustomobject]@{Rule='Private/runtime file in public tree'; File=$relative})}
+        $path=[IO.Path]::GetFullPath((Join-Path $ProjectRoot $relative))
+        if(-not $path.StartsWith($ProjectRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'Git 文件路径越界。'}
+        if(Test-Path -LiteralPath $path -PathType Leaf){$file=Get-Item -LiteralPath $path;if($file.Extension -in $textExtensions){$file}}
+    })
+}else{
+    # Source ZIPs have no index; apply the documented runtime boundary, not a guessed parent repository.
+    $files=@(Get-ChildItem -LiteralPath $ProjectRoot -Recurse -File | Where-Object {
+        $relative=[IO.Path]::GetRelativePath($ProjectRoot,$_.FullName).Replace('\','/')
+        $runtime=$relative.Split('/') | Where-Object { $_ -in $excludedDirectories }
+        $localOnly=$relative -match '(?i)\.private\.(json|txt)$|^config/(client-layout|app-defaults)\.local\.json$'
+        if(-not $runtime -and -not $localOnly -and $relative -match $privatePaths){$findings.Add([pscustomobject]@{Rule='Credential file outside runtime boundary';File=$relative})}
+        $_.Extension -in $textExtensions -and -not $runtime -and -not $localOnly
+    })
 }
 foreach ($file in $files) {
     $relative = [IO.Path]::GetRelativePath($ProjectRoot, $file.FullName)

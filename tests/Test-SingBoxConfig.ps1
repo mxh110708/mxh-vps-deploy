@@ -1,14 +1,16 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string]$ProjectRoot,
-    [Parameter(Mandatory)] [string]$SingBoxPath
+    [Parameter(Mandatory)] [string]$SingBoxPath,
+    [string]$FixtureOutputDirectory
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $ProjectRoot 'src\VpsDeploy.Core.psm1') -Force
-$work = Join-Path ([IO.Path]::GetTempPath()) ('mxh-sing-box-check-' + [guid]::NewGuid().ToString('N'))
+$work = if($FixtureOutputDirectory){[IO.Path]::GetFullPath($FixtureOutputDirectory)}else{Join-Path ([IO.Path]::GetTempPath()) ('mxh-sing-box-check-' + [guid]::NewGuid().ToString('N'))}
+if(Test-Path -LiteralPath $work){throw '隔离夹具输出目录必须尚不存在。'}
 [IO.Directory]::CreateDirectory($work) | Out-Null
 try {
     $serverKey = [Convert]::ToBase64String([byte[]](1..16))
@@ -176,5 +178,5 @@ try {
     Write-Host 'Exact sing-box core checks passed.' -ForegroundColor Green
 }
 finally {
-    if (Test-Path -LiteralPath $work) { [IO.Directory]::Delete($work, $true) }
+    if (-not $FixtureOutputDirectory -and (Test-Path -LiteralPath $work)) { [IO.Directory]::Delete($work, $true) }
 }

@@ -6,6 +6,13 @@ flock -n 9 || exit 1
 if [[ -f "$VPS_PARAM_EXPECTED_BACKUP/transaction-committed" ]]; then printf '%s\n' 'VPSDEPLOY_MIGRATION_COMMITTED'; exit 0; fi
 [[ "$(cat /var/lib/mxh-vps-deploy/transaction.owner)" == "$VPS_PARAM_EXPECTED_BACKUP" ]]
 [[ ! -f "$VPS_PARAM_EXPECTED_BACKUP/rollback-executed" ]]
+check_deadline(){
+  local deadline
+  [[ -f "$VPS_PARAM_EXPECTED_BACKUP/deadline-epoch" ]] || return 0
+  deadline="$(cat "$VPS_PARAM_EXPECTED_BACKUP/deadline-epoch")"
+  [[ "$deadline" =~ ^[0-9]+$ && "$(date +%s)" -lt "$deadline" ]] || { echo 'Rollback deadline passed; commit refused.' >&2; return 1; }
+}
+check_deadline
 if systemctl is-active --quiet mxh-protocol-migration-rollback.service; then exit 1; fi
 
 : "${VPS_PARAM_SOURCE_ROLE:?}"
@@ -56,6 +63,7 @@ check_config() {
 [[ "$reality_enabled" == 'false' ]] || check_config RealityEntry
 [[ "$anytls_enabled" == 'false' ]] || check_config AnyTlsEntry
 [[ "$shadowsocks_enabled" == 'false' ]] || check_config ShadowsocksLanding
+check_deadline
 
 if [[ "$reality_enabled" == 'false' ]]; then systemctl disable --now xray.service >/dev/null 2>&1 || true; fi
 if [[ "$anytls_enabled" == 'false' ]]; then systemctl disable --now sing-box-anytls.service >/dev/null 2>&1 || true; fi
@@ -105,6 +113,7 @@ case "$remove_role" in
   *) exit 1 ;;
 esac
 
+check_deadline
 systemctl stop mxh-protocol-migration-rollback.timer
 systemctl disable mxh-protocol-migration-rollback.timer >/dev/null
 if systemctl is-active --quiet mxh-protocol-migration-rollback.timer; then exit 1; fi

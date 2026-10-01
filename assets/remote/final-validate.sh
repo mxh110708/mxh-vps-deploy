@@ -9,6 +9,8 @@ set -euo pipefail
 : "${VPS_PARAM_ANYTLS_ENABLED:?}"
 : "${VPS_PARAM_SHADOWSOCKS_ENABLED:?}"
 firewall_mode="${VPS_PARAM_FIREWALL_MODE:-ManagedNftables}"
+preserve_ssh_auth="${VPS_PARAM_PRESERVE_SSH_AUTH:-false}"
+[[ "$preserve_ssh_auth" == true || "$preserve_ssh_auth" == false ]]
 
 for value in "$VPS_PARAM_REALITY_ENABLED" "$VPS_PARAM_ANYTLS_ENABLED" "$VPS_PARAM_SHADOWSOCKS_ENABLED"; do
   [[ "$value" == 'true' || "$value" == 'false' ]] || exit 1
@@ -19,8 +21,10 @@ sshd -t
 effective="$(sshd -T)"
 grep -qx "port ${VPS_PARAM_SSH_PRIMARY}" <<<"$effective"
 grep -qx "port ${VPS_PARAM_SSH_RESCUE}" <<<"$effective"
-grep -qx 'passwordauthentication no' <<<"$effective"
-grep -qx 'kbdinteractiveauthentication no' <<<"$effective"
+if [[ "$preserve_ssh_auth" == false ]]; then
+  grep -qx 'passwordauthentication no' <<<"$effective"
+  grep -qx 'kbdinteractiveauthentication no' <<<"$effective"
+fi
 grep -qx 'pubkeyauthentication yes' <<<"$effective"
 case "$firewall_mode" in
   ManagedNftables)

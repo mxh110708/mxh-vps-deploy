@@ -35,14 +35,14 @@ Assert-True ([string]$manifest.xray.installer_sha256 -match '^[0-9a-f]{64}$') 'X
 Assert-True ([string]$manifest.komari_agent.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'Komari amd64 SHA-256'
 Assert-True ([string]$manifest.komari_controller.version -eq '1.5.1') 'Komari controller pinned latest stable baseline'
 Assert-True ([string]$manifest.komari_agent.version -eq '1.5.11') 'Komari agent pinned latest stable baseline'
-Assert-True ([string]$manifest.sing_box.assets.windows_amd64.version -eq '1.14.2' -and [string]$manifest.sing_box.version -eq '1.14.0') 'MXH Route client compatibility does not silently upgrade the Linux VPS core'
+Assert-True ([string]$manifest.sing_box.assets.windows_amd64.version -eq '1.14.2' -and [string]$manifest.sing_box.version -eq '1.14.2') 'Linux and Windows stable baselines were independently verified at 1.14.2'
 Assert-True ([string]$manifest.komari_controller.assets.amd64.name -eq 'komari-linux-amd64') 'Komari controller amd64 asset name'
 Assert-True ([string]$manifest.komari_controller.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'Komari controller amd64 SHA-256'
 Assert-True ([string]$manifest.komari_controller.assets.arm64.sha256 -match '^[0-9a-f]{64}$') 'Komari controller arm64 SHA-256'
 Assert-True ([string]$manifest.sing_box.version -match '^\d+\.\d+\.\d+$') 'sing-box pinned version'
 Assert-True ([string]$manifest.sing_box.assets.amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box amd64 SHA-256'
 Assert-True ([string]$manifest.sing_box.assets.windows_amd64.sha256 -match '^[0-9a-f]{64}$') 'sing-box Windows SHA-256'
-Assert-True ([string]$manifest.mihomo.version -eq '1.19.30') 'Mihomo stable test core version is pinned'
+Assert-True ([string]$manifest.mihomo.version -eq '1.19.32') 'Mihomo stable test core version is pinned'
 $vendorManifest = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'vendor\test-cores\windows-amd64\checksums.json') | ConvertFrom-Json
 Assert-True (@($vendorManifest.artifacts).Count -eq 2) 'vendor manifest contains both required Windows test cores'
 foreach ($artifact in @($vendorManifest.artifacts)) {
@@ -1730,13 +1730,20 @@ Write-Host "All tests passed: $passed assertions" -ForegroundColor Green
 & (Join-Path $ProjectRoot 'tests/Test-Workbench.ps1') -ProjectRoot $ProjectRoot
 & (Join-Path $ProjectRoot 'tests/Test-SshKeyAccess.ps1') -ProjectRoot $ProjectRoot
 & (Join-Path $ProjectRoot 'tests/Test-MenuCopy.ps1') -ProjectRoot $ProjectRoot
+& (Join-Path $ProjectRoot 'tests/Test-AuditFixes.ps1') -ProjectRoot $ProjectRoot
 if($pythonCommandForClient){
     & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_client_compatibility.py')
     if($LASTEXITCODE -ne 0){throw 'Client template compatibility tests failed.'}
+    & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_health_audit.py')
+    if($LASTEXITCODE -ne 0){throw 'Health audit behavior tests failed.'}
 }
 if($bash -and $pythonCommandForClient){
     & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_remote_transactions.py') --bash $bash
     if($LASTEXITCODE -ne 0){throw 'Remote transaction guard tests failed.'}
+    & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_scoped_rollback.py') --bash $bash
+    if($LASTEXITCODE -ne 0){throw 'Scoped rollback behavior tests failed.'}
+    & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_import_contracts.py') --bash $bash
+    if($LASTEXITCODE -ne 0){throw 'Import/SSH policy behavior tests failed.'}
     & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_komari_lifecycle.py') --bash $bash
     if($LASTEXITCODE -ne 0){throw 'Komari lifecycle compatibility tests failed.'}
 }

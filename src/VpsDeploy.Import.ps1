@@ -357,6 +357,8 @@ function Invoke-MxhExistingVpsImport {
         $Plan.Ports.LandingShadowsocks = [int]$ss.Port
         $Plan.Shadowsocks.Method = [string]$ss.Method
         $Plan.Shadowsocks.SecondaryIpv6Enabled = [bool]$ss.SecondaryIpv6Enabled
+        $Plan.Shadowsocks.SecondaryIpv6Address = if ($ss.Contains('SecondaryIpv6Address')) { $ss.SecondaryIpv6Address } else { $null }
+        $Plan.Shadowsocks.SecondaryBindInterface = if ($ss.Contains('SecondaryBindInterface')) { $ss.SecondaryBindInterface } else { $null }
         $Plan.Shadowsocks.SingBoxVersion = [string]$ss.SingBoxVersion
         $context.Secrets.Shadowsocks = Copy-MxhHashtable -Value $ss.Secrets
     }
@@ -439,14 +441,7 @@ The import did not reinstall protocols, change proxy ports, or overwrite the exi
     $context.State.FinalArchive = $reportPath
     Save-VpsContext -Context $context
 
-    $checksumPath = Join-Path $archive 'SHA256SUMS-private.txt'
-    $lines = foreach ($file in (Get-ChildItem -LiteralPath $archive -File -Recurse | Where-Object FullName -ne $checksumPath)) {
-        $relative = [IO.Path]::GetRelativePath($archive, $file.FullName).Replace('\', '/')
-        try { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant(), $relative }
-        catch { "# UNREADABLE-SKIPPED  $relative" }
-    }
-    [IO.File]::WriteAllText($checksumPath, (($lines | Sort-Object) -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
-    Protect-VpsPrivateFile $checksumPath
+    Update-VpsPrivateArchiveChecksums -Context $context
     Write-VpsUi "现有 VPS 已纳管：$archive" Success
     if ($Plan.Import.SingleSshPort) {
         Write-VpsUi '该实例只有一个现有 SSH 端口；协议管理可用，但不等同于新部署的双入口 SSH。建议以后单独补充救援端口。' Warning

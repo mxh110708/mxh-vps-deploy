@@ -220,7 +220,7 @@ function Invoke-MxhSchemePublish {
     if($DryRun){Write-VpsUi 'DryRun：未发布。' Info;return}
     foreach($path in $candidate.Sources.Keys){if((Get-MxhFileFingerprint $path) -ne $candidate.Sources[$path]){throw '确认期间来源发生变化，请重新生成。'}}
     $backup=Join-Path $ProjectRoot ('private/client-publish/'+[Guid]::NewGuid().ToString('N'))
-    Publish-MxhAuthorityPair $candidate.Clash $candidate.SingBox $targetClash $targetSing $backup -Expected $expected -ExpectedCandidates @{Clash=$candidate.ClashHash;SingBox=$candidate.SingHash} | Out-Null
+    Publish-MxhCheckedAuthorityPair $candidate.Clash $candidate.SingBox $targetClash $targetSing $backup -States $candidate.States -Sources $candidate.Sources -Expected $expected -ExpectedCandidates @{Clash=$candidate.ClashHash;SingBox=$candidate.SingHash} | Out-Null
     $Scheme.Targets=@{Clash=$targetClash;SingBox=$targetSing};$Scheme.Dirty=$true
     Write-VpsUi "发布完成；备份与事务记录：$backup" Success
 }

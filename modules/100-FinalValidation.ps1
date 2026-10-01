@@ -27,7 +27,7 @@
             SSH_PRIMARY = [string]$Context.Plan.Ports.SshPrimary
             SSH_RESCUE = [string]$Context.Plan.Ports.SshRescue
             XRAY_PRIMARY = & $getEnabledPort 'XrayPrimary' ([bool]$inventory.RealityEntry.Enabled)
-            XRAY_BACKUP = & $getEnabledPort 'XrayBackup' ([bool]$inventory.RealityEntry.Enabled)
+            XRAY_BACKUP = if ($Context.Plan.Ports.Contains('XrayBackup') -and $Context.Plan.Ports.XrayBackup) { & $getEnabledPort 'XrayBackup' ([bool]$inventory.RealityEntry.Enabled) } else { '' }
             ANYTLS_PORT = & $getEnabledPort 'AnyTlsPrimary' ([bool]$inventory.AnyTlsEntry.Enabled)
             ANYTLS_SERVER_NAME = if ([bool]$inventory.AnyTlsEntry.Enabled) { [string]$Context.Plan.AnyTls.ServerName } else { '' }
             REALITY_TARGET_MODE = if ([bool]$inventory.RealityEntry.Enabled -and $Context.Plan.Reality.Contains('TargetMode')) {
@@ -51,6 +51,7 @@
                 [string]$Context.Plan.Firewall.Mode
             } else { 'ManagedNftables' }
             KOMARI_ENABLED = ([bool]$Context.Plan.Komari.Enabled).ToString().ToLowerInvariant()
+            PRESERVE_SSH_AUTH = ($Context.Plan.Contains('Import') -and $Context.Plan.Import.Contains('SshAuthenticationPreserved') -and [bool]$Context.Plan.Import.SshAuthenticationPreserved).ToString().ToLowerInvariant()
         }
         $result = Invoke-VpsRemoteScript -Context $Context -Asset 'final-validate.sh' -Parameters $parameters
         if ($result.StdOut -notmatch 'VPSDEPLOY_FINAL_OK') { throw '服务端总验收未返回成功标记。' }

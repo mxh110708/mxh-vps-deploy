@@ -4,6 +4,16 @@ set -euo pipefail
 : "${VPS_PARAM_CONFIG_JSON:?}"
 : "${VPS_PARAM_WAS_ACTIVE:?}"
 [[ "$VPS_PARAM_WAS_ACTIVE" == 'true' || "$VPS_PARAM_WAS_ACTIVE" == 'false' ]]
+if [[ -n "${VPS_PARAM_EXPECTED_CONFIG_SHA256:-}" ]]; then
+  [[ "$VPS_PARAM_EXPECTED_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+  case "$VPS_PARAM_ROLE" in
+    RealityEntry) current=/usr/local/etc/xray/config.json ;;
+    AnyTlsEntry) current=/etc/sing-box-anytls/config.json ;;
+    ShadowsocksLanding) current=/etc/sing-box/config.json ;;
+    *) exit 1 ;;
+  esac
+  printf '%s  %s\n' "$VPS_PARAM_EXPECTED_CONFIG_SHA256" "$current" | sha256sum --check --status
+fi
 tmp="$(mktemp --suffix=.json)"; trap 'rm -f "$tmp"' EXIT
 printf '%s' "$VPS_PARAM_CONFIG_JSON" > "$tmp"
 python3 -m json.tool "$tmp" >/dev/null

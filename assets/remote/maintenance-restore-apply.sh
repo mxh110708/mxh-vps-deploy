@@ -9,7 +9,7 @@ resolved="$(readlink -f "$VPS_PARAM_BACKUP_PATH")"
 [[ -x /usr/local/libexec/mxh-protocol-migration-rollback ]]
 
 if [[ "$VPS_PARAM_SCOPE" == 'Full' ]]; then
-  /usr/local/libexec/mxh-protocol-migration-rollback "$resolved"
+  /usr/local/libexec/mxh-protocol-migration-rollback "$resolved" --protocol-only
 else
   [[ -f "$resolved/protocol-files.tar.gz" ]]
   stage="$(mktemp -d)"

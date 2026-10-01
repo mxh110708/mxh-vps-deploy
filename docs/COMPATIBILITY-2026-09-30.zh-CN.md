@@ -1,10 +1,10 @@
-# 2026-09-30 组件与客户端兼容基线
+# 组件与客户端兼容基线（2026-10-01 修订）
 
 ## 版本与范围
 
 - [Komari Controller 1.5.1](https://github.com/komari-monitor/komari/releases/tag/1.5.1) 与 [Agent 1.5.11](https://github.com/komari-monitor/komari-agent/releases/tag/1.5.11)：采用当日最新正式版本，不采用 Snapshot、RC 或 1.6 预发布版。Linux amd64/arm64 的文件名和 SHA-256 固定在 `config/versions.json`；项目正式 VPS 支持范围仍为 Debian 12/13 amd64。
 - [官方 sing-box 1.14.2](https://github.com/SagerNet/sing-box/releases/tag/v1.14.2) Windows amd64 验证核心，匹配 [MXH Route 1.14.2-mxh.7](https://github.com/mxh110708/mxh-route-desktop/releases/tag/v1.14.2-mxh.7) 所用的官方核心版本。
-- Linux VPS 的 sing-box 部署/升级资产仍为 1.14.0。Windows 资产自身的 `version` 优先用于客户端验证，不能把 Windows 版本误用为远端版本。
+- Linux VPS 的 sing-box 部署/升级资产经独立隔离验证更新到 1.14.2；Mihomo Windows/Linux 校验基线更新到 1.19.32。Windows 资产自身的 `version` 仍优先用于客户端验证，不能把客户端版本自动套用于远端。
 
 本次适配只更新工具源码、通用模板、测试与公开验证资产，不执行现有服务器升级，不覆盖用户的 Clash/MXH Route 权威配置，不改变桌面客户端、系统代理或 TUN 状态。
 
@@ -18,7 +18,7 @@ mixed 默认只监听回环地址的 2080 端口。MXH Route 端口设置读取�
 
 从现有配置导入时，构建器仅移除这五个已识别公共规则的 `initial_path`，让新客户端重新建立缓存；不同 URL、自定义规则及其 `initial_path` 不擅自更改。UTF-8 配置必须小于 4 MiB；失败不会写出超限候选。已有节点、端口、DNS、TUN 和高级规则不被通用模板强制覆盖。
 
-Clash 模板保留同样的分组含义，新增 GeoSite/GeoIP、DNS 分流、嗅探及 UDP/广告防护；使用项目已有的 Mihomo 1.19.30 与固定 GeoData 验证。Clash TUN 默认关闭。请不要让两个客户端同时接管 Windows 系统代理或 TUN。
+Clash 模板保留同样的分组含义，新增 GeoSite/GeoIP、DNS 分流、嗅探及 UDP/广告防护；使用 Mihomo 1.19.32 与固定 GeoData 验证。Clash TUN 默认关闭，已有配置显式指定的栈不会被升级流程改写。请不要让两个客户端同时接管 Windows 系统代理或 TUN。
 
 ## Komari 1.5 升级与数据恢复
 
@@ -28,7 +28,7 @@ Controller 1.5 引入新的指标数据库结构；可能显示 `/admin/database
 
 工具创建完整备份与 Controller 专用事务快照时短暂停服务，随后恢复原运行状态。升级失败或用户取消时，先停服务，把升级后的数据移到受限备份目录，再恢复旧快照与二进制，以免新生成的数据库残留混入旧版本。失败数据保留用于排查，不自动删除。
 
-升级后检查版本、实际运行程序、回环监听、HTTP 及迁移引导 API。正常 SPA 对未注册迁移接口可能返回 HTML，而非 404；必须再由正常版本 API 返回预期版本的 JSON 才确认迁移不再待处理。迁移仍待处理时不会提交，用户需在面板完成后返回复验；工具不代替用户点击迁移或删除历史数据。20 分钟远端保护窗口到期会自动回滚，长时间大数据迁移应另行安排完整备份下的维护窗口。原先停用的 Controller 保持停用，只验证程序版本，并明确提示数据库迁移将延期到下次启动。
+升级后检查版本、实际运行程序、回环监听、HTTP 及迁移引导 API。正常 SPA 对未注册迁移接口可能返回 HTML，而非 404；必须再由正常版本 API 返回预期版本的 JSON 才确认迁移不再待处理。迁移仍待处理时不会提交，用户需在面板完成后返回复验；工具不代替用户点击迁移或删除历史数据。20 分钟远端保护窗口到期触发回滚，并拒绝后续写入命令与提交；回滚等待进行中的写入阶段释放锁，实际还原时间可能晚于截止时间。长时间大数据迁移应另行安排完整备份下的维护窗口。原先停用的 Controller 保持停用，只验证程序版本，并明确提示数据库迁移将延期到下次启动。
 
 Agent 使用现有 Token 与配置，保持禁用自动更新和远程控制的安全默认值；安装/修复显式重启以加载新程序与配置。新安装不再写入已弃用的 `protocol_version` 字段。
 

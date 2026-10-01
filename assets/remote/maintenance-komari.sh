@@ -68,6 +68,43 @@ if not any(resolved == allowed or allowed in resolved.parents for allowed in roo
 PY
 }
 
+validate_controller_archive() {
+  python3 - "$1" "${2:-validate}" <<'PY'
+import pathlib, tarfile, sys
+directories = ("opt/komari", "var/lib/komari")
+files = {"etc/systemd/system/komari.service", "etc/systemd/system/cloudflared.service",
+         "usr/local/bin/komari", "usr/bin/komari", "usr/local/bin/cloudflared", "usr/bin/cloudflared"}
+def allowed(name):
+    path = pathlib.PurePosixPath(name)
+    return not path.is_absolute() and ".." not in path.parts and (str(path) in files or any(str(path) == root or str(path).startswith(root + "/") for root in directories))
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    members = archive.getmembers()
+    if not members: raise SystemExit("Empty Controller archive")
+    for member in members:
+        if not allowed(member.name) or member.isdev() or member.isfifo(): raise SystemExit("Unsupported Controller archive member")
+        if member.issym():
+            parent = pathlib.PurePosixPath(member.name).parent
+            if not allowed(str(parent / member.linkname)): raise SystemExit("Unsafe Controller archive link")
+        if member.islnk() and not allowed(member.linkname): raise SystemExit("Unsafe Controller archive hardlink")
+    if sys.argv[2] == "scope":
+        names = {str(pathlib.PurePosixPath(member.name)) for member in members}
+        tunnel_files = {"etc/systemd/system/cloudflared.service", "usr/local/bin/cloudflared", "usr/bin/cloudflared"}
+        includes_tunnel = bool(names & tunnel_files)
+        if includes_tunnel and ("etc/systemd/system/cloudflared.service" not in names or not names & (tunnel_files - {"etc/systemd/system/cloudflared.service"})):
+            raise SystemExit("Incomplete Cloudflared archive; tunnel unit and executable are required")
+        print("true" if includes_tunnel else "false")
+PY
+}
+
+quarantine_controller_data() {
+  local destination="$1" directory leaf
+  for directory in /var/lib/komari /opt/komari; do
+    [[ ! -e "$directory" && ! -L "$directory" ]] && continue
+    [[ -d "$directory" && ! -L "$directory" && "$(readlink -f "$directory")" == "$directory" ]] || return 1
+    leaf="${directory#/}"; mv "$directory" "$destination/${leaf//\//-}"
+  done
+}
+
 verify_controller() {
   local binary code pending body pid
   binary="$(find_controller_binary)"
@@ -150,8 +187,9 @@ case "$VPS_PARAM_ACTION" in
     systemctl is-active --quiet komari-agent.service 2>/dev/null && was_active=true
     systemctl is-enabled --quiet komari-agent.service 2>/dev/null && was_enabled=true
     tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-    curl --fail --location --silent --show-error --retry 3 --output "$tmp" "https://github.com/komari-monitor/komari-agent/releases/download/${VPS_PARAM_VERSION}/${VPS_PARAM_ASSET_NAME}"
+    curl --fail --location --silent --show-error --connect-timeout 15 --max-time 180 --retry 3 --output "$tmp" "https://github.com/komari-monitor/komari-agent/releases/download/${VPS_PARAM_VERSION}/${VPS_PARAM_ASSET_NAME}"
     printf '%s  %s\n' "$VPS_PARAM_SHA256" "$tmp" | sha256sum --check --status
+    if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
     # Agent 1.5.11 has no version command. Never execute a downloaded agent
     # for preflight: its normal entry point may start persistent workers.
     # The pinned release checksum identifies the exact version instead.
@@ -174,12 +212,17 @@ case "$VPS_PARAM_ACTION" in
     assert_controller_storage
     stamp="$(date -u +%Y%m%d-%H%M%S)"; output="/root/komari-controller-${stamp}.tar.gz"
     [[ ! -e "$output" ]] || { echo 'Komari backup timestamp collision; retry later.' >&2; exit 1; }
-    paths=(); for p in var/lib/komari opt/komari etc/systemd/system/komari.service etc/systemd/system/cloudflared.service usr/local/bin/komari usr/bin/komari usr/local/bin/cloudflared usr/bin/cloudflared; do [[ -e "/$p" ]] && paths+=("$p"); done
+    include_tunnel="${VPS_PARAM_INCLUDE_TUNNEL:-true}"
+    [[ "$include_tunnel" == true || "$include_tunnel" == false ]]
+    managed=(var/lib/komari opt/komari etc/systemd/system/komari.service usr/local/bin/komari usr/bin/komari)
+    if [[ "$include_tunnel" == true ]]; then managed+=(etc/systemd/system/cloudflared.service usr/local/bin/cloudflared usr/bin/cloudflared); fi
+    paths=(); for p in "${managed[@]}"; do [[ -e "/$p" ]] && paths+=("$p"); done
     ((${#paths[@]} > 0))
     backup_was_active=false; systemctl is-active --quiet komari.service && backup_was_active=true
     restart_after_backup(){ [[ "$backup_was_active" == false ]] || systemctl start komari.service; }
     trap restart_after_backup EXIT
     if [[ "$backup_was_active" == true ]]; then systemctl stop komari.service; fi
+    ! systemctl is-active --quiet komari.service || { echo 'Controller is still running; consistent backup refused.' >&2; exit 1; }
     tar --numeric-owner -czpf "$output" -C / "${paths[@]}"; chmod 0600 "$output"
     restart_after_backup; trap - EXIT
     printf 'VPSDEPLOY_KOMARI_BACKUP_B64=%s\n' "$(printf '%s' "$output" | base64 | tr -d '\n')"
@@ -188,36 +231,92 @@ case "$VPS_PARAM_ACTION" in
     : "${VPS_PARAM_BACKUP_FILE:?}"; final_active="${VPS_PARAM_FINAL_ACTIVE:-true}"
     [[ "$final_active" == true || "$final_active" == false ]]
     file="$(readlink -f "$VPS_PARAM_BACKUP_FILE")"
-    [[ "$file" =~ ^/root/komari-controller-[0-9]{8}-[0-9]{6}\.tar\.gz$ ]]; tar -tzf "$file" >/dev/null
-    stamp="$(date -u +%Y%m%d-%H%M%S)"; safety="/root/vps-deploy-backups/${stamp}/komari-controller-restore"
-    install -d -m 0700 "$safety"; current=()
-    for p in var/lib/komari opt/komari etc/systemd/system/komari.service etc/systemd/system/cloudflared.service usr/local/bin/komari usr/local/bin/cloudflared usr/bin/cloudflared; do [[ -e "/$p" ]] && current+=("$p"); done
-    ((${#current[@]} == 0)) || tar --numeric-owner -czpf "$safety/current.tar.gz" -C / "${current[@]}"
+    [[ "$file" =~ ^/root/komari-controller-[0-9]{8}-[0-9]{6}\.tar\.gz$ ]]
+    restore_tunnel="$(validate_controller_archive "$file" scope)"
+    if [[ -n "${VPS_PARAM_BACKUP_SHA256:-}" ]]; then
+      [[ "$VPS_PARAM_BACKUP_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]
+      printf '%s  %s\n' "$VPS_PARAM_BACKUP_SHA256" "$file" | sha256sum --check --status
+    fi
+    for directory in /var/lib/komari /opt/komari; do [[ ! -L "$directory" ]] || exit 1; done
+    safety="$(mktemp -d /root/vps-deploy-backups/komari-controller-restore-XXXXXXXX)"; chmod 0700 "$safety"
+    current=(); managed_files=(etc/systemd/system/komari.service usr/local/bin/komari usr/bin/komari)
+    if [[ "$restore_tunnel" == true ]]; then managed_files+=(etc/systemd/system/cloudflared.service usr/local/bin/cloudflared usr/bin/cloudflared); fi
+    for p in var/lib/komari opt/komari "${managed_files[@]}"; do [[ -e "/$p" ]] && current+=("$p"); done
     was_enabled=false; was_active=false; tunnel_was_enabled=false; tunnel_was_active=false
     systemctl is-enabled --quiet komari.service 2>/dev/null && was_enabled=true
     systemctl is-active --quiet komari.service 2>/dev/null && was_active=true
-    systemctl is-enabled --quiet cloudflared.service 2>/dev/null && tunnel_was_enabled=true
-    systemctl is-active --quiet cloudflared.service 2>/dev/null && tunnel_was_active=true
-    rollback(){ set +e; systemctl disable --now cloudflared.service komari.service >/dev/null 2>&1; [[ ! -f "$safety/current.tar.gz" ]] || tar --numeric-owner -xzpf "$safety/current.tar.gz" -C /; systemctl daemon-reload; [[ "$was_enabled" == false ]] || systemctl enable komari.service >/dev/null; [[ "$was_active" == false ]] || systemctl start komari.service; [[ "$tunnel_was_enabled" == false ]] || systemctl enable cloudflared.service >/dev/null; [[ "$tunnel_was_active" == false ]] || systemctl start cloudflared.service; }
+    if [[ "$restore_tunnel" == true ]]; then
+      systemctl is-enabled --quiet cloudflared.service 2>/dev/null && tunnel_was_enabled=true
+      systemctl is-active --quiet cloudflared.service 2>/dev/null && tunnel_was_active=true
+    fi
+    changed=false
+    rollback(){
+      set +e
+      if [[ "$changed" == false ]]; then
+        [[ "$was_active" == false ]] || systemctl start komari.service
+        [[ "$tunnel_was_active" == false ]] || systemctl start cloudflared.service
+        return 0
+      fi
+      systemctl disable --now komari.service >/dev/null 2>&1
+      ! systemctl is-active --quiet komari.service || return 1
+      if [[ "$restore_tunnel" == true ]]; then
+        systemctl disable --now cloudflared.service >/dev/null 2>&1
+        ! systemctl is-active --quiet cloudflared.service || return 1
+      fi
+      failed="$(mktemp -d "$safety/failed-restore-XXXXXXXX")"
+      quarantine_controller_data "$failed" || return 1
+      for p in "${managed_files[@]}"; do rm -f "/$p"; done
+      [[ ! -f "$safety/current.tar.gz" ]] || tar --numeric-owner -xzpf "$safety/current.tar.gz" -C /
+      systemctl daemon-reload
+      [[ "$was_enabled" == false ]] || systemctl enable komari.service >/dev/null
+      [[ "$was_active" == false ]] || systemctl start komari.service
+      [[ "$tunnel_was_enabled" == false ]] || systemctl enable cloudflared.service >/dev/null
+      [[ "$tunnel_was_active" == false ]] || systemctl start cloudflared.service
+    }
     on_restore_exit(){ local rc=$?; trap - EXIT; if ((rc != 0)); then rollback; fi; exit "$rc"; }
     trap on_restore_exit EXIT
-    systemctl stop cloudflared.service komari.service >/dev/null 2>&1 || true
+    if [[ "$tunnel_was_active" == true ]]; then systemctl stop cloudflared.service; fi
+    if [[ "$was_active" == true ]]; then systemctl stop komari.service; fi
+    ! systemctl is-active --quiet komari.service || { echo 'Controller is still running; database restore refused.' >&2; exit 1; }
+    ((${#current[@]} == 0)) || tar --numeric-owner -czpf "$safety/current.tar.gz" -C / "${current[@]}"
+    changed=true
+    previous_data="$(mktemp -d "$safety/previous-data-XXXXXXXX")"; quarantine_controller_data "$previous_data"
+    for p in "${managed_files[@]}"; do rm -f "/$p"; done
     tar --numeric-owner -xzpf "$file" -C /; systemctl daemon-reload
     systemctl enable --now komari.service >/dev/null
     for _ in {1..30}; do grep -Fq '127.0.0.1:25774' <<< "$(ss -H -lnt 'sport = :25774' 2>/dev/null)" && break; sleep 1; done
     grep -Fq '127.0.0.1:25774' <<< "$(ss -H -lntp 'sport = :25774')"
     code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 http://127.0.0.1:25774/)"
     [[ "$code" =~ ^(200|302|303|307|308|401|403)$ ]]
+    binary="$(find_controller_binary)"; pid="$(systemctl show --property=MainPID --value komari.service)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "/proc/${pid}/exe" -ef "$binary" ]]
+    restored_version="$("$binary" --version 2>&1)"
+    restored_version="$(sed -nE 's/.*Komari Monitor v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' <<<"$restored_version" | head -n 1)"
+    [[ -n "$restored_version" ]]
+    if [[ "$restore_tunnel" == true ]]; then
+      systemctl cat cloudflared.service >/dev/null
+      if [[ "$tunnel_was_enabled" == true ]]; then systemctl enable cloudflared.service >/dev/null;
+      else systemctl disable cloudflared.service >/dev/null; fi
+      if [[ "$final_active" == true && "$tunnel_was_active" == true ]]; then
+        systemctl start cloudflared.service
+        systemctl is-active --quiet cloudflared.service
+      fi
+    fi
     if [[ "$final_active" == false ]]; then systemctl disable --now komari.service >/dev/null 2>&1 || true; fi
     trap - EXIT
     printf 'VPSDEPLOY_BACKUP_DIR_B64=%s\n' "$(printf '%s' "$safety" | base64 | tr -d '\n')"
+    printf 'VPSDEPLOY_KOMARI_RESTORED_VERSION_B64=%s\n' "$(printf '%s' "$restored_version" | base64 | tr -d '\n')"
     ;;
   ControllerUpgrade)
     assert_controller_storage
     : "${VPS_PARAM_VERSION:?}"; : "${VPS_PARAM_ASSET_NAME:?}"; : "${VPS_PARAM_SHA256:?}"
     : "${VPS_PARAM_BACKUP_FILE:?}"
     rollback_backup="$(readlink -f "$VPS_PARAM_BACKUP_FILE")"
-    [[ "$rollback_backup" =~ ^/root/komari-controller-[0-9]{8}-[0-9]{6}\.tar\.gz$ ]]; tar -tzf "$rollback_backup" >/dev/null
+    [[ "$rollback_backup" =~ ^/root/komari-controller-[0-9]{8}-[0-9]{6}\.tar\.gz$ ]]; validate_controller_archive "$rollback_backup"
+    archive_members="$(tar -tzf "$rollback_backup")"
+    if grep -Eq '(^|/)cloudflared(\.service)?$' <<<"$archive_members"; then
+      echo 'Controller upgrade requires a controller-only consistent backup.' >&2; exit 1
+    fi
     for directory in /var/lib/komari /opt/komari; do [[ ! -L "$directory" ]] || { echo 'Unsupported symlinked Komari data directory.' >&2; exit 1; }; done
     case "$(uname -m)" in x86_64|amd64) arch=amd64;; aarch64|arm64) arch=arm64;; *) exit 1;; esac
     [[ "$VPS_PARAM_ASSET_NAME" == "komari-linux-${arch}" ]]
@@ -227,7 +326,8 @@ case "$VPS_PARAM_ACTION" in
     binary_changed=false
     rollback_upgrade(){
       [[ "$binary_changed" == true ]] || return 0
-      systemctl stop komari.service
+      systemctl stop komari.service || return 1
+      ! systemctl is-active --quiet komari.service || return 1
       local failed_dir directory leaf
       failed_dir="$(mktemp -d /root/vps-deploy-backups/komari-failed-upgrade-XXXXXXXX)"
       chmod 0700 "$failed_dir"
@@ -244,9 +344,11 @@ case "$VPS_PARAM_ACTION" in
     }
     on_upgrade_exit(){ local rc=$?; trap - EXIT; if ((rc != 0)); then rollback_upgrade; fi; rm -f "$tmp" "$previous"; exit "$rc"; }
     trap on_upgrade_exit EXIT
-    curl --fail --location --silent --show-error --retry 3 --output "$tmp" "https://github.com/komari-monitor/komari/releases/download/${VPS_PARAM_VERSION}/${VPS_PARAM_ASSET_NAME}"
+    curl --fail --location --silent --show-error --connect-timeout 15 --max-time 180 --retry 3 --output "$tmp" "https://github.com/komari-monitor/komari/releases/download/${VPS_PARAM_VERSION}/${VPS_PARAM_ASSET_NAME}"
     printf '%s  %s\n' "$VPS_PARAM_SHA256" "$tmp" | sha256sum --check --status
-    systemctl stop komari.service >/dev/null 2>&1 || true
+    if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
+    systemctl stop komari.service
+    ! systemctl is-active --quiet komari.service || { echo 'Controller is still running; upgrade refused.' >&2; exit 1; }
     binary_changed=true
     install -o root -g root -m 0755 "$tmp" "$binary"
     version_output="$("$binary" --version 2>&1 || true)"; grep -Fq "Komari Monitor ${VPS_PARAM_VERSION}" <<<"$version_output"
@@ -277,12 +379,22 @@ ProtectHome=true
 WantedBy=multi-user.target
 EOF
     chmod 0600 /etc/systemd/system/cloudflared.service
-    systemctl daemon-reload; systemctl enable --now cloudflared.service >/dev/null
+    systemctl daemon-reload; systemctl enable cloudflared.service >/dev/null
+    systemctl restart cloudflared.service
     systemctl is-active --quiet cloudflared.service
+    pid="$(systemctl show --property=MainPID --value cloudflared.service)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "/proc/${pid}/exe" -ef "$cloudflared_bin" ]]
+    python3 - "/proc/${pid}/cmdline" <<'PY'
+import os, pathlib, sys
+arguments=pathlib.Path(sys.argv[1]).read_bytes().split(b"\0")
+expected=os.environ["VPS_PARAM_TUNNEL_TOKEN"].encode()
+if not any(arguments[index] == b"--token" and arguments[index+1] == expected for index in range(len(arguments)-1)):
+    raise SystemExit("Running Cloudflared process does not use the requested token")
+PY
     ;;
   ControllerUninstall)
     systemctl disable --now cloudflared.service komari.service >/dev/null 2>&1 || true
-    rm -f /etc/systemd/system/cloudflared.service /etc/systemd/system/komari.service /usr/local/bin/cloudflared /usr/local/bin/komari
+    rm -f /etc/systemd/system/cloudflared.service /etc/systemd/system/komari.service /usr/local/bin/cloudflared /usr/local/bin/komari /usr/bin/komari /usr/bin/cloudflared
     rm -rf /var/lib/komari /opt/komari
     systemctl daemon-reload
     ;;

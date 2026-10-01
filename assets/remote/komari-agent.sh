@@ -30,8 +30,9 @@ fi
 install -d -o komari-agent -g komari-agent -m 0750 "$state_dir"
 install -d -o root -g komari-agent -m 0750 "$config_dir"
 
-curl --fail --location --silent --show-error --retry 3 --output "$binary" "$url"
+curl --fail --location --silent --show-error --connect-timeout 15 --max-time 180 --retry 3 --output "$binary" "$url"
 printf '%s  %s\n' "$VPS_PARAM_SHA256" "$binary" | sha256sum --check --status
+if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
 install -o root -g root -m 0755 "$binary" /usr/local/bin/komari-agent
 
 python3 - "$config" <<'PY'
