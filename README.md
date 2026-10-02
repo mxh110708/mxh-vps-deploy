@@ -2,6 +2,8 @@
 
 面向个人 Debian VPS 的中文部署与运维工具，由 Windows 控制端统一管理部署计划、远端操作、私有归档和客户端配置。
 
+当前版本：[v0.5.3](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.5.3)，补齐最低 PowerShell 7.4.20 的隔离初始化与七项 CI 检查。
+
 支持新机部署、已有实例接入、协议管理、网络调优、维护恢复及实例退役。交互向导负责收集与确认，远端 Bash 模块负责执行，计划与状态文件用于继续任务和核对结果。
 
 ## 项目基准
@@ -213,7 +215,7 @@ pwsh -File .\scripts\Check-UpstreamVersions.ps1
 
 测试包含 PowerShell 逻辑、交互、工作台、SSH 私钥权限、菜单契约及具备依赖时的 Bash 隔离模拟。固定资产更新需要同步版本、文件名和 SHA-256，再进行项目测试与真实协议验收。
 
-CI 使用 Windows 和 Python 3.9/3.13 验证控制端；Debian 12/13 容器验证远端 Bash、包名、OpenSSH 契约及真实核心的隔离升级/回滚。隔离模拟不等于真实 systemd 调度、网络故障或 VPS 全流程验收。
+CI 使用 Python 3.9/3.13 与 runner PowerShell/隔离 PowerShell 7.4.20 的四个 Windows 档位验证控制端；Debian 12/13 容器验证远端 Bash、包名、OpenSSH 契约及真实核心的隔离升级/回滚，另有 shell 检查，共七项。隔离模拟不等于真实 systemd 调度、网络故障或 VPS 全流程验收。
 
 ## 文档导航
 
@@ -227,3 +229,4 @@ CI 使用 Windows 和 Python 3.9/3.13 验证控制端；Debian 12/13 容器验�
 | [交互维护](docs/INTERACTION-MAINTENANCE.md) | 导航规范与回归约定 |
 | [变更记录](CHANGELOG.md) | 功能调整与修复历史 |
 | [审计修复与隔离验收](docs/AUDIT-FIXES-2026-10-01.zh-CN.md) | v0.5.2 修复、验证结果及未验收范围 |
+| [最低 PowerShell 运行环境验证](docs/MINIMUM-POWERSHELL-2026-10-01.zh-CN.md) | v0.5.3 便携 7.4.20、初始化器回归与七项 CI |

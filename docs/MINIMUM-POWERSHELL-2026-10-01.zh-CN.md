@@ -21,7 +21,7 @@ $runtime = Join-Path $runtimeDirectory 'pwsh.exe'
 - 初始化器拒绝错误哈希及现有目标目录的四项回归纳入主入口；成功初始化分支以完整已校验官方 ZIP 验证。
 - 同一 7.4.20 进程完成官方 sing-box、Mihomo、MXH Route 核心与五项离线规则检查；项目构建的两份候选通过，原模板未改。
 - 新 CI 使用 Python 3.9／3.13 × runner PowerShell／隔离 7.4.20 四个 Windows 档位，另保留 Debian 12／13 与 shell 检查。
-- 只有本机执行结果；新远端矩阵未运行，尚未推送或发行。
+- 2026-10-02，维护提交 `a9886e8` 已推送，[对应 GitHub Actions](https://github.com/mxh110708/mxh-vps-deploy/actions/runs/37026109431) 的七项检查全部通过；v0.5.3 收录本轮最低运行环境维护。正式发行前还须确认发行提交本身的同一七项矩阵全部通过。
 
 ## 证据边界
 
