@@ -58,9 +58,9 @@ public sealed partial class MainWindow
             timer.Tick += (_, _) =>
             {
                 if (confirmed) return;
-                var dialog = VisualTreeHelper.GetOpenPopupsForXamlRoot(shell.XamlRoot).SelectMany(p => Find<ContentDialog>(p.Child)).FirstOrDefault(d => d.Title as string == "发现更新 " + baseline.Text("tag_name")[1..]);
+                var dialog = VisualTreeHelper.GetOpenPopupsForXamlRoot(shell.XamlRoot).SelectMany(p => Find<ContentDialog>(p.Child)).FirstOrDefault(d => Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(d) == "发现更新 " + baseline.Text("tag_name")[1..]);
                 if (dialog == null) return;
-                var button = Find<Button>(dialog).FirstOrDefault(b => b.Content as string == "确认"); if (button == null) return;
+                var button = Find<Button>(dialog).FirstOrDefault(b => b.Name == "PrimaryButton" && b.IsEnabled); if (button == null) return;
                 confirmed = true; updateConfirmationClicked = true; ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
             };
             timer.Start(); SelectPage("settings");

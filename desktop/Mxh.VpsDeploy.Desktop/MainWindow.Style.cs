@@ -33,7 +33,7 @@ public sealed partial class MainWindow
         dialog.FontFamily = InterfaceFont; dialog.Background = Brush(Paint.Surface); dialog.Foreground = Brush(Paint.Text); dialog.CornerRadius = new CornerRadius(12);
         dialog.PrimaryButtonStyle = DialogButton(true); dialog.CloseButtonStyle = DialogButton(false);
         dialog.SecondaryButtonStyle = DialogButton(false);
-        if (dialog.Title is string title) dialog.Title = Text(title, 22);
+        if (dialog.Title is string title) { Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(dialog, title); dialog.Title = Text(title, 22); }
         ApplyFont(dialog);
         // An explicit button click or keyboard focus is required to submit an operation.
         dialog.DefaultButton = ContentDialogButton.None;
