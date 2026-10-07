@@ -45,7 +45,7 @@ try{
  $fontSource=Join-Path $app 'Fonts/SourceSerif4-600.ttf';$fontDigest=(Get-FileHash -LiteralPath $fontSource).Hash.ToLowerInvariant()
  $fontRelative='private/fonts/'+$fontDigest+'.ttf';$fontPath=Join-Path $app $fontRelative
  [IO.Directory]::CreateDirectory((Split-Path -Parent $fontPath))|Out-Null;Copy-Item -LiteralPath $fontSource -Destination $fontPath
- @{Appearance='Light';FontId=('Custom:'+$fontDigest+'.ttf');AutoCheckUpdates=$false;UpdateProxy='http://127.0.0.1:2080'}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $app 'private/desktop-settings.json') -Encoding utf8
+ @{Appearance='Light';FontId=('Custom:'+$fontDigest+'.ttf');FontSizes=@{Title='Large';Body='Large';Note='Large';Metric='Small'};AutoCheckUpdates=$false;UpdateProxy='http://127.0.0.1:2080'}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $app 'private/desktop-settings.json') -Encoding utf8
  $privateHash=(Get-FileHash -LiteralPath (Join-Path $app 'private/instances/record.txt')).Hash
  $localHash=(Get-FileHash -LiteralPath (Join-Path $app 'config/app-defaults.local.json')).Hash
  $outside=Join-Path $fixture 'outside-authority.json';'fixture external authority'|Set-Content -LiteralPath $outside
@@ -85,6 +85,7 @@ try{
  Assert-Desktop ((Get-FileHash -LiteralPath (Join-Path $app 'private/instances/record.txt')).Hash -eq $privateHash -and (Get-FileHash -LiteralPath (Join-Path $app 'config/app-defaults.local.json')).Hash -eq $localHash) 'in-place installer update preserves archive and local settings'
  $preferences=Get-Content -LiteralPath (Join-Path $app 'private/desktop-settings.json') -Raw|ConvertFrom-Json -AsHashtable
  Assert-Desktop ((Get-FileHash -LiteralPath $fontPath).Hash.ToLowerInvariant() -eq $fontDigest -and $preferences.Appearance -eq 'Light' -and $preferences.FontId -eq ('Custom:'+$fontDigest+'.ttf') -and -not $preferences.AutoCheckUpdates -and $preferences.UpdateProxy -eq 'http://127.0.0.1:2080') 'in-place update preserves imported font and appearance preferences'
+ Assert-Desktop ($preferences.FontSizes.Title -eq 'Large' -and $preferences.FontSizes.Body -eq 'Large' -and $preferences.FontSizes.Note -eq 'Large' -and $preferences.FontSizes.Metric -eq 'Small') 'in-place update preserves all four independent font-size preferences'
  $watch=[Diagnostics.Stopwatch]::StartNew();while((Test-Path -LiteralPath $stage) -and $watch.ElapsedMilliseconds -lt 15000){[Threading.Thread]::Sleep(50)}
  Assert-Desktop (-not(Test-Path -LiteralPath $stage)) 'successful installed update removes only its transient stage'
  Assert-Desktop (Test-Path -LiteralPath (Join-Path $app 'private/update-test-completed.txt')) 'tested update helper reaches restart handoff'
