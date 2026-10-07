@@ -50,6 +50,12 @@ foreach ($file in $files) {
     $content = Get-Content -Raw -LiteralPath $file.FullName
     foreach ($entry in $patterns.GetEnumerator()) {
         $target = if ($entry.Key -like 'Accidental*') { $relative } else { $content }
+        # Public Windows 10/11 supportedOS compatibility identifier, not a node UUID.
+        # Limit the exception to this exact XML element; other UUIDs still fail.
+        if($entry.Key -eq 'Concrete UUID' -and $file.Extension -eq '.manifest'){
+            $publicWindowsCompatibility='8e0f7a12-'+'bfb3-'+'4fe8-'+'b9a5-'+'48fd50a15a9a'
+            $target=$target -replace ('<supportedOS\s+Id="\{'+[regex]::Escape($publicWindowsCompatibility)+'\}"\s*/>'), '<supportedOS />'
+        }
         if ($target -match $entry.Value) {
             $findings.Add([pscustomobject]@{ Rule = $entry.Key; File = $relative })
         }

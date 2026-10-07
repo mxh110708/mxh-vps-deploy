@@ -2,9 +2,9 @@
 
 面向个人 Debian VPS 的中文部署与运维工具，由 Windows 控制端统一管理部署计划、远端操作、私有归档和客户端配置。
 
-当前版本：[v0.7.0](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.7.0)，提供独立 Windows EXE、安装包、内置运行环境和安装版原位更新。
+正式版为 [v0.8.0](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.8.0)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
 
-下载 `mxh-vps-deploy-v0.7.0-windows-amd64-setup.exe` 安装，从桌面或开始菜单打开 **MXH VPS Deploy**。后续在设置页检查更新并更新重启，无需卸载重装。卸载时可选择保留私人数据，或彻底删除应用及安装目录内的数据。详情见 [桌面版使用与数据目录](docs/DESKTOP.zh-CN.md)。
+桌面采用 **WinUI 3 界面 + C#/.NET 共享运维核心 + Windows 适配层**，提供深浅两种配色、原版与霞鹜文楷两套内置字体及自定义字体导入。安装版通过“设置 → 检查更新”下载、校验、原位安装并自动重启，保留私人数据和本地配置，无需卸载重装。参见 [桌面版使用与数据目录](docs/DESKTOP.zh-CN.md) 和 [架构与边界](docs/DOTNET-ARCHITECTURE.zh-CN.md)。
 
 支持新机部署、已有实例接入、协议管理、网络调优、维护恢复及实例退役。交互向导负责收集与确认，远端 Bash 模块负责执行，计划与状态文件用于继续任务和核对结果。
 
@@ -22,9 +22,9 @@
 
 | 项目 | 支持范围或要求 |
 |---|---|
-| 控制端 | Windows 10/11，amd64 |
-| PowerShell | 安装版内置 7.4.20；源码开发需要 7.4+ |
-| SSH 工具 | 安装版内置 OpenSSH 客户端；不安装 SSH 服务 |
+| 新桌面控制端 | Windows 10 2004 / Windows 11，amd64；内置 .NET 与 WinUI 3 |
+| 源码构建 | .NET SDK 10.0.400；打包与旧命令行测试需要 PowerShell 7.4+ |
+| SSH 工具 | 新桌面使用 SSH.NET 直接连接；不依赖 PowerShell 或 OpenSSH 进程 |
 | 目标 VPS | Debian 12/13，amd64，使用 systemd 和 apt |
 | 初始登录 | 可用的 root SSH 登录方式：密码或已有 OpenSSH 私钥 |
 | 客户端配置设计器 | 安装版内置 Python 3.13.16 与固定 YAML 依赖；源码开发需要 Python 3.9+ |
@@ -39,20 +39,21 @@ Debian 是远端目标环境，不是控制端运行平台。操作前请保留�
 
 ### 2. 本地自检
 
-安装版从概述页进入“本地自检”。源码开发者在项目目录打开 PowerShell，运行：
+源码开发者在项目目录打开 PowerShell，运行既有命令行回归和新增共享核心回归：
 
 ```powershell
 pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
+dotnet run --project .\desktop\Mxh.VpsDeploy.Tests -c Release -- $PWD
 ```
 
 自检不连接 VPS，检查项目文件、脚本和离线测试；通过不等于真实服务器或代理连接已经验收。
 
 ### 3. 启动工具
 
-安装版通过桌面／开始菜单启动，便携版双击 `MXH-VPS-Deploy.exe`。源码开发可双击 `Start-VPSDeploy.cmd`，或运行：
+在正式发行页下载 `mxh-vps-deploy-v0.8.0-windows-amd64-setup.exe`，按同页 `SHA256SUMS.txt` 核对后安装，通过桌面／开始菜单启动。便携 ZIP 解压后双击 `MXH-VPS-Deploy.exe`；需要应用内原位更新时使用安装版。源码可先构建预览：
 
 ```powershell
-pwsh -NoProfile -STA -File .\Start-VPSDeploy.Gui.ps1
+pwsh -NoProfile -File .\scripts\New-VpsReleasePackage.ps1 -Development -Destination '<预览输出目录>'
 ```
 
 保留原命令行入口 `Start-VPSDeploy.Cli.cmd`，脚本自动化继续使用：
@@ -65,12 +66,12 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1
 
 | 桌面页面 | 使用方式 |
 |---|---|
-| **概述** | 查看本地记录，进入部署、维护、客户端配置或本地自检 |
+| **概述** | 查看本地记录，进入部署、接入或客户端配置 |
 | **实例** | 先选择实例，再进入运维、协议管理、继续部署或网络参数 |
 | **部署** | 新机部署或首次接入已有 VPS：基础表单、配置选项、审阅与执行 |
 | **客户端** | 创建或打开方案，编辑节点与连接关系，生成、校验并发布配置 |
-| **记录** | 查看近期任务结果和本次窗口的执行详情 |
-| **设置** | 调整界面大小，检查更新并重启，查看数据位置 |
+| **记录** | 查看任务结果，核对并恢复未完成的客户端发布 |
+| **设置** | 自动检查更新开关、手动检查更新，查看数据位置 |
 
 “继续未完成部署”需要已有 `deployment-plan.json`。尚未纳管的实例先在部署页接入，已纳管的实例在实例页选择后管理。旧归档由维护者离线转换，应用不提供一次性导入入口。
 
@@ -86,6 +87,8 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1
 - 向导回退保留适用的非敏感输入；敏感值不回显，必要时需要重新填写。
 
 ## 功能与边界
+
+下列详细协议与维护说明同时覆盖成熟命令行。新 WinUI 版本轮开放新机部署、只读接入、健康检查、独立网络调优、已安装协议启停/切换/卸载、固定版本升级、凭据轮换、按协议范围恢复、Agent 升级/卸载、主控备份/升级/恢复、Tunnel Token 轮换和受管实例退役。追加安装其他协议、主控整套卸载及旧归档转换仍由维护者按明确任务处理，不在桌面中添加含糊的通用执行入口。
 
 ### 部署与接入
 
@@ -132,7 +135,7 @@ AnyTLS 和 Reality 本机 HTTPS 目标的准备步骤，见[证书与域名配�
 
 ### 客户端方案工作台
 
-从桌面 **客户端 → 快速创建方案** 开始：添加节点、确认连接关系、生成候选，再查看摘要并发布。命令行对应主菜单 **7**。
+从新桌面 **客户端 → 创建方案** 开始：添加节点、确认连接关系、生成候选，再校验、审阅并发布。命令行对应主菜单 **7**。
 
 - 从受管实例提取节点，或手动录入未纳管节点。
 - 独立编辑节点、入口与落地连接关系、地区分组、排序和业务默认出口。
@@ -222,7 +225,7 @@ pwsh -File .\scripts\Check-UpstreamVersions.ps1
 
 测试包含 PowerShell 逻辑、交互、工作台、SSH 私钥权限、桌面输入与取消、应用更新与回滚、菜单契约及具备依赖时的 Bash 隔离模拟。固定资产更新需要同步版本、文件名和 SHA-256，再进行项目测试与真实协议验收。
 
-CI 使用 Python 3.9/3.13 与 runner PowerShell/隔离 PowerShell 7.4.20 的四个 Windows 档位验证控制端；Debian 12/13 容器验证远端 Bash、包名、OpenSSH 契约及真实核心的隔离升级/回滚，另有 shell 检查，共七项。隔离模拟不等于真实 systemd 调度、网络故障或 VPS 全流程验收。
+既有七项 CI 保留，另有 Windows/Linux/macOS 三档共享 C# 核心测试。Windows 安装器测试实际点击 WinUI 更新入口和确认按钮，经过下载摘要校验、旧窗口退出、原位安装与新版 EXE 自动重启，并验证导入字体、外观偏好、私人归档和本地配置保留及两种卸载。更新服务的隔离测试使用与 GitHub 相同的元数据和真实安装包；发行后另核对正式附件。隔离模拟不等于真实 systemd 调度、网络故障或 VPS 全流程验收。
 
 ## 文档导航
 

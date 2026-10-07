@@ -1,0 +1,141 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Nodes;
+
+namespace Mxh.VpsDeploy.Core;
+
+public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFactory connections, IManagedKeyStore keys, IUserInteraction user, IProtocolValidation validation) : IOperationWorkflow
+{
+    private readonly RemoteAssets assets = new(store.Paths);
+    private ArchiveStore Store => store;
+    private IUserInteraction User => user;
+    private IRemoteSessionFactory Connections => connections;
+    private JsonObject Versions => ArchiveStore.ReadJson(store.Paths.Resolve("config/versions.json"));
+
+    public async Task<TaskOutcome> ExecuteAsync(OperationRequest request, string taskId, IProgress<TaskProgress> progress, CancellationToken cancellationToken)
+    {
+        var directory = store.Paths.Instance(request.InstanceRelativePath);
+        var planFile = SafePath.Resolve(directory, "deployment-plan.json");
+        var initial = request.Kind is OperationKind.Deploy or OperationKind.ConnectExisting;
+        if (initial && File.Exists(planFile)) throw new OperationException("实例已有归档，请选择现有实例操作。");
+        var plan = initial ? request.Options["Plan"]?.DeepClone().AsObject() ?? throw new OperationException("缺少部署计划。") : ArchiveStore.ReadJson(planFile);
+        if (request.InstanceRelativePath != plan.Text("Provider") + "/" + plan.Text("Instance") + "/MXH-VPS-Deploy") throw new OperationException("所选实例与归档身份不一致。");
+        if (initial) DeploymentPlans.Validate(plan, request.Kind == OperationKind.ConnectExisting);
+        var stateFile = SafePath.Resolve(directory, "deployment-state.json");
+        var state = File.Exists(stateFile) ? ArchiveStore.ReadJson(stateFile) : new JsonObject { ["SchemaVersion"] = 1, ["CurrentManagementPort"] = plan.Number("Server.BootstrapSshPort"), ["Modules"] = new JsonObject(), ["BackupDirectories"] = new JsonObject() };
+        var secretsFile = SafePath.Resolve(directory, "secrets.dotnet.private.json");
+        var secrets = File.Exists(secretsFile) ? store.ReadSecret(secretsFile) : File.Exists(SafePath.Resolve(directory, "deployment-secrets.private.json")) ? ArchiveStore.ReadJson(SafePath.Resolve(directory, "deployment-secrets.private.json")) : new JsonObject();
+        await using var context = new Context(this, request, taskId, directory, plan, state, secrets, progress, cancellationToken);
+        if (request.Kind != OperationKind.Recover && context.HasPending()) throw new OperationException("存在未完成事务，请先核对并恢复。");
+        if (initial) context.Save();
+        try
+        {
+            switch (request.Kind)
+            {
+                case OperationKind.ConnectExisting: await Import(context); break;
+                case OperationKind.Deploy:
+                case OperationKind.Resume: await Deploy(context); break;
+                case OperationKind.HealthAudit: await Health(context); break;
+                case OperationKind.Recover: await Recover(context); break;
+                default: await Maintain(context); break;
+            }
+            return context.Warnings ? TaskOutcome.CompletedWithWarnings : TaskOutcome.Completed;
+        }
+        catch (Exception failure)
+        {
+            if (context.Pending != null && context.Pending.Text("Phase") is not ("Committed" or "RolledBack"))
+            {
+                try { await Rollback(context); }
+                catch { throw new OperationException("操作结果或回滚未确认，请进入恢复中心核对。备份已保留。", true); }
+            }
+            if (context.Pending?.Text("Phase") == "Committed" && context.Pending.Text("TaskId") == context.Id) return TaskOutcome.CompletedWithWarnings;
+            if (context.State.Text("DeploymentTransaction.Status") is "Arming" or "Armed" or "LocalPrepared") throw new OperationException("部署中断，恢复记录已保留；请先进入恢复中心核对。", true);
+            if (failure is OperationCanceledException) throw;
+            if (failure is OperationException) throw;
+            throw new OperationException("当前步骤未确认完成，请核对任务与私人恢复记录。", context.MutationStarted);
+        }
+    }
+
+    private sealed class Context(WorkflowEngine owner, OperationRequest request, string taskId, string directory, JsonObject plan, JsonObject state, JsonObject secrets, IProgress<TaskProgress> progress, CancellationToken cancellationToken) : IAsyncDisposable
+    {
+        public OperationRequest Request { get; } = request;
+        public string Id { get; } = taskId;
+        public string Directory { get; } = directory;
+        public JsonObject Plan { get; } = plan;
+        public JsonObject State { get; } = state;
+        public JsonObject Secrets { get; } = secrets;
+        public CancellationToken Cancellation { get; set; } = cancellationToken;
+        public JsonObject? Pending { get; set; } = System.IO.File.Exists(SafePath.Resolve(directory, "operation-pending.dotnet.json")) ? ArchiveStore.ReadJson(SafePath.Resolve(directory, "operation-pending.dotnet.json")) : null;
+        public bool Warnings { get; set; }
+        public bool MutationStarted { get; set; }
+        public int Port => State.Number("CurrentManagementPort", Plan.Number("Ports.SshPrimary", Plan.Number("Server.BootstrapSshPort")));
+        private readonly Dictionary<string, string> passwords = new(StringComparer.Ordinal);
+        private string? passphrase;
+        public string? KeyPassphrase { get => passphrase; set => passphrase = value; }
+        private int stage;
+        public string File(string relative) => SafePath.Resolve(Directory, relative);
+        public void Report(string stageName, string message) => progress.Report(new(Id, stageName, ++stage, 0, message));
+        public bool HasPending() => Pending != null && Pending.Text("Phase") is not ("Committed" or "RolledBack") || State.Text("DeploymentTransaction.Status") is "Arming" or "Armed" or "LocalPrepared" || State.At("MaintenanceTransaction") != null && !State.Flag("MaintenanceTransaction.Committed") || State.Flag("Migration.RollbackArmed") && !State.Flag("Migration.Committed");
+        public void Save()
+        {
+            ArchiveStore.WriteJson(File("deployment-plan.json"), Plan);
+            owner.Store.WriteSecret(File("secrets.dotnet.private.json"), Secrets);
+            ArchiveStore.WriteJson(File("deployment-state.json"), State);
+            if (Pending != null) ArchiveStore.WriteJson(File("operation-pending.dotnet.json"), Pending);
+        }
+        public async Task<IRemoteSession> Session(int? port = null, string username = "root", bool bootstrap = false)
+        {
+            var key = bootstrap ? Plan.Text("Server.BootstrapKeyPath") : File("ssh/" + AppPaths.Segment(Plan.Text("SshKey.ManagedFileName", "id_vps_management")));
+            if (!System.IO.File.Exists(key)) key = Plan.Text("SshKey.SourcePrivateKeyPath", Plan.Text("Server.BootstrapKeyPath"));
+            if (key == "" || !System.IO.File.Exists(key))
+            {
+                if (!passwords.TryGetValue(username, out var password))
+                {
+                    password = username == Plan.Text("AdminUser") ? Secrets.Text("AdminPassword") : "";
+                    if (password.Length == 0) password = await owner.User.SecretAsync(username + " 的 SSH 登录密码", Cancellation) ?? throw new OperationCanceledException();
+                    passwords[username] = password;
+                }
+                return await owner.Connections.OpenAsync(new(Plan.Text("Server.IPv4"), port ?? Port, username, null, password), owner.User, Cancellation);
+            }
+            try { return await owner.Connections.OpenAsync(new(Plan.Text("Server.IPv4"), port ?? Port, username, key, KeyPassphrase: passphrase), owner.User, Cancellation); }
+            catch (KeyPassphraseRequiredException) when (passphrase == null)
+            {
+                // A retry is allowed only while opening authentication, before any command is sent.
+                passphrase = await owner.User.SecretAsync("SSH 私钥口令（未加密可留空）", Cancellation) ?? throw new OperationCanceledException();
+                return await owner.Connections.OpenAsync(new(Plan.Text("Server.IPv4"), port ?? Port, username, key, KeyPassphrase: passphrase), owner.User, Cancellation);
+            }
+        }
+        public async Task<CommandResult> Run(string asset, Dictionary<string, string>? parameters = null, bool mutation = false, int timeout = 600, string? marker = null, int? port = null, bool bootstrap = false)
+        {
+            Cancellation.ThrowIfCancellationRequested(); parameters ??= [];
+            if (mutation && asset is not ("protocol-migration-trigger-rollback.sh" or "maintenance-transaction-commit.sh" or "maintenance-transaction-status.sh") && Pending?.Text("RemoteBackup") is { Length: > 0 } backup) parameters["EXPECTED_TRANSACTION"] = backup;
+            Report(asset[..^3], mutation ? "正在执行受管步骤，取消将在安全边界处理。" : "正在读取远端状态。");
+            await using var session = await Session(port, bootstrap: bootstrap);
+            if (mutation) { MutationStarted = true; if (Pending != null) { Pending["Stage"] = asset; Save(); } }
+            var result = await session.RunScriptAsync(owner.assets.Payload(asset, parameters), TimeSpan.FromSeconds(timeout), mutation, Cancellation);
+            if (marker != null) RemoteAssets.RequireMarker(result, marker); else result.RequireSuccess("远端步骤失败：" + asset);
+            return result;
+        }
+        public async Task VerifySsh(int port, string username, bool sudo = false)
+        {
+            await using var session = await Session(port, username);
+            if (sudo)
+            {
+                var nonInteractive = await session.RunScriptAsync("set -euo pipefail\nsudo -n true\nprintf 'VPSDEPLOY_SSH_OK\\n'\n", TimeSpan.FromSeconds(60), false, Cancellation);
+                if (nonInteractive.ExitCode == 0) { RemoteAssets.RequireMarker(nonInteractive, "SSH_OK"); return; }
+            }
+            // Never put the actual sudo password into command arguments; upload via the private script channel.
+            var sudoPassword = Secrets.Text("AdminPassword");
+            if (sudo && sudoPassword.Length == 0 && !passwords.TryGetValue(username, out sudoPassword)) sudoPassword = await owner.User.SecretAsync(username + " 的 sudo 密码", Cancellation) ?? throw new OperationCanceledException();
+            var script = sudo ? "set -euo pipefail\npw=$(printf '%s' '" + Convert.ToBase64String(Encoding.UTF8.GetBytes(sudoPassword)) + "' | base64 -d)\nprintf '%s\\n' \"$pw\" | sudo -S -p '' true\nprintf 'VPSDEPLOY_SSH_OK\\n'\n" : "printf 'VPSDEPLOY_SSH_OK\\n'\n";
+            var result = await session.RunScriptAsync(script, TimeSpan.FromSeconds(60), false, Cancellation); RemoteAssets.RequireMarker(result, "SSH_OK");
+        }
+        public ValueTask DisposeAsync() { passwords.Clear(); passphrase = null; Secrets.Clear(); return ValueTask.CompletedTask; }
+    }
+}
+
+public interface IProtocolValidation
+{
+    Task<JsonObject> ValidateAsync(JsonObject plan, JsonObject secrets, string privateDirectory, IUserInteraction user, IProgress<string> progress, CancellationToken cancellationToken);
+    void Export(JsonObject plan, JsonObject secrets, string directory);
+}

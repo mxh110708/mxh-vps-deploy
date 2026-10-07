@@ -34,13 +34,18 @@ try{
  $proof=Join-Path $app 'runtime-proof.json'
  Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'MXH-VPS-Deploy.exe') @('--verify-runtime',$proof) -MinimalPath) -eq 0) 'native EXE works without global PowerShell or Python on PATH'
  $runtimeProof=Get-Content -Raw -LiteralPath $proof|ConvertFrom-Json -AsHashtable
- Assert-Desktop ($runtimeProof.wpf_loaded -and $runtimeProof.runtime_paths_local -and $runtimeProof.powershell -eq '7.4.20') 'real WPF and private runtimes loaded'
+ Assert-Desktop ($runtimeProof.winui_loaded -and $runtimeProof.runtime_paths_local -and -not $runtimeProof.wpf_loaded -and -not $runtimeProof.powershell_loaded) 'real WinUI 3 and private .NET runtime loaded without PowerShell or WPF'
  Remove-Item -LiteralPath $proof
+ if(Test-Path -LiteralPath ($proof+'.startup.txt')){Remove-Item -LiteralPath ($proof+'.startup.txt')}
  [IO.Directory]::CreateDirectory((Join-Path $app 'private/instances'))|Out-Null
  [IO.Directory]::CreateDirectory((Join-Path $app '.cache/fixture'))|Out-Null
  'fixture archive'|Set-Content -LiteralPath (Join-Path $app 'private/instances/record.txt')
  'fixture local settings'|Set-Content -LiteralPath (Join-Path $app 'config/app-defaults.local.json')
  'fixture cache'|Set-Content -LiteralPath (Join-Path $app '.cache/fixture/record.txt')
+ $fontSource=Join-Path $app 'Fonts/SourceSerif4-600.ttf';$fontDigest=(Get-FileHash -LiteralPath $fontSource).Hash.ToLowerInvariant()
+ $fontRelative='private/fonts/'+$fontDigest+'.ttf';$fontPath=Join-Path $app $fontRelative
+ [IO.Directory]::CreateDirectory((Split-Path -Parent $fontPath))|Out-Null;Copy-Item -LiteralPath $fontSource -Destination $fontPath
+ @{Appearance='Light';FontId=('Custom:'+$fontDigest+'.ttf');AutoCheckUpdates=$false;UpdateProxy='http://127.0.0.1:2080'}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $app 'private/desktop-settings.json') -Encoding utf8
  $privateHash=(Get-FileHash -LiteralPath (Join-Path $app 'private/instances/record.txt')).Hash
  $localHash=(Get-FileHash -LiteralPath (Join-Path $app 'config/app-defaults.local.json')).Hash
  $outside=Join-Path $fixture 'outside-authority.json';'fixture external authority'|Set-Content -LiteralPath $outside
@@ -58,17 +63,28 @@ try{
  $fakePath=Join-Path $fixture 'collision-manifest.json';$fake|ConvertTo-Json -Depth 7|Set-Content -LiteralPath $fakePath
  Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'app-helpers/SetupGuard.exe') @($app,$fakePath)) -ne 0) 'new managed path cannot overwrite an unmanaged file'
  Remove-Item -LiteralPath $collision
- $stage=Join-Path $app ('.tmp/app-update-'+[guid]::NewGuid().ToString('N'));[IO.Directory]::CreateDirectory($stage)|Out-Null
- $setup=Join-Path $stage "mxh-vps-deploy-v$nextVersion-windows-amd64-setup.exe"
- $files=Join-Path $stage "mxh-vps-deploy-v$nextVersion-windows-amd64.files.json"
+ $updateFixture=Join-Path $app '.tmp/qa-update-fixture';[IO.Directory]::CreateDirectory($updateFixture)|Out-Null
+ $setup=Join-Path $updateFixture "mxh-vps-deploy-v$nextVersion-windows-amd64-setup.exe"
+ $files=Join-Path $updateFixture "mxh-vps-deploy-v$nextVersion-windows-amd64.files.json"
  Copy-Item -LiteralPath $next.Installer -Destination $setup
  Copy-Item -LiteralPath $next.FileManifest -Destination $files
- $helper=Join-Path $stage 'InstalledUpdate.exe';Copy-Item -LiteralPath (Join-Path $app 'app-helpers/InstalledUpdate.exe') -Destination $helper
- $job=Join-Path $stage 'update-job.private.json'
- @{ProjectRoot=$app;Stage=$stage;Version=$nextVersion;ParentPid=0;LauncherPid=0;ParentStarted='';LauncherStarted='';InstallerSha256=(Get-FileHash -LiteralPath $setup).Hash.ToLowerInvariant();ManifestSha256=(Get-FileHash -LiteralPath $files).Hash.ToLowerInvariant();CurrentManifestSha256=(Get-FileHash -LiteralPath (Join-Path $app 'application-files.json')).Hash.ToLowerInvariant()}|ConvertTo-Json|Set-Content -LiteralPath $job
- Assert-Desktop ((Invoke-DesktopFixtureProcess $helper @($job)) -eq 0) 'native update helper runs verified newer installer in place'
+ $checksums=Join-Path $updateFixture 'SHA256SUMS.txt'
+ @($setup,$files)|ForEach-Object{(Get-FileHash -LiteralPath $_).Hash.ToLowerInvariant()+'  '+[IO.Path]::GetFileName($_)}|Set-Content -LiteralPath $checksums -Encoding ascii
+ $assets=@($setup,$files,$checksums)|ForEach-Object{@{name=[IO.Path]::GetFileName($_);browser_download_url=('https://github.com/mxh110708/mxh-vps-deploy/releases/download/v'+$nextVersion+'/'+[IO.Path]::GetFileName($_));digest=('sha256:'+(Get-FileHash -LiteralPath $_).Hash.ToLowerInvariant());size=(Get-Item -LiteralPath $_).Length;state='uploaded'}}
+ @{tag_name=('v'+$nextVersion);draft=$false;prerelease=$false;assets=@($assets)}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $updateFixture 'release.json') -Encoding utf8
+ Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'MXH-VPS-Deploy.exe') @('--verify-installed-update') -MinimalPath) -eq 0) 'actual WinUI check-update and confirmation download and launch update'
+ $uiProof=Get-Content -LiteralPath (Join-Path $app '.tmp/ui-update-proof.json') -Raw|ConvertFrom-Json -AsHashtable
+ Assert-Desktop ($uiProof.ui_update_started -and $uiProof.confirmation_clicked -and $uiProof.launcher_pid_recorded) 'real update confirmation and parent process handoff verified'
+ Assert-Desktop ($uiProof.negative_checks.Count -eq 8) 'untrusted assets, corrupt downloads, size limits, cleanup and repeated version refused'
+ $stage=[string]$uiProof.stage;$restartProof=Join-Path $app '.tmp/update-restart-proof.json'
+ $watch=[Diagnostics.Stopwatch]::StartNew();while((-not(Test-Path -LiteralPath $restartProof) -or (Test-Path -LiteralPath $stage)) -and $watch.ElapsedMilliseconds -lt 120000){[Threading.Thread]::Sleep(100)}
+ Assert-Desktop (Test-Path -LiteralPath $restartProof) 'update automatically restarts the new native EXE'
+ $restarted=Get-Content -LiteralPath $restartProof -Raw|ConvertFrom-Json -AsHashtable
+ Assert-Desktop ($restarted.winui_loaded -and $restarted.initial_theme -eq 'Light' -and $restarted.initial_font -eq ('Custom:'+$fontDigest+'.ttf') -and -not $restarted.font_fallback) 'restart loads WinUI and retained appearance/custom font'
  Assert-Desktop ((Get-VpsApplicationVersion $app).ToString() -eq $nextVersion) 'app version updated without uninstalling'
  Assert-Desktop ((Get-FileHash -LiteralPath (Join-Path $app 'private/instances/record.txt')).Hash -eq $privateHash -and (Get-FileHash -LiteralPath (Join-Path $app 'config/app-defaults.local.json')).Hash -eq $localHash) 'in-place installer update preserves archive and local settings'
+ $preferences=Get-Content -LiteralPath (Join-Path $app 'private/desktop-settings.json') -Raw|ConvertFrom-Json -AsHashtable
+ Assert-Desktop ((Get-FileHash -LiteralPath $fontPath).Hash.ToLowerInvariant() -eq $fontDigest -and $preferences.Appearance -eq 'Light' -and $preferences.FontId -eq ('Custom:'+$fontDigest+'.ttf') -and -not $preferences.AutoCheckUpdates -and $preferences.UpdateProxy -eq 'http://127.0.0.1:2080') 'in-place update preserves imported font and appearance preferences'
  $watch=[Diagnostics.Stopwatch]::StartNew();while((Test-Path -LiteralPath $stage) -and $watch.ElapsedMilliseconds -lt 15000){[Threading.Thread]::Sleep(50)}
  Assert-Desktop (-not(Test-Path -LiteralPath $stage)) 'successful installed update removes only its transient stage'
  Assert-Desktop (Test-Path -LiteralPath (Join-Path $app 'private/update-test-completed.txt')) 'tested update helper reaches restart handoff'

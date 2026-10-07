@@ -90,6 +90,10 @@ jobs:
           if (-not (Test-Path $mihomo)) { throw 'bundled Mihomo validation failed' }
           ./tests/Test-SingBoxConfig.ps1 -ProjectRoot $PWD -SingBoxPath $singBox
           ./tests/Test-ClientCompatibility.ps1 -ProjectRoot $PWD
+      - uses: actions/setup-dotnet@v5
+        if: matrix.python == '3.13' && matrix.powershell == 'runner'
+        with:
+          dotnet-version: 10.0.400
       - name: Build native EXE and validate installer lifecycle
         if: matrix.python == '3.13' && matrix.powershell == 'runner'
         shell: pwsh

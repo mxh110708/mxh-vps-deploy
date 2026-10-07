@@ -25,6 +25,10 @@ stamp="$(date -u +%Y%m%d-%H%M%S)"
 backup_dir="/root/vps-deploy-backups/${stamp}/protocol-lifecycle"
 [[ ! -e "$backup_dir" ]] || { echo 'Snapshot timestamp collision; retry later.' >&2; exit 1; }
 install -d -m 0700 "$backup_dir"
+if [[ -n "${VPS_PARAM_CONTROL_TASK_ID:-}" ]]; then
+  [[ "$VPS_PARAM_CONTROL_TASK_ID" =~ ^[a-f0-9]{32}$ ]]
+  printf '%s\n' "$VPS_PARAM_CONTROL_TASK_ID" > "$backup_dir/control-task-id"
+fi
 components="${VPS_PARAM_COMPONENTS:-Protocols,Network,Firewall}"
 IFS=',' read -r -a component_list <<<"$components"
 ((${#component_list[@]} > 0))
@@ -130,6 +134,10 @@ protocol_only=false
 if [[ "${2:-}" == '--protocol-only' ]]; then
   components='Protocols,Network,Firewall'; protocol_only=true
 fi
+if [[ "${2:-}" == '--protocol-files-only' ]]; then
+  [[ ",$components," == *',Protocols,'* ]] || exit 1
+  components='Protocols'; protocol_only=true
+fi
 scope_has(){ [[ ",$components," == *",$1,"* ]]; }
 if [[ "${VPS_TRANSACTION_LOCK_HELD:-false}" != true ]]; then
   exec 9>/var/lib/mxh-vps-deploy/transaction.lock
@@ -203,17 +211,19 @@ if [[ -f "$backup_dir/protocol-files.tar.gz" ]]; then
     tar --numeric-owner -xzpf "$backup_dir/protocol-files.tar.gz" -C /
   fi
 fi
-if [[ -f "$backup_dir/nftables.conf" ]]; then
+if scope_has Firewall && [[ -f "$backup_dir/nftables.conf" ]]; then
   cp -a "$backup_dir/nftables.conf" /etc/nftables.conf
   nft -c -f /etc/nftables.conf
   nft -f /etc/nftables.conf
 fi
-if [[ -f "$backup_dir/99-mxh-vps-deploy.conf" ]]; then
-  cp -a "$backup_dir/99-mxh-vps-deploy.conf" /etc/sysctl.d/99-mxh-vps-deploy.conf
-elif [[ -f "$backup_dir/sysctl-config-was-absent" ]]; then
-  rm -f /etc/sysctl.d/99-mxh-vps-deploy.conf
+if scope_has Network; then
+  if [[ -f "$backup_dir/99-mxh-vps-deploy.conf" ]]; then
+    cp -a "$backup_dir/99-mxh-vps-deploy.conf" /etc/sysctl.d/99-mxh-vps-deploy.conf
+  elif [[ -f "$backup_dir/sysctl-config-was-absent" ]]; then
+    rm -f /etc/sysctl.d/99-mxh-vps-deploy.conf
+  fi
+  sysctl --system >/dev/null
 fi
-if scope_has Network; then sysctl --system >/dev/null; fi
 systemctl daemon-reload
 
 restore_service() {

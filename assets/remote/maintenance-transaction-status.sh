@@ -31,3 +31,9 @@ if [[ -n "$current" ]]; then
 fi
 printf 'VPSDEPLOY_TRANSACTION_BACKUP_B64=%s\n' "$(printf '%s' "$current" | base64 | tr -d '\n')"
 printf 'VPSDEPLOY_TRANSACTION_PHASE_B64=%s\n' "$(printf '%s' "$phase" | base64 | tr -d '\n')"
+control_task=''
+if [[ -n "$current" && -f "$current/control-task-id" ]]; then
+  control_task="$(cat "$current/control-task-id")"
+  [[ "$control_task" =~ ^[a-f0-9]{32}$ ]]
+fi
+printf 'VPSDEPLOY_CONTROL_TASK_ID_B64=%s\n' "$(printf '%s' "$control_task" | base64 | tr -d '\n')"

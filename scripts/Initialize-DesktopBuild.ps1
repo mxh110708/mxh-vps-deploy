@@ -1,6 +1,6 @@
 #requires -Version 7.4
 [CmdletBinding()]
-param([string]$ProjectRoot=(Split-Path -Parent $PSScriptRoot),[string]$CacheDirectory,[string]$SourceDirectory,[string]$Proxy)
+param([string]$ProjectRoot=(Split-Path -Parent $PSScriptRoot),[string]$CacheDirectory,[string]$SourceDirectory,[string]$Proxy,[ValidateSet('powershell','python','yaml','openssh','inno_setup')][string[]]$Names=@('powershell','python','yaml','openssh','inno_setup'))
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $ProjectRoot=[IO.Path]::GetFullPath($ProjectRoot)
@@ -9,7 +9,7 @@ $CacheDirectory=[IO.Path]::GetFullPath($CacheDirectory)
 if((Test-Path -LiteralPath $CacheDirectory) -and ((Get-Item -LiteralPath $CacheDirectory).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw '桌面构建缓存不能是联接。'}
 [IO.Directory]::CreateDirectory($CacheDirectory)|Out-Null
 $assets=Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'config/desktop-assets.json')|ConvertFrom-Json -AsHashtable
-foreach($name in @('powershell','python','yaml','openssh','inno_setup')){
+foreach($name in $Names){
  $asset=$assets[$name]
  $path=Join-Path $CacheDirectory $asset.file
  if(-not(Test-Path -LiteralPath $path)){

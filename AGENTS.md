@@ -2,11 +2,11 @@
 
 ## Project Structure & Module Organization
 
-MXH VPS Deploy is a Windows PowerShell control tool for Debian 12/13 amd64 VPS instances. `Start-VPSDeploy.ps1` dispatches workflows. Modules in `src/` implement deployment, import, maintenance, recovery, and client configuration. `assets/remote/` contains Bash operations; `scripts/` contains Python configuration helpers and asset validators. Public templates are in `templates/client/`, fixed versions in `config/versions.json`, and checked client assets in `vendor/test-cores/`. Tests and fixtures are under `tests/`; Chinese operating guides are under `docs/`.
+MXH VPS Deploy uses a WinUI 3 Windows desktop frontend and a cross-platform .NET operations core for Debian 12/13 amd64 targets. `desktop/` contains Core, Infrastructure, Windows adapters, Desktop and behavior tests. Core must not reference Windows APIs, WinUI, WPF or PowerShell. Infrastructure connects using SSH.NET; Windows adapters own DPAPI, key-copy ACLs and installer updates. `Start-VPSDeploy.ps1` and `src/` retain the mature legacy CLI. `assets/remote/` contains Bash operations; `scripts/` contains specialized Python configuration helpers. Public templates, pinned versions and client assets remain under `templates/client/`, `config/` and `vendor/test-cores/`.
 
-`Start-VPSDeploy.Gui.ps1`, `assets/gui/`, and `src/gui/` implement the WPF desktop shell, input broker and SSH askpass bridge. `VpsDeploy.GuiData.psm1` defines app-local private data; `VpsDeploy.Update.psm1` verifies and applies app updates. Desktop navigation is organized around forms, selected instances, client schemes and task outcomes; do not introduce CLI menu-number input or a legacy archive import UI.
+The old WPF shell and bridge are historical source and regression references. The new desktop EXE never loads them; `Start-VPSDeploy.cmd` must not fall back to that driver. Desktop navigation uses forms, selected instances, client schemes and task outcomes; do not add CLI menu input or a legacy archive import UI.
 
-`src/desktop/` builds the native GUI EXE and independent update/guard helpers. `assets/installer/` defines the Windows installer and optional keep/remove-data uninstall. The application bundles fixed, verified private runtimes without changing global PATH or installing services. Installer updates must preserve private/local files and reject managed edits or unmanaged collisions; full uninstall may remove only the explicitly selected app directory and must reject links.
+`src/desktop/` retains small native update/guard helpers; `desktop/Mxh.VpsDeploy.Desktop` builds the actual WinUI application. `assets/installer/` defines optional keep/remove-data uninstall. Bundle .NET, WinUI and the YAML helper runtime without changing global PATH or installing services. Preserve private/local files, reject managed edits, unmanaged collisions and links. A lost remote acknowledgement must trigger identity/status reconciliation, never an automatic mutation replay. Restore only the chosen component scope; reject unknown or legacy transactions before writing.
 
 ## Build, Test, and Development Commands
 
@@ -14,6 +14,8 @@ Use PowerShell 7.4+ and Python 3.9+ from the repository root:
 
 ```powershell
 python -m pip install -r .\requirements-client-merge.txt
+dotnet restore .\desktop\Mxh.VpsDeploy.Tests\Mxh.VpsDeploy.Tests.csproj --locked-mode
+dotnet run --project .\desktop\Mxh.VpsDeploy.Tests -c Release --no-restore -- $PWD
 pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
 pwsh -NoProfile -File .\tests\Test-AuditFixes.ps1 -ProjectRoot $PWD
 pwsh -NoProfile -File .\tests\Test-ClientCompatibility.ps1 -ProjectRoot $PWD

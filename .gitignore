@@ -16,6 +16,8 @@ id_rsa
 .tmp/
 .cache/
 TestResults/
+**/bin/
+**/obj/
 *.log
 __pycache__/
 *.pyc

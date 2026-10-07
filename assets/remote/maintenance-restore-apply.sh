@@ -9,7 +9,12 @@ resolved="$(readlink -f "$VPS_PARAM_BACKUP_PATH")"
 [[ -x /usr/local/libexec/mxh-protocol-migration-rollback ]]
 
 if [[ "$VPS_PARAM_SCOPE" == 'Full' ]]; then
-  /usr/local/libexec/mxh-protocol-migration-rollback "$resolved" --protocol-only
+  if [[ "${VPS_PARAM_DESKTOP_PROTOCOL_ONLY:-false}" == true ]]; then
+    grep -Fq -- "'--protocol-files-only'" /usr/local/libexec/mxh-protocol-migration-rollback || { echo 'Installed helper does not support strict protocol scope.' >&2; exit 1; }
+    /usr/local/libexec/mxh-protocol-migration-rollback "$resolved" --protocol-files-only
+  else
+    /usr/local/libexec/mxh-protocol-migration-rollback "$resolved" --protocol-only
+  fi
 else
   [[ -f "$resolved/protocol-files.tar.gz" ]]
   stage="$(mktemp -d)"

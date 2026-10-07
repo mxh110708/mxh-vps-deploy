@@ -20,7 +20,7 @@ if($PackageVersion){if(-not($TestBuild -and $Development) -or $PackageVersion -n
 if($TestBuild -and -not $Development){throw '隔离测试包不能正式发行。'}
 if(-not $Development){if($application.channel -ne 'stable'){throw '正式包需要 stable 应用版本。'};Assert-VpsGitApplicationClean $ProjectRoot}
 & (Join-Path $ProjectRoot 'scripts/Test-NoSecrets.ps1') -ProjectRoot $ProjectRoot
-$dependencies=& (Join-Path $ProjectRoot 'scripts/Initialize-DesktopBuild.ps1') -ProjectRoot $ProjectRoot -CacheDirectory $CacheDirectory -SourceDirectory $SourceDirectory -Proxy $Proxy
+$dependencies=& (Join-Path $ProjectRoot 'scripts/Initialize-DesktopBuild.ps1') -ProjectRoot $ProjectRoot -CacheDirectory $CacheDirectory -SourceDirectory $SourceDirectory -Proxy $Proxy -Names @('python','yaml','inno_setup')
 $paths=@(& git -c "safe.directory=$ProjectRoot" -c core.quotepath=false -C $ProjectRoot ls-files --cached --others --exclude-standard|Sort-Object -Unique)
 if($LASTEXITCODE -ne 0 -or -not $paths.Count){throw '无法取得公开文件清单。'}
 $buildRoot=Join-Path $ProjectRoot ('.tmp/desktop-package-'+[guid]::NewGuid().ToString('N'))
@@ -36,18 +36,18 @@ try{
  }
  if($PackageVersion){$application.version=$version;$application.channel='stable';$application|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $bundle 'config/application.json') -Encoding utf8}
  $runtime=Join-Path $bundle 'runtime';[IO.Directory]::CreateDirectory($runtime)|Out-Null
- foreach($name in @('powershell','python')){[IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $dependencies.CacheDirectory $dependencies.Assets[$name].file),(Join-Path $runtime $name))}
+ foreach($name in @('python')){[IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $dependencies.CacheDirectory $dependencies.Assets[$name].file),(Join-Path $runtime $name))}
  $python=Join-Path $runtime 'python'
  $site=Join-Path $python 'Lib/site-packages';[IO.Directory]::CreateDirectory($site)|Out-Null
  [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $dependencies.CacheDirectory $dependencies.Assets.yaml.file),$site)
  "python313.zip`n.`nLib/site-packages`n../../scripts`nimport site`n"|Set-Content -LiteralPath (Join-Path $python 'python313._pth') -Encoding ascii
- $sshSource=Join-Path $buildRoot 'ssh-source'
- [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $dependencies.CacheDirectory $dependencies.Assets.openssh.file),$sshSource)
- $ssh=Join-Path $runtime 'openssh';[IO.Directory]::CreateDirectory($ssh)|Out-Null
- foreach($file in Get-ChildItem -LiteralPath $sshSource -File -Recurse){
-  if($file.Extension -eq '.dll' -or $file.Name -in @('ssh.exe','scp.exe','sftp.exe','ssh-keygen.exe','ssh-add.exe','ssh-agent.exe','ssh-pkcs11-helper.exe','ssh-sk-helper.exe') -or $file.Name -match '^(LICENSE|LICENCE|NOTICE|THIRD.*PARTY)'){Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $ssh $file.Name)}
- }
- foreach($file in @('ssh.exe','scp.exe','ssh-keygen.exe')){if(-not(Test-Path -LiteralPath (Join-Path $ssh $file))){throw 'OpenSSH 客户端资产不完整。'}}
+ $env:DOTNET_CLI_HOME=Join-Path $ProjectRoot '.cache/dotnet-home'
+ $env:NUGET_PACKAGES=Join-Path $ProjectRoot '.cache/nuget'
+ $env:DOTNET_CLI_TELEMETRY_OPTOUT='1';$env:DOTNET_GENERATE_ASPNET_CERTIFICATE='false'
+ if($Proxy){$env:HTTP_PROXY=$Proxy;$env:HTTPS_PROXY=$Proxy}
+ $desktopProject=Join-Path $ProjectRoot 'desktop/Mxh.VpsDeploy.Desktop/Mxh.VpsDeploy.Desktop.csproj'
+ & dotnet publish $desktopProject -c Release -p:Platform=x64 -p:RestoreLockedMode=true ("-p:Version=$version") -o $bundle -m:1 -nr:false -v minimal | Out-Host
+ if($LASTEXITCODE -ne 0){throw 'WinUI 3 桌面与 .NET 运维核心构建失败。'}
  $compiler=Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
  if(-not(Test-Path -LiteralPath $compiler)){throw '缺少 Windows .NET Framework 编译器。'}
  $assembly=Join-Path $buildRoot 'AssemblyVersion.cs'
@@ -56,7 +56,6 @@ try{
  $compile=@('/nologo','/target:winexe','/platform:x64','/optimize+','/r:System.Web.Extensions.dll','/r:System.Windows.Forms.dll','/r:System.Core.dll',('/win32manifest:'+(Join-Path $ProjectRoot 'src/desktop/app.manifest')))
  if($TestBuild){$compile+='/define:DESKTOP_TEST'}
  $targets=@(
-  @{Name='MXH-VPS-Deploy.exe';Main='Mxh.VpsDeploy.Desktop.DesktopApp';Sources=@('src/desktop/DesktopApp.cs');Icon=$true},
   @{Name='app-helpers/SetupGuard.exe';Main='Mxh.VpsDeploy.Desktop.SetupGuard';Sources=@('src/desktop/SetupGuard.cs','src/desktop/DesktopFiles.cs')},
   @{Name='app-helpers/InstalledUpdate.exe';Main='Mxh.VpsDeploy.Desktop.InstalledUpdate';Sources=@('src/desktop/InstalledUpdate.cs','src/desktop/DesktopFiles.cs')},
   @{Name='app-helpers/CleanupUpdate.exe';Main='Mxh.VpsDeploy.Desktop.CleanupUpdate';Sources=@('src/desktop/CleanupUpdate.cs','src/desktop/DesktopFiles.cs')}
@@ -68,18 +67,17 @@ try{
   $compilerMessages=@(& $compiler @compileArgs)
   if($LASTEXITCODE -ne 0){$compilerMessages|Write-Host;throw ('桌面原生 EXE 编译失败：'+$target.Name)}
  }
- $compilerMessages=@(& $compiler '/nologo' '/target:exe' '/platform:x64' '/optimize+' ('/out:'+(Join-Path $helpers 'AskPass.exe')) (Join-Path $ProjectRoot 'src/gui/VpsDeploy.AskPass.cs'))
- if($LASTEXITCODE -ne 0){$compilerMessages|Write-Host;throw '图形 SSH 辅助程序编译失败。'}
- $critical=@('runtime/powershell/pwsh.exe','runtime/powershell/System.Management.Automation.dll','runtime/python/python.exe','runtime/openssh/ssh.exe','runtime/openssh/scp.exe','runtime/openssh/ssh-keygen.exe','app-helpers/AskPass.exe','app-helpers/InstalledUpdate.exe','app-helpers/SetupGuard.exe','app-helpers/CleanupUpdate.exe','Start-VPSDeploy.Gui.ps1')
- @{schema_version=1;files=@($critical|ForEach-Object{@{path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $bundle $_)).Hash.ToLowerInvariant()}});versions=@{powershell=$dependencies.Assets.powershell.version;python=$dependencies.Assets.python.version;yaml=$dependencies.Assets.yaml.version;openssh=$dependencies.Assets.openssh.version}}|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $bundle 'desktop-runtime.json') -Encoding utf8
+ $critical=@('MXH-VPS-Deploy.exe','MXH-VPS-Deploy.dll','Mxh.VpsDeploy.Core.dll','Microsoft.WinUI.dll','System.Private.CoreLib.dll','runtime/python/python.exe','app-helpers/InstalledUpdate.exe','app-helpers/SetupGuard.exe','app-helpers/CleanupUpdate.exe')
+ @{schema_version=2;engine='dotnet';ui='winui3';test_build=[bool]$TestBuild;files=@($critical|ForEach-Object{@{path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $bundle $_)).Hash.ToLowerInvariant()}});versions=@{dotnet=(Get-Content -Raw -LiteralPath (Join-Path $bundle 'MXH-VPS-Deploy.runtimeconfig.json')|ConvertFrom-Json -AsHashtable).runtimeOptions.includedFrameworks[0].version;windows_app_sdk='1.8.260804001';ssh_net='2026.0.0';python=$dependencies.Assets.python.version;yaml=$dependencies.Assets.yaml.version}}|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $bundle 'desktop-runtime.json') -Encoding utf8
  $proof=Join-Path $bundle 'runtime-proof.json'
  $start=[Diagnostics.ProcessStartInfo]::new((Join-Path $bundle 'MXH-VPS-Deploy.exe'));$start.UseShellExecute=$false;$start.CreateNoWindow=$true
  $start.ArgumentList.Add('--verify-runtime');$start.ArgumentList.Add($proof)
  $native=[Diagnostics.Process]::Start($start)
- try{if(-not $native.WaitForExit(120000)){$native.Kill($true);throw '原生 EXE 运行环境复核超时。'};if($native.ExitCode -ne 0){throw '原生 EXE 内置环境或 WPF 加载失败。'}}finally{$native.Dispose()}
+ try{if(-not $native.WaitForExit(120000)){$native.Kill($true);throw 'WinUI 3 运行环境复核超时。'};if($native.ExitCode -ne 0){throw 'WinUI 3 窗口或 .NET 核心加载失败。'}}finally{$native.Dispose()}
  $verification=Get-Content -Raw -LiteralPath $proof|ConvertFrom-Json -AsHashtable
- if(-not $verification.wpf_loaded -or -not $verification.runtime_paths_local){throw '桌面内置环境未实际生效。'}
+ if(-not $verification.winui_loaded -or $verification.wpf_loaded -or $verification.powershell_loaded -or -not $verification.runtime_paths_local){throw 'WinUI 3 或 .NET 内置运行环境未实际生效。'}
  Remove-Item -LiteralPath $proof
+ if(Test-Path -LiteralPath ($proof+'.startup.txt')){Remove-Item -LiteralPath ($proof+'.startup.txt')}
  $testOutput=Join-Path $bundle '.test-output'
  if(Test-Path -LiteralPath $testOutput){Remove-Item -LiteralPath $testOutput -Recurse -Force}
  $files=@(Get-ChildItem -LiteralPath $bundle -File -Recurse|ForEach-Object{$relative=[IO.Path]::GetRelativePath($bundle,$_.FullName).Replace('\','/');Assert-VpsApplicationFilePath $relative;@{path=$relative;sha256=(Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant()}}|Sort-Object path)

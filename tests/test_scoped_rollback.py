@@ -144,6 +144,28 @@ class ScopedRollbackTests(unittest.TestCase):
         self.assertFalse((self.backup/'rollback-executed').exists())
         self.assertFalse(list(self.backup.glob('failed-komari-data-*')))
 
+    def test_desktop_protocol_restore_preserves_network_firewall_and_monitor(self):
+        network=self.root/'etc/sysctl.d/99-mxh-vps-deploy.conf'
+        firewall=self.root/'etc/nftables.conf'
+        network.parent.mkdir(parents=True,exist_ok=True)
+        network.write_text('old-network')
+        firewall.write_text('old-firewall')
+        self.arm('Protocols,Network,Firewall,KomariController')
+        network.write_text('current-network')
+        firewall.write_text('current-firewall')
+        (self.root/'opt/komari/data/komari.db').write_text('current-monitor')
+        (self.root/'etc/sing-box/config.json').write_text('current-protocol')
+        (self.root/'calls').write_text('')
+        self.restore('--protocol-files-only')
+        self.assertEqual((self.root/'etc/sing-box/config.json').read_text(),'old-protocol')
+        self.assertEqual(network.read_text(),'current-network')
+        self.assertEqual(firewall.read_text(),'current-firewall')
+        self.assertEqual((self.root/'opt/komari/data/komari.db').read_text(),'current-monitor')
+        calls=(self.root/'calls').read_text()
+        self.assertNotIn('sysctl ',calls)
+        self.assertNotIn('nft ',calls)
+        self.assertNotIn('komari.service',calls)
+
     def test_protocol_rollback_refuses_to_replace_config_of_unstopped_service(self):
         self.arm('Protocols')
         (self.root/'etc/sing-box/config.json').write_text('new-protocol')

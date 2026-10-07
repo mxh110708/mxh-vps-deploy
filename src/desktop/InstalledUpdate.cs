@@ -66,10 +66,12 @@ namespace Mxh.VpsDeploy.Desktop
                 }
 #if DESKTOP_TEST
                 File.WriteAllText(Path.Combine(root,"private","update-test-completed.txt"),job.Version);
-#else
-                var restart=new ProcessStartInfo(Path.Combine(root,"MXH-VPS-Deploy.exe")) {UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=root};
-                Process.Start(restart);
 #endif
+                var restart=new ProcessStartInfo(Path.Combine(root,"MXH-VPS-Deploy.exe")) {UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=root};
+#if DESKTOP_TEST
+                restart.Arguments="--verify-runtime "+Quote(Path.Combine(root,".tmp","update-restart-proof.json"));
+#endif
+                Process.Start(restart);
                 // This helper is locked until exit. A short native child removes only this stage afterwards.
                 var cleanup=new ProcessStartInfo(Path.Combine(root,"app-helpers","CleanupUpdate.exe")) {UseShellExecute=false,CreateNoWindow=true};
                 cleanup.Arguments=Quote(stage)+" "+Process.GetCurrentProcess().Id;
