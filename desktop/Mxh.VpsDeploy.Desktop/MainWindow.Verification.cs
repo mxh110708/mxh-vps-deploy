@@ -37,7 +37,7 @@ public sealed partial class MainWindow
             async Task RenderPages(string directory, bool record)
             {
                 Directory.CreateDirectory(directory);
-                foreach (var id in new[] { "overview", "instances", "deploy", "clients", "records", "settings" })
+                foreach (var id in new[] { "overview", "instances", "deploy", "clients", "network", "records", "settings" })
                 {
                     if (id == "clients" && flag == "--ui-smoke" && launchArguments.Contains("--exercise-forms")) scheme = ClientSchemes.New(paths);
                     SelectPage(id); shell.UpdateLayout(); await Task.Delay(120); if (shell.ActualWidth < 800 || shell.ActualHeight < 500 || page.Children.Count == 0 || notice.Severity == InfoBarSeverity.Error && notice.IsOpen) throw new OperationException("WinUI 页面加载或布局失败。");
@@ -53,6 +53,7 @@ public sealed partial class MainWindow
             }
             if (review) { SetAppearance("Dark"); SetFont("Route"); }
             await RenderPages(outputDirectory, true);
+            if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-desktop")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "desktop-regression-proof.json"), await DesktopRegression(outputDirectory));
             var preferenceVerified = false;
             if (flag == "--ui-smoke") await Compact(outputDirectory);
             if (review)

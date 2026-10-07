@@ -233,6 +233,18 @@ $module=Get-Module VpsDeploy.Core
         [IO.File]::WriteAllText((Join-Path $zip 'private/runtime.private.json'),'fixture')
         & (Join-Path $root 'scripts/Test-NoSecrets.ps1') -ProjectRoot $zip
         Check $true 'source ZIP recognizes runtime data boundary'
+        $pickerRelative='desktop/Mxh.VpsDeploy.Windows/WindowsSavePathPicker.cs'
+        $picker=Join-Path $zip $pickerRelative;[IO.Directory]::CreateDirectory((Split-Path -Parent $picker))|Out-Null
+        $pickerSource=Get-Content -Raw -LiteralPath (Join-Path $root $pickerRelative)
+        [IO.File]::WriteAllText($picker,$pickerSource)
+        & (Join-Path $root 'scripts/Test-NoSecrets.ps1') -ProjectRoot $zip
+        Check $true 'exact public Shell COM declarations are recognized'
+        [IO.File]::AppendAllText($picker,('[Guid("'+[Guid]::NewGuid().ToString()+'")]'))
+        Fails {& (Join-Path $root 'scripts/Test-NoSecrets.ps1') -ProjectRoot $zip} 'other UUIDs in the same adapter still fail'
+        [IO.File]::WriteAllText($picker,$pickerSource)
+        $elsewhere=Join-Path $zip 'public-copy.cs';[IO.File]::WriteAllText($elsewhere,$pickerSource)
+        Fails {& (Join-Path $root 'scripts/Test-NoSecrets.ps1') -ProjectRoot $zip} 'public COM UUID exemption is limited to exact adapter path'
+        [IO.File]::Delete($elsewhere)
         [IO.File]::WriteAllText((Join-Path $zip 'root.txt'),'fixture')
         Fails {& (Join-Path $root 'scripts/Test-NoSecrets.ps1') -ProjectRoot $zip} 'source ZIP cannot hide root credentials in public root'
     }finally{

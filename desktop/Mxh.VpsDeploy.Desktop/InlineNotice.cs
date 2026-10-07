@@ -15,6 +15,7 @@ public sealed class InlineNotice : UserControl
     public InlineNotice()
     {
         Visibility = Visibility.Collapsed;
+        DesktopTypography.Mark(text, TypeRole.Note, 14);
         var grid = new Grid { ColumnSpacing = 16 }; grid.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) }); grid.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); grid.Children.Add(text);
         var close = new Button { Content = "关闭", VerticalAlignment = VerticalAlignment.Top }; close.Click += (_, _) => IsOpen = false; Grid.SetColumn(close, 1); grid.Children.Add(close); frame = new Border { Background = DesktopTheme.Brush(Paint.Info), CornerRadius = new CornerRadius(8), Padding = new Thickness(18), Child = grid }; Content = frame;
     }

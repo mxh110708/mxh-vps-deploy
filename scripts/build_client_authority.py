@@ -59,6 +59,7 @@ def load_fragment(source: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def collect_nodes(spec: dict[str, Any], clash: dict[str, Any], sing: dict[str, Any]) -> list[dict[str, Any]]:
+    formats = set(spec.get("client_formats", ["Clash", "SingBox"]))
     nodes: list[dict[str, Any]] = []
     for source in spec.get("fragment_sources") or []:
         nodes.extend(load_fragment(source))
@@ -67,15 +68,15 @@ def collect_nodes(spec: dict[str, Any], clash: dict[str, Any], sing: dict[str, A
     sing_existing = {str(item.get("tag")): item for item in sing.get("outbounds") or []}
     for reference in spec.get("existing_node_refs") or []:
         name = str(reference.get("name", ""))
-        if name not in clash_existing or name not in sing_existing:
-            fail(f"existing authority node is not present in both clients: {name}")
+        if ("Clash" in formats and name not in clash_existing) or ("SingBox" in formats and name not in sing_existing):
+            fail(f"existing authority node is missing in a selected client: {name}")
         nodes.append({
             "name": name,
             "kind": reference.get("kind"),
             "region_group": reference.get("region_group"),
             "transit_group": reference.get("transit_group"),
-            "clash": copy.deepcopy(clash_existing[name]),
-            "sing_box": copy.deepcopy(sing_existing[name]),
+            "clash": copy.deepcopy(clash_existing.get(name)),
+            "sing_box": copy.deepcopy(sing_existing.get(name)),
             "origin": "existing-authority",
         })
     seen: set[str] = set()
@@ -84,9 +85,9 @@ def collect_nodes(spec: dict[str, Any], clash: dict[str, Any], sing: dict[str, A
         if not name or name in seen:
             fail(f"empty or duplicate node name: {name!r}")
         seen.add(name)
-        if str(node.get("clash", {}).get("name", "")) != name:
+        if "Clash" in formats and str((node.get("clash") or {}).get("name", "")) != name:
             fail(f"Clash node name mismatch: {name}")
-        if str(node.get("sing_box", {}).get("tag", "")) != name:
+        if "SingBox" in formats and str((node.get("sing_box") or {}).get("tag", "")) != name:
             fail(f"sing-box node tag mismatch: {name}")
         kind = str(node.get("kind", ""))
         if kind == "entry":
@@ -96,8 +97,10 @@ def collect_nodes(spec: dict[str, Any], clash: dict[str, Any], sing: dict[str, A
             transit = str(node.get("transit_group", ""))
             if not transit:
                 fail(f"landing node has no transit group: {name}")
-            node["clash"]["dialer-proxy"] = transit
-            node["sing_box"]["detour"] = transit
+            if "Clash" in formats:
+                node["clash"]["dialer-proxy"] = transit
+            if "SingBox" in formats:
+                node["sing_box"]["detour"] = transit
         else:
             fail(f"invalid node kind for {name}: {kind}")
     return nodes
@@ -264,20 +267,29 @@ def validate_rendered_references(clash: dict[str, Any], sing: dict[str, Any]) ->
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--clash", type=Path, required=True)
-    parser.add_argument("--sing-box", type=Path, required=True)
+    parser.add_argument("--clash", type=Path)
+    parser.add_argument("--sing-box", type=Path)
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     spec = json.loads(args.spec.read_text(encoding="utf-8"))
     if int(spec.get("schema_version", 0)) != 1:
         fail("unsupported client layout spec schema")
+    formats = spec.get("client_formats", ["Clash", "SingBox"])
+    if not isinstance(formats, list) or not formats or len(set(formats)) != len(formats) or set(formats) - {"Clash", "SingBox"}:
+        fail("unsupported client selection")
+    if ("Clash" in formats and args.clash is None) or ("SingBox" in formats and args.sing_box is None):
+        fail("selected client source is required")
     yaml = YAML()
     yaml.preserve_quotes = True
     yaml.width = 4096
-    with args.clash.open("r", encoding="utf-8") as handle:
-        clash = yaml.load(handle)
-    sing = json.loads(args.sing_box.read_text(encoding="utf-8"))
+    clash: dict[str, Any] = {}
+    sing: dict[str, Any] = {}
+    if "Clash" in formats:
+        with args.clash.open("r", encoding="utf-8") as handle:
+            clash = yaml.load(handle)
+    if "SingBox" in formats:
+        sing = json.loads(args.sing_box.read_text(encoding="utf-8"))
     nodes = collect_nodes(spec, clash, sing)
     groups = copy.deepcopy(spec.get("groups") or [])
     order = [str(value) for value in spec.get("group_order") or []]
@@ -285,23 +297,23 @@ def main() -> None:
     if remove_groups & {str(group["name"]) for group in groups}:
         fail("a selector cannot be both generated and removed")
     validate_group_graph(groups, {str(node["name"]) for node in nodes})
-    clash_nodes = [copy.deepcopy(node["clash"]) for node in nodes]
-    sing_nodes = [copy.deepcopy(node["sing_box"]) for node in nodes]
-    clash["proxies"] = replace_named(list(clash.get("proxies") or []), "name", clash_nodes)
-    sing["outbounds"] = replace_named(list(sing.get("outbounds") or []), "tag", sing_nodes)
-    apply_clash_groups(clash, groups, order, remove_groups)
-    apply_sing_groups(sing, groups, order, remove_groups)
+    if "Clash" in formats:
+        clash_nodes = [copy.deepcopy(node["clash"]) for node in nodes]
+        clash["proxies"] = replace_named(list(clash.get("proxies") or []), "name", clash_nodes)
+        apply_clash_groups(clash, groups, order, remove_groups)
+    if "SingBox" in formats:
+        sing_nodes = [copy.deepcopy(node["sing_box"]) for node in nodes]
+        sing["outbounds"] = replace_named(list(sing.get("outbounds") or []), "tag", sing_nodes)
+        apply_sing_groups(sing, groups, order, remove_groups)
     validate_rendered_references(clash, sing)
-    sing_text = serialize_profile(sing)
 
     args.output.mkdir(parents=True, exist_ok=True)
-    clash_path = args.output / "Clash_General.candidate.yaml"
-    with clash_path.open("w", encoding="utf-8", newline="\n") as handle:
-        yaml.dump(clash, handle)
-    sing_path = args.output / "sing-box-general.candidate.json"
-    # The desktop IPC path has a practical 4 MiB ceiling.  Keep the private
-    # spec/manifest readable, but serialize the runtime profile compactly.
-    sing_path.write_text(sing_text, encoding="utf-8")
+    if "Clash" in formats:
+        with (args.output / "Clash_General.candidate.yaml").open("w", encoding="utf-8", newline="\n") as handle:
+            yaml.dump(clash, handle)
+    if "SingBox" in formats:
+        # The desktop IPC path has a practical 4 MiB ceiling.
+        (args.output / "sing-box-general.candidate.json").write_text(serialize_profile(sing), encoding="utf-8")
     manifest = {
         "schema_version": 1,
         "generated_nodes": [str(node["name"]) for node in nodes],
@@ -310,8 +322,9 @@ def main() -> None:
         "authoritative_files_modified": False,
         "source_mode": str(spec.get("source_mode", "unspecified")),
         "requested_output_mode": str(spec.get("output_mode", "unspecified")),
-        "source_clash": str(args.clash),
-        "source_sing_box": str(args.sing_box),
+        "client_formats": formats,
+        "source_clash": str(args.clash) if "Clash" in formats else None,
+        "source_sing_box": str(args.sing_box) if "SingBox" in formats else None,
     }
     (args.output / "candidate-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

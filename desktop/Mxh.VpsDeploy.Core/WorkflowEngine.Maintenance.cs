@@ -75,7 +75,7 @@ public sealed partial class WorkflowEngine
         void Restore(JsonObject target, JsonObject old, string key) { if (old.ContainsKey(key)) target[key] = old[key]?.DeepClone(); else target.Remove(key); }
         if (components.Contains("Protocols"))
         {
-            foreach (var key in new[] { "Role", "Reality", "AnyTls", "Shadowsocks", "ProtocolInventory", "TrustedTls" }) Restore(c.Plan, oldPlan, key);
+            foreach (var key in new[] { "Role", "Roles", "ActiveEntry", "Reality", "AnyTls", "Shadowsocks", "ProtocolInventory", "TrustedTls" }) Restore(c.Plan, oldPlan, key);
             foreach (var key in new[] { "Xray", "AnyTls", "Shadowsocks" }) Restore(c.Secrets, oldSecrets, key);
             foreach (var key in new[] { "ProtocolInventory", "ProtocolValidation", "XrayVersion", "SingBoxVersion", "AnyTls" }) Restore(c.State, oldState, key);
             foreach (var key in new[] { "XrayPrimary", "XrayBackup", "AnyTlsPrimary", "LandingShadowsocks" }) c.Plan.Put("Ports." + key, oldPlan.At("Ports." + key)?.DeepClone());

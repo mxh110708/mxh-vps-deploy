@@ -48,10 +48,12 @@ public sealed partial class MainWindow
             if (!source.Contains("Segoe Fluent Icons", StringComparison.Ordinal) && !source.Contains("Segoe MDL2", StringComparison.Ordinal) && !source.Contains("SourceSerif4", StringComparison.Ordinal)) text.FontFamily = InterfaceFont;
         }
         foreach (var text in Find<RichTextBlock>(root)) text.FontFamily = InterfaceFont;
+        DesktopTypography.Apply(root);
     }
     private UIElement FontSetting()
     {
         var choice = new ComboBox { MinWidth = 190, MaxWidth = 240, MinHeight = 38, FontSize = 13, CornerRadius = new CornerRadius(6), BorderThickness = new Thickness(1), BorderBrush = Brush(Paint.InputBorder), Background = Brush(Paint.Input), Foreground = Brush(Paint.Text), FontFamily = InterfaceFont, Tag = "FontId" };
+        DesktopTypography.Mark(choice, TypeRole.Body, 14);
         AutomationProperties.SetName(choice, "界面字体"); var refreshing = false;
         void Refresh()
         {

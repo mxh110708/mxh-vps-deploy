@@ -38,6 +38,7 @@ public sealed partial class MainWindow
             finally { dialog.Hide(); await pending; }
         }
 
+        await DialogShot("dialog-create-scheme", CreateScheme);
         deploymentForm["Provider"] = "示例服务商"; deploymentForm["Instance"] = "演示实例"; deploymentForm["NodeName"] = "示例入口";
         deploymentForm["IPv4"] = "192.0.2.10"; deploymentForm["RealityTarget"] = "example.com";
         deploymentForm["Role"] = "RealityEntry"; deploymentForm["Existing"] = false;
@@ -46,18 +47,24 @@ public sealed partial class MainWindow
         await Shot("deploy-anytls", "deploy", bottom: true);
         deploymentForm["Role"] = "ShadowsocksLanding"; deploymentForm["NodeName"] = "示例落地"; deploymentForm["TrustedEntries"] = "192.0.2.20";
         await Shot("deploy-landing", "deploy", true, true);
+        deploymentForm["Roles"] = new JsonArray("RealityEntry", "AnyTlsEntry", "ShadowsocksLanding"); deploymentForm["ActiveEntry"] = "RealityEntry";
+        await Shot("deploy-multiple", "deploy"); deploymentForm.Remove("Roles");
         deploymentForm["Existing"] = true; await Shot("deploy-existing", "deploy");
         await Shot("instances-recovery", "instances", true, true);
+        await Shot("network-page", "network");
         var instance = store.ListInstances().First().Plan;
         await DialogShot("dialog-protocol-management", () => OperationSheet(OperationKind.ProtocolState, instance));
         await DialogShot("dialog-network", () => OperationSheet(OperationKind.TuneNetwork, instance));
         await DialogShot("dialog-monitor", () => OperationSheet(OperationKind.Komari, instance));
 
-        scheme = ClientSchemes.New(paths); scheme["Name"] = "示例客户端方案";
+        scheme = ClientSchemes.New(paths); scheme["Name"] = "示例连接方案";
         scheme["Nodes"] = new JsonArray(
             new JsonObject { ["name"] = "示例入口", ["kind"] = "entry", ["region_group"] = "US-West Entry", ["transit_group"] = "US-West Entry", ["clash"] = new JsonObject { ["type"] = "vless", ["server"] = "192.0.2.10", ["port"] = 443, ["servername"] = "example.com" }, ["sing_box"] = new JsonObject() },
             new JsonObject { ["name"] = "示例落地", ["kind"] = "landing", ["transit_group"] = "US-West Entry", ["clash"] = new JsonObject { ["type"] = "ss", ["server"] = "192.0.2.20", ["port"] = 45001, ["cipher"] = "2022-blake3-aes-128-gcm" }, ["sing_box"] = new JsonObject() });
-        await Shot("clients-nodes", "clients");
+        designerStep = 0; await Shot("clients-targets", "clients");
+        designerStep = 1; await Shot("clients-nodes", "clients");
+        designerStep = 2; await Shot("clients-connections", "clients", true);
+        designerStep = 3;
         await Shot("clients-publish", "clients", true, true);
         await DialogShot("dialog-node-entry", () => EditNode(0));
         await DialogShot("dialog-node-landing", () => EditNode(1));

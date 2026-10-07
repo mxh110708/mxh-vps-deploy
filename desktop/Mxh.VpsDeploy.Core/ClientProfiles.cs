@@ -10,7 +10,7 @@ public static class ClientProfiles
     {
         foreach (var role in DeploymentPlans.Roles[..3])
         {
-            var installed = plan.At("ProtocolInventory." + role) == null ? plan.Text("Role") == role : plan.Flag("ProtocolInventory." + role + (enabledOnly ? ".Enabled" : ".Installed"));
+            var installed = plan.At("ProtocolInventory." + role) == null ? enabledOnly ? DeploymentPlans.InitiallyEnabled(plan, role) : DeploymentPlans.Uses(plan, role) : plan.Flag("ProtocolInventory." + role + (enabledOnly ? ".Enabled" : ".Installed"));
             if (!installed) continue;
             foreach (var (family, address) in new[] { ("IPv4", plan.Text("Server.IPv4")), ("IPv6", plan.Text("Server.IPv6")) })
             {
@@ -20,6 +20,7 @@ public static class ClientProfiles
                 foreach (var egress in users)
                 {
                     var name = plan.Text("NodeName") + (role == "ShadowsocksLanding" ? "." + egress + "-Exit" : "") + (plan.Text("Server.IPv6") == "" ? "" : "-" + family);
+                    if (role is "RealityEntry" or "AnyTlsEntry" && DeploymentPlans.Roles[..2].Count(r => plan.Flag("ProtocolInventory." + r + ".Installed", DeploymentPlans.Uses(plan, r))) > 1) name += role == "RealityEntry" ? "-Reality" : "-AnyTLS";
                     foreach (var port in role == "RealityEntry" && plan.Number("Ports.XrayBackup") > 0 ? new[] { plan.Number("Ports.XrayPrimary"), plan.Number("Ports.XrayBackup") } : new[] { plan.Number(role == "RealityEntry" ? "Ports.XrayPrimary" : role == "AnyTlsEntry" ? "Ports.AnyTlsPrimary" : "Ports.LandingShadowsocks") })
                     {
                         var nodeName = name + (role == "RealityEntry" && port != plan.Number("Ports.XrayPrimary") ? "-Backup" : "");

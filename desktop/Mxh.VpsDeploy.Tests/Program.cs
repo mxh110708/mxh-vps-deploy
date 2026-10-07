@@ -15,7 +15,7 @@ internal sealed class BoundaryTests(string repository)
     private async Task RefusesAsync(Func<Task> action, string message) { try { await action(); } catch (OperationException) { assertions++; return; } throw new Exception(message); }
     public async Task Run()
     {
-        using var f = new Fixture(repository); Paths(f); Fonts(f); await Coordinator(f); Publisher(f); Profiles(f); Keys(f); await Workflows(f); await Credentials(f); await Workbench(f); await Trust(f);
+        using var f = new Fixture(repository); Paths(f); Fonts(f); await Coordinator(f); Publisher(f); SinglePublisher(f); Profiles(f); MultiPurpose(f); Keys(f); await Workflows(f); await DesktopDeployment(f); await Credentials(f); await Workbench(f); await Trust(f);
         var python = Environment.GetEnvironmentVariable("MXH_TEST_PYTHON"); if (!string.IsNullOrEmpty(python)) await RealClientWorkbench(f, python);
         Console.WriteLine($"PASS: {assertions} C# boundary and workflow assertions; no production connections.");
     }
@@ -87,8 +87,63 @@ internal sealed class BoundaryTests(string repository)
         Refuses(() => new CandidatePublisher(f.Paths).Publish(Candidate(), c, s), "unfinished publish ignored"); new CandidatePublisher(f.Paths).Recover(journal); Check(File.ReadAllText(c) == "new-clash", "crash before Applied not recovered");
         var data = ArchiveStore.ReadJson(journal); data["Phase"] = "Prepared"; ArchiveStore.WriteJson(journal, data); File.WriteAllText(c, "external-after-crash"); Refuses(() => new CandidatePublisher(f.Paths).Recover(journal), "recovery overwrote external edit"); Check(File.ReadAllText(c) == "external-after-crash", "external edit lost"); data["Phase"] = "RolledBack"; ArchiveStore.WriteJson(journal, data);
     }
+    private void SinglePublisher(Fixture f)
+    {
+        foreach (var mode in new[] { "SingBox", "Clash" })
+        {
+            var directory = f.Paths.Resolve("single-authority/" + mode); Directory.CreateDirectory(directory);
+            var target = SafePath.Resolve(directory, "output"); var source = SafePath.Resolve(directory, "candidate"); File.WriteAllText(target, "original"); File.WriteAllText(source, "candidate");
+            var format = mode == "SingBox" ? "SingBox" : "Clash";
+            JsonObject Candidate() => new() { ["OutputClients"] = mode, ["ValidationStatus"] = "Passed", [format] = source, [format + "Hash"] = ClientSchemes.SourceFingerprint(source), ["Sources"] = new JsonObject(), ["Targets"] = new JsonObject { [target] = ClientSchemes.SourceFingerprint(target) } };
+            var publisher = new CandidatePublisher(f.Paths, (path, bytes) => { ArchiveStore.AtomicWrite(path, bytes); throw new IOException("lost single-file acknowledgement"); });
+            Refuses(() => publisher.Publish(Candidate(), mode == "Clash" ? target : "", mode == "SingBox" ? target : ""), "single lost ack accepted"); Check(File.ReadAllText(target) == "original", "single lost ack did not rollback");
+            var candidate = Candidate(); File.WriteAllText(target, "outside edit"); Refuses(() => new CandidatePublisher(f.Paths).Publish(candidate, mode == "Clash" ? target : "", mode == "SingBox" ? target : ""), "single stale target replaced"); Check(File.ReadAllText(target) == "outside edit", "single outside edit lost");
+            new CandidatePublisher(f.Paths).Publish(Candidate(), mode == "Clash" ? target : "", mode == "SingBox" ? target : ""); Check(File.ReadAllText(target) == "candidate", "single export failed without other target");
+            var transaction = f.Paths.Resolve("private/client-publish/" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(transaction); var journal = SafePath.Resolve(transaction, "transaction.json");
+            ArchiveStore.AtomicWrite(SafePath.Resolve(transaction, "0.backup"), Encoding.UTF8.GetBytes("recovery original"));
+            var data = new JsonObject { ["SchemaVersion"] = 2, ["Formats"] = new JsonArray(format), ["Phase"] = "Prepared", ["Targets"] = new JsonArray(target), ["Hashes"] = new JsonArray(ClientSchemes.SourceFingerprint(target)), ["OriginalHashes"] = new JsonArray(ArchiveStore.Digest(Encoding.UTF8.GetBytes("recovery original"))) };
+            ArchiveStore.WriteJson(journal, data); new CandidatePublisher(f.Paths).Recover(journal); Check(File.ReadAllText(target) == "recovery original", "single recovery failed");
+            data["Phase"] = "Prepared"; data["SchemaVersion"] = 99; ArchiveStore.WriteJson(journal, data); Refuses(() => new CandidatePublisher(f.Paths).Recover(journal), "unknown schema recovered");
+            data["SchemaVersion"] = 2; ArchiveStore.WriteJson(journal, data); File.WriteAllText(target, "external after crash"); Refuses(() => new CandidatePublisher(f.Paths).Recover(journal), "single recovery overwrote outside edit"); data["Phase"] = "RolledBack"; ArchiveStore.WriteJson(journal, data);
+        }
+    }
+    private void MultiPurpose(Fixture f)
+    {
+        var tokenFile = f.Paths.Resolve("private/synthetic-cert-token.txt"); File.WriteAllText(tokenFile, "synthetic-token");
+        var form = new JsonObject { ["Provider"] = "Example", ["Instance"] = "Multi", ["NodeName"] = "Multi", ["IPv4"] = "192.0.2.10", ["SshPort"] = 22, ["Roles"] = new JsonArray("AnyTlsEntry", "ShadowsocksLanding", "RealityEntry"), ["ActiveEntry"] = "RealityEntry", ["RealityTarget"] = "example.com", ["AnyTlsName"] = "entry.example.com", ["EchPublicName"] = "ech.example.com", ["TrustedEntries"] = "192.0.2.20", ["ZoneName"] = "example.com", ["CertbotEmail"] = "ops@example.com", ["CloudflareTokenFile"] = tokenFile };
+        var plan = DeploymentPlans.Create(form, f.Versions, f.Paths, false);
+        Check(DeploymentPlans.Purposes(plan).Length == 3 && DeploymentPlans.InitiallyEnabled(plan, "RealityEntry") && !DeploymentPlans.InitiallyEnabled(plan, "AnyTlsEntry") && DeploymentPlans.InitiallyEnabled(plan, "ShadowsocksLanding"), "multi-purpose default listener lost");
+        Check(plan.Text("NetworkTuning.Mode") == "Manual" && plan.Number("NetworkTuning.BandwidthMbps") == 0, "new deployment requires tuning values");
+        var secrets = Fixture.RealitySecrets(); secrets["AnyTls"] = new JsonObject { ["Password"] = "synthetic-password", ["EchClientConfigPem"] = "fixture" }; secrets["Shadowsocks"] = new JsonObject { ["ServerKey"] = "fixture", ["PrimaryUserKey"] = "fixture" };
+        var nodes = ClientProfiles.Nodes(plan, secrets).ToArray(); Check(nodes.Select(n => n.Name).Distinct().Count() == nodes.Length && nodes.Any(n => n.Role == "AnyTlsEntry") && nodes.Any(n => n.Role == "ShadowsocksLanding"), "combined node names collided");
+        Check(ClientProfiles.Nodes(plan, secrets, true).All(n => n.Role != "AnyTlsEntry"), "inactive entry exported as active");
+        plan.Put("Ports.LandingShadowsocks", JsonValue.Create(443)); Refuses(() => DeploymentPlans.Validate(plan), "shared entry/landing listener accepted");
+        form["ActiveEntry"] = "ShadowsocksLanding"; Refuses(() => DeploymentPlans.Create(form, f.Versions, f.Paths, false), "non-entry selected as active entry");
+        form["Roles"] = new JsonArray("RealityEntry", "unknown"); Refuses(() => DeploymentPlans.Create(form, f.Versions, f.Paths, false), "unknown purpose accepted");
+    }
+    private async Task DesktopDeployment(Fixture f)
+    {
+        foreach (var mode in new[] { "Single", "EntryLanding", "All" })
+        {
+            var multiple = mode != "Single"; var plan = f.Plan("DesktopDeploy" + mode);
+            if (multiple) { plan["Roles"] = new JsonArray("ShadowsocksLanding", "RealityEntry"); plan.Put("Shadowsocks.TrustedEntryIPv4s", new JsonArray("192.0.2.20")); }
+            if (mode == "All")
+            {
+                plan["Roles"] = new JsonArray("AnyTlsEntry", "ShadowsocksLanding", "RealityEntry"); plan.Put("AnyTls.ServerName", JsonValue.Create("entry.example.com")); plan.Put("AnyTls.EchPublicName", JsonValue.Create("ech.example.com"));
+                var tokenFile = f.Paths.Resolve("private/deploy-synthetic-token.txt"); File.WriteAllText(tokenFile, "synthetic-token"); plan.Put("TrustedTls.Enabled", JsonValue.Create(true)); plan.Put("TrustedTls.ZoneName", JsonValue.Create("example.com")); plan.Put("TrustedTls.CertbotEmail", JsonValue.Create("ops@example.com")); plan.Put("TrustedTls.CloudflareTokenFile", JsonValue.Create(tokenFile));
+            }
+            var remote = new FakeRemote(); var task = Guid.NewGuid().ToString("N");
+            var outcome = await f.Engine(remote).ExecuteAsync(new(OperationKind.Deploy, f.Relative(plan), new JsonObject { ["Plan"] = plan }), task, new InlineProgress<TaskProgress>(_ => { }), default);
+            Check(outcome == TaskOutcome.Completed && !remote.Commands.Contains("network-tuning.sh"), "deployment applied network tuning");
+            Check(remote.Commands.Contains("xray-apply-config.sh") && (!multiple || remote.Commands.Contains("sing-box-apply-config.sh") && remote.Commands.Contains("protocol-lifecycle-apply-state.sh")), "combined deployment did not install selected protocols");
+            if (mode == "All") { Check(remote.Commands.IndexOf("xray-apply-config.sh") < remote.Commands.IndexOf("anytls-apply-config.sh"), "conflicting entry installed in wrong order"); var actual = ArchiveStore.ReadJson(SafePath.Resolve(f.Paths.Instance(f.Relative(plan)), "deployment-plan.json")); Check(actual.Flag("ProtocolInventory.RealityEntry.Enabled") && actual.Flag("ProtocolInventory.AnyTlsEntry.Installed") && !actual.Flag("ProtocolInventory.AnyTlsEntry.Enabled") && actual.Flag("ProtocolInventory.ShadowsocksLanding.Enabled"), "default entry/landing state lost"); }
+            var state = ArchiveStore.ReadJson(SafePath.Resolve(f.Paths.Instance(f.Relative(plan)), "deployment-state.json")); Check(state.Text("Modules.network-tuning.Status") == "Skipped" && state["NetworkTuning"] == null, "manual tuning boundary not recorded");
+        }
+    }
     private void Profiles(Fixture f)
     {
+        var unselected = ClientSchemes.New(f.Paths); unselected["OutputClients"] = "None"; Check(ClientSchemes.OutputLabel(unselected) == "未选择生成目标", "unselected draft cannot be displayed");
+        Refuses(() => ClientSchemes.Specification(unselected), "unselected draft generated client files");
         var plan = f.Plan("Profiles"); plan.Put("Server.IPv6", JsonValue.Create("2001:db8::10")); var nodes = ClientProfiles.Nodes(plan, Fixture.RealitySecrets()).ToArray();
         Check(nodes.Length == 4 && nodes.Select(n => n.Name).Distinct().Count() == 4, "dual entries missing/duplicated");
         foreach (var node in nodes) { var clash = ClientProfiles.ClashProbe(node, 12345); var sing = ClientProfiles.SingProbe(node, 12345); Check(!clash.Flag("allow-lan") && clash.Text("bind-address") == "127.0.0.1" && clash.Text("mode") == "rule", "probe controls system routing"); Check(sing.At("inbounds")!.AsArray()[0]!.Text("listen") == "127.0.0.1" && sing.Text("route.final") == node.Name, "probe not forced to target"); }
@@ -152,8 +207,24 @@ internal sealed class BoundaryTests(string repository)
         var node = ClientProfiles.Nodes(f.Plan("RealCore"), secrets).First(); scheme["Nodes"]!.AsArray().Add(new JsonObject { ["name"] = node.Name, ["kind"] = "entry", ["region_group"] = "US-West Entry", ["transit_group"] = "US-West Entry", ["clash"] = node.Clash.DeepClone(), ["sing_box"] = node.SingBox.DeepClone() });
         var candidate = await workbench.BuildAsync(scheme, default); await workbench.ValidateAsync(scheme, default); Check(candidate.Text("ValidationStatus") == "Passed", "real fixed cores rejected candidate");
         var clash = f.Paths.Resolve("real-authority/clash.yaml"); var sing = f.Paths.Resolve("real-authority/sing.json"); workbench.PreparePublish(scheme, clash, sing); workbench.Publish(scheme, clash, sing); Check(File.Exists(clash) && File.Exists(sing), "real candidate not published to fixture");
+        foreach (var mode in new[] { "SingBox", "Clash" })
+        {
+            var format = mode == "Clash" ? "Clash" : "SingBox"; var other = format == "Clash" ? "SingBox" : "Clash";
+            var single = ClientSchemes.New(f.Paths); single["OutputClients"] = mode; single[other] = f.Paths.Resolve("nonexistent-unused-source"); single["Nodes"] = scheme["Nodes"]!.DeepClone();
+            foreach (var item in single["Nodes"]!.AsArray()) item![other == "Clash" ? "clash" : "sing_box"] = null;
+            var singleWorkbench = new ClientWorkbench(f.Store, new ExternalToolRunner(), new SelectedAssets(assets, mode == "Clash" ? "mihomo" : "sing-box"), python);
+            var onlyCandidate = await singleWorkbench.BuildAsync(single, default); await singleWorkbench.ValidateAsync(single, default); Check(onlyCandidate.Text("ValidationStatus") == "Passed" && onlyCandidate[other] == null, "single build or validation used unselected client");
+            var target = f.Paths.Resolve("real-authority/" + mode + "/config" + (mode == "Clash" ? ".yaml" : ".json")); singleWorkbench.PreparePublish(single, mode == "Clash" ? target : "", mode == "SingBox" ? target : ""); singleWorkbench.Publish(single, mode == "Clash" ? target : "", mode == "SingBox" ? target : ""); Check(File.Exists(target), "single core-validated export failed");
+            var fingerprint = ClientSchemes.SourceFingerprint(target); var imported = await singleWorkbench.ReadSourcesAsync(mode == "Clash" ? target : "", mode == "SingBox" ? target : "", default);
+            Check(imported.Count == 1 && imported[0]![other == "Clash" ? "clash" : "sing_box"] == null && fingerprint == ClientSchemes.SourceFingerprint(target), "single source import changed source or required pair");
+            single["Nodes"] = imported; single[format] = target; single["SourceMode"] = "ExistingAuthority"; single["SourceFingerprints"] = new JsonObject { [format] = fingerprint };
+            foreach (var item in imported) { item!["region_group"] = "US-West Entry"; item["transit_group"] = "US-West Entry"; }
+            await singleWorkbench.BuildAsync(single, default); await singleWorkbench.ValidateAsync(single, default); Check(single.Text("Candidate.ValidationStatus") == "Passed", "single imported config did not rebuild");
+            File.AppendAllText(target, "\n "); await RefusesAsync(() => singleWorkbench.BuildAsync(single, default), "changed imported source accepted");
+            singleWorkbench.Delete(single); Check(!singleWorkbench.List().Any(s => s.Text("Id") == single.Text("Id")) && File.Exists(target), "deleting scheme removed exported authority");
+        }
         var cache = assets.ResolveCore("mihomo"); File.AppendAllText(cache, "fixture-tamper"); Refuses(() => assets.ResolveCore("mihomo"), "tampered cache accepted"); Check(File.ReadAllBytes(cache).AsSpan().EndsWith(Encoding.UTF8.GetBytes("fixture-tamper")), "tampered cache silently cleared");
-        Console.WriteLine("PASS: real Python builder + pinned Mihomo/sing-box + paired fixture publication.");
+        Console.WriteLine("PASS: real Python builder, pinned cores, selected-client import/build/check/export/delete.");
     }
     private async Task Trust(Fixture f)
     {

@@ -5,12 +5,12 @@ namespace Mxh.VpsDeploy.Desktop;
 
 public sealed partial class MainWindow
 {
-    private static PasswordBox SecretField(string label, string value = "") => new()
+    private static PasswordBox SecretField(string label, string value = "") => DesktopTypography.Mark(new PasswordBox
     {
         Header = label, Password = value, PasswordRevealMode = PasswordRevealMode.Hidden, FontFamily = InterfaceFont, FontSize = 13,
         MinHeight = 38, CornerRadius = new CornerRadius(6), Padding = new Thickness(12, 9, 12, 9), BorderThickness = new Thickness(1),
         BorderBrush = Brush(Paint.InputBorder), Background = Brush(Paint.Input), Foreground = Brush(Paint.Text)
-    };
+    }, TypeRole.Body, 14);
 
     private static Style DialogButton(bool accent)
     {
@@ -21,7 +21,7 @@ public sealed partial class MainWindow
             new Setter(Control.ForegroundProperty, Brush(accent ? Paint.AccentText : Paint.Text)),
             new Setter(Control.BorderBrushProperty, Brush(accent ? Paint.Accent : Paint.ButtonBorder)),
             new Setter(Control.BorderThicknessProperty, new Thickness(1)), new Setter(Control.CornerRadiusProperty, new CornerRadius(6)),
-            new Setter(Control.FontFamilyProperty, InterfaceFont), new Setter(Control.FontSizeProperty, 13d),
+            new Setter(Control.FontFamilyProperty, InterfaceFont), new Setter(Control.FontSizeProperty, DesktopTypography.Size(TypeRole.Body, 14)),
             new Setter(Control.PaddingProperty, new Thickness(16, 8, 16, 8))
         }) style.Setters.Add(setter);
         return style;
@@ -32,6 +32,8 @@ public sealed partial class MainWindow
         dialog.RequestedTheme = DesktopTheme.IsLight ? ElementTheme.Light : ElementTheme.Dark;
         dialog.FontFamily = InterfaceFont; dialog.Background = Brush(Paint.Surface); dialog.Foreground = Brush(Paint.Text); dialog.CornerRadius = new CornerRadius(12);
         dialog.PrimaryButtonStyle = DialogButton(true); dialog.CloseButtonStyle = DialogButton(false);
+        dialog.SecondaryButtonStyle = DialogButton(false);
+        if (dialog.Title is string title) dialog.Title = Text(title, 22);
         ApplyFont(dialog);
         // An explicit button click or keyboard focus is required to submit an operation.
         dialog.DefaultButton = ContentDialogButton.None;
@@ -75,7 +77,7 @@ public sealed partial class MainWindow
         Grid.SetColumn(control, 2); grid.Children.Add(control); return grid;
     }
 
-    private static TextBlock GroupLabel(string title) => new() { Text = title, FontSize = 13, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = Brush(Paint.Muted), Margin = new Thickness(2, 2, 0, -8) };
+    private static TextBlock GroupLabel(string title) => DesktopTypography.Mark(new TextBlock { Text = title, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = Brush(Paint.Muted), Margin = new Thickness(2, 2, 0, -8) }, TypeRole.Title, 14);
 
     private static Grid Trailing(FrameworkElement left, FrameworkElement right)
     {

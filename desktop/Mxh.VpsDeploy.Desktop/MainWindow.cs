@@ -31,7 +31,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private readonly Button cancel = new() { Content = "取消任务", Visibility = Visibility.Collapsed };
     private readonly SemaphoreSlim dialogs = new(1);
     private readonly JsonObject settings;
-    private readonly JsonObject deploymentForm = new() { ["Provider"] = "", ["Instance"] = "", ["NodeName"] = "", ["SshPort"] = 22, ["Role"] = "RealityEntry", ["BandwidthMbps"] = 100, ["ReferenceRttMs"] = 0 };
+    private readonly JsonObject deploymentForm = new() { ["Provider"] = "", ["Instance"] = "", ["NodeName"] = "", ["SshPort"] = 22, ["Role"] = "RealityEntry" };
     private JsonObject? scheme;
     private string? selectedInstance;
     private CancellationTokenSource? taskCancellation;
@@ -47,6 +47,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
         workbench = new(store, tools, assets, paths.Resolve("runtime/python/python.exe"));
         var preference = paths.Resolve("private/desktop-settings.json"); settings = File.Exists(preference) ? ArchiveStore.ReadJson(preference) : new JsonObject { ["AutoCheckUpdates"] = false, ["UpdateProxy"] = "http://127.0.0.1:2080" };
         fonts = new(paths);
+        DesktopTypography.Load(settings); DesktopTypography.Mark(heading, TypeRole.Title, 27); DesktopTypography.Mark(caption, TypeRole.Note, 13); DesktopTypography.Mark(taskText, TypeRole.Note, 13);
         try { SetFont(settings.Text("FontId", "Route")); }
         catch (OperationException) { SetFont("Route"); fontFallback = true; }
         Title = "MXH VPS Deploy"; AppWindow.Resize(new global::Windows.Graphics.SizeInt32(1320, 880)); ExtendsContentIntoTitleBar = true;
@@ -60,7 +61,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
         var body = new Grid(); body.ColumnDefinitions.Add(new() { Width = new GridLength(220) }); body.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
         var sidebar = new StackPanel { Padding = new Thickness(14, 22, 14, 18), Spacing = 5 };
         sidebar.Children.Add(new StackPanel { Margin = new Thickness(12, 0, 0, 26), Spacing = 8, Children = { new TextBlock { Text = "MXH Deploy", FontSize = 26, Foreground = Brush(Paint.SidebarText), FontFamily = new FontFamily("ms-appx:///Fonts/SourceSerif4-600.ttf#Source Serif 4"), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold }, new TextBlock { Text = "VPS 部署与维护", FontSize = 12, Foreground = Brush(Paint.SidebarMuted) } } });
-        foreach (var (id, label, icon) in new[] { ("overview", "概述", Symbol.Home), ("instances", "实例", Symbol.World), ("deploy", "部署", Symbol.Add), ("clients", "客户端", Symbol.Link), ("records", "记录", Symbol.Clock), ("settings", "设置", Symbol.Setting) })
+        foreach (var (id, label, icon) in new[] { ("overview", "概述", Symbol.Home), ("instances", "实例", Symbol.World), ("deploy", "部署", Symbol.Add), ("clients", "配置设计", Symbol.Link), ("network", "网络调优", Symbol.Globe), ("records", "记录", Symbol.Clock), ("settings", "设置", Symbol.Setting) })
         { var labelText = Text(label, 14); labelText.Foreground = Brush(Paint.SidebarText); var button = new Button { Content = Row(new SymbolIcon(icon) { Width = 18, Height = 18, Foreground = Brush(Paint.SidebarIcon) }, labelText), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left, Padding = new Thickness(14, 11, 14, 11), Background = Brush(Paint.Sidebar), BorderThickness = new Thickness(0), CornerRadius = new CornerRadius(7) }; button.Click += (_, _) => SelectPage(id); navigation[id] = button; sidebar.Children.Add(button); }
         body.Children.Add(new Border { Background = Brush(Paint.Sidebar), BorderBrush = Brush(Paint.SidebarBorder), BorderThickness = new Thickness(0, 0, 1, 0), Child = sidebar });
         pageHost.Content = page;
@@ -69,20 +70,30 @@ public sealed partial class MainWindow : Window, IUserInteraction
         var taskBar = new Grid { Padding = new Thickness(20, 9, 20, 9), Background = Brush(Paint.Footer), ColumnSpacing = 16 };
         taskBar.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) }); taskBar.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); taskBar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         taskBar.Children.Add(new StackPanel { Spacing = 6, VerticalAlignment = VerticalAlignment.Center, Children = { taskText, taskProgress } }); Grid.SetColumn(pageAction, 1); taskBar.Children.Add(pageAction); Grid.SetColumn(cancel, 2); taskBar.Children.Add(cancel);
-        cancel.FontSize = 13; cancel.Padding = new Thickness(16, 8, 16, 8); cancel.CornerRadius = new CornerRadius(6); cancel.Background = Brush(Paint.Button); cancel.BorderBrush = Brush(Paint.ButtonBorder);
+        DesktopTypography.Mark(cancel, TypeRole.Body, 13); cancel.Padding = new Thickness(16, 8, 16, 8); cancel.CornerRadius = new CornerRadius(6); cancel.Background = Brush(Paint.Button); cancel.BorderBrush = Brush(Paint.ButtonBorder);
         cancel.Click += (_, _) => { taskCancellation?.Cancel(); taskText.Text = "正在等待安全边界；远端步骤完成后再处理取消。"; cancel.IsEnabled = false; };
         Grid.SetRow(taskBar, 2); shell.Children.Add(taskBar);
-        AppWindow.Closing += (_, e) => { if (taskCancellation != null) { e.Cancel = true; closing = true; taskCancellation.Cancel(); taskText.Text = "正在安全结束任务，完成后关闭窗口。"; } else SaveDraft(); };
+        AppWindow.Closing += async (_, e) =>
+        {
+            if (taskCancellation != null) { e.Cancel = true; closing = true; taskCancellation.Cancel(); taskText.Text = "正在安全结束任务，完成后关闭窗口。"; }
+            else if (!closing && SchemeChanged)
+            {
+                e.Cancel = true;
+                try { if (await ExitScheme(false)) { closing = true; Close(); } }
+                catch (Exception error) { Show(error is OperationException safe ? safe.Message : "方案未能保存，窗口保持打开。", InfoBarSeverity.Error); }
+            }
+        };
         SetAppearance(settings.Text("Appearance", "Dark"));
         root.Loaded += async (_, _) => { var scale = root.XamlRoot.RasterizationScale; var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea; AppWindow.Resize(new((int)Math.Min(1280 * scale, area.Width - 32 * scale), (int)Math.Min(850 * scale, area.Height - 32 * scale))); SelectPage("overview"); if (fontFallback) Show("所选字体暂时不可用，已使用内置原版字体。可在设置中重新选择或导入。", InfoBarSeverity.Warning); if (arguments.Contains("--verify-installed-update")) { await InstalledUpdateSmoke(); return; } if (arguments.Contains("--ui-smoke") || arguments.Contains("--verify-runtime")) { await UiSmoke(); return; } if (settings.Flag("AutoCheckUpdates")) await CheckUpdates(true); };
     }
     private static SolidColorBrush Brush(Paint role) => DesktopTheme.Brush(role);
-    private static TextBlock Text(string value, int size = 14, bool muted = false) => new() { Text = value, FontSize = size, FontFamily = InterfaceFont, TextWrapping = TextWrapping.Wrap, Foreground = Brush(muted ? Paint.Muted : Paint.Text) };
+    private static TextBlock Text(string value, int size = 14, bool muted = false) => DesktopTypography.Mark(new TextBlock { Text = value, FontFamily = InterfaceFont, TextWrapping = TextWrapping.Wrap, Foreground = Brush(muted ? Paint.Muted : Paint.Text) }, size >= 30 ? TypeRole.Metric : size >= 16 ? TypeRole.Title : muted ? TypeRole.Note : TypeRole.Body, size);
     private static StackPanel Column(params UIElement[] children) { var panel = new StackPanel { Spacing = 14 }; foreach (var child in children) panel.Children.Add(child); return panel; }
     private static Border Card(UIElement content) => new() { Background = Brush(Paint.Surface), BorderBrush = Brush(Paint.Border), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Padding = new Thickness(22), Child = content };
     private Button Action(string title, Func<Task> handler, bool accent = false)
     {
         var button = new Button { Content = title, MinHeight = 36, FontSize = 13, Padding = new Thickness(16, 8, 16, 8), CornerRadius = new CornerRadius(6), BorderThickness = new Thickness(1), BorderBrush = Brush(accent ? Paint.Accent : Paint.ButtonBorder), Background = Brush(accent ? Paint.Accent : Paint.Button), Foreground = Brush(accent ? Paint.AccentText : Paint.Text) }; AutomationProperties.SetName(button, title);
+        DesktopTypography.Mark(button, TypeRole.Body, 13);
         button.Click += async (_, _) => { try { if (taskCancellation != null) throw new OperationException("已有任务运行，请等待结束。"); await handler(); } catch (OperationCanceledException) { Show("已取消。"); } catch (Exception error) { Show(error is OperationException safe ? safe.Message : "操作未完成，请检查输入与当前任务。", InfoBarSeverity.Error); } }; return button;
     }
     private static StackPanel Row(params UIElement[] children) { var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center }; foreach (var child in children) panel.Children.Add(child); return panel; }
@@ -96,7 +107,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
     }
     private CheckBox Flag(string label, JsonObject model, string key)
     {
-        var box = new CheckBox { Content = label, IsChecked = model.Flag(key) }; box.Checked += (_, _) => model[key] = true; box.Unchecked += (_, _) => model[key] = false; return box;
+        var box = DesktopTypography.Mark(new CheckBox { Content = label, IsChecked = model.Flag(key) }, TypeRole.Body, 14); box.Checked += (_, _) => model[key] = true; box.Unchecked += (_, _) => model[key] = false; return box;
     }
     private UIElement Details(string label, UIElement content)
     {
@@ -109,8 +120,8 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private void Show(string message, InfoBarSeverity severity = InfoBarSeverity.Informational) { notice.Message = message; notice.Severity = severity; notice.IsOpen = true; }
     private void Navigate(string id)
     {
-        currentPage = id; page.Children.Clear(); disclosures.Clear(); pageAction.Content = null; notice.IsOpen = false; heading.Text = id switch { "overview" => "概述", "instances" => "实例", "deploy" => "部署", "clients" => "客户端", "records" => "任务记录", _ => "设置" }; caption.Text = id switch { "overview" => "集中管理你的 VPS 与客户端配置。", "instances" => "选择实例，查看归档并进行维护。", "deploy" => "配置实例，审阅计划，然后执行。", "clients" => "编辑节点与连接关系，校验后发布。", "records" => "查看任务结果和需要处理的恢复记录。", _ => "应用更新、连接设置与私人数据。" };
-        try { switch (id) { case "overview": Overview(); break; case "instances": Instances(); break; case "deploy": Deployment(); break; case "clients": Clients(); break; case "records": Records(); break; default: Settings(); break; } } catch (Exception error) { Show(error is OperationException safe ? safe.Message : "本地记录暂时无法读取，请核对数据目录。", InfoBarSeverity.Error); }
+        currentPage = id; page.Children.Clear(); disclosures.Clear(); pageAction.Content = null; notice.IsOpen = false; heading.Text = id switch { "overview" => "概述", "instances" => "实例", "deploy" => "部署", "clients" => "配置设计", "network" => "网络调优", "records" => "任务记录", _ => "设置" }; caption.Text = id switch { "overview" => "集中管理你的 VPS 与连接配置。", "instances" => "选择实例，查看归档并进行维护。", "deploy" => "组合选择用途，审阅计划，然后执行。", "clients" => "选择目标，设计连接，校验后导出配置。", "network" => "部署完成后，按需要单独审阅并调整网络参数。", "records" => "查看任务结果和需要处理的恢复记录。", _ => "应用更新、外观设置与私人数据。" };
+        try { switch (id) { case "overview": Overview(); break; case "instances": Instances(); break; case "deploy": Deployment(); break; case "clients": Clients(); break; case "network": NetworkPage(); break; case "records": Records(); break; default: Settings(); break; } } catch (Exception error) { Show(error is OperationException safe ? safe.Message : "本地记录暂时无法读取，请核对数据目录。", InfoBarSeverity.Error); }
         if (Content is DependencyObject root) ApplyFont(root);
     }
     private void SelectPage(string id)
@@ -127,10 +138,10 @@ public sealed partial class MainWindow : Window, IUserInteraction
     {
         var grid = new Grid { ColumnSpacing = 16 }; grid.ColumnDefinitions.Add(new()); grid.ColumnDefinitions.Add(new());
         grid.Children.Add(Card(Column(Row(new SymbolIcon(Symbol.World) { Foreground = Brush(Paint.Accent) }, Text("受管实例", 15)), Row(Text(store.ListInstances().Count().ToString(), 32), Text("个实例", 12, true)), Action("查看实例", () => { SelectPage("instances"); return Task.CompletedTask; }))));
-        var right = Card(Column(Row(new SymbolIcon(Symbol.Link) { Foreground = Brush(Paint.Accent) }, Text("客户端方案", 15)), Row(Text(workbench.List().Count().ToString(), 32), Text("个方案", 12, true)), Action("打开工作台", () => { SelectPage("clients"); return Task.CompletedTask; }))); Grid.SetColumn(right, 1); grid.Children.Add(right); page.Children.Add(grid);
+        var right = Card(Column(Row(new SymbolIcon(Symbol.Link) { Foreground = Brush(Paint.Accent) }, Text("配置方案", 15)), Row(Text(workbench.List().Count().ToString(), 32), Text("个方案", 12, true)), Action("打开配置设计", () => { SelectPage("clients"); return Task.CompletedTask; }))); Grid.SetColumn(right, 1); grid.Children.Add(right); page.Children.Add(grid);
         page.Children.Add(Card(Trailing(Column(Text("开始新的部署", 18), Text("部署新的 VPS，或接入已经配置好的实例。", 13, true)), Row(Action("新建部署", () => { deploymentForm["Existing"] = false; SelectPage("deploy"); return Task.CompletedTask; }, true), Action("接入已有 VPS", () => { deploymentForm["Existing"] = true; SelectPage("deploy"); return Task.CompletedTask; })) )));
         var file = paths.Resolve("private/task-history.dotnet.json"); var last = File.Exists(file) ? JsonNode.Parse(File.ReadAllText(file))!.AsArray().LastOrDefault() : null;
-        page.Children.Add(Card(Column(Text("最近任务", 18), Text(last == null ? "暂时还没有任务记录" : OutcomeLabel((TaskOutcome)last.Number("Outcome")), 14, last == null), Text(last == null ? "完成部署、维护或客户端发布后，可在记录页查看结果。" : last.Text("Stage"), 13, true), Action("查看记录", () => { SelectPage("records"); return Task.CompletedTask; }))));
+        page.Children.Add(Card(Column(Text("最近任务", 18), Text(last == null ? "暂时还没有任务记录" : OutcomeLabel((TaskOutcome)last.Number("Outcome")), 14, last == null), Text(last == null ? "完成部署、维护或配置导出后，可在记录页查看结果。" : last.Text("Stage"), 13, true), Action("查看记录", () => { SelectPage("records"); return Task.CompletedTask; }))));
     }
     private void Instances()
     {
@@ -146,7 +157,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
             details.Children.Add(SettingsGroup(
                 SettingRow("健康检查", "读取服务、监听与管理入口的当前状态", Symbol.Sync, Action("检查", () => Submit(new(OperationKind.HealthAudit, selectedInstance, new())))),
                 SettingRow("协议与组件", "管理入口协议，或升级受管组件", Symbol.Setting, Row(Action("协议管理", () => OperationSheet(OperationKind.ProtocolState, plan)), Action("组件升级", () => OperationSheet(OperationKind.Upgrade, plan)))),
-                SettingRow("凭据与网络", "轮换协议凭据，调整实例网络参数", Symbol.Permissions, Row(Action("凭据轮换", () => OperationSheet(OperationKind.RotateCredentials, plan)), Action("网络参数", () => OperationSheet(OperationKind.TuneNetwork, plan)))),
+                SettingRow("协议凭据", "轮换正在运行的协议凭据", Symbol.Permissions, Action("凭据轮换", () => OperationSheet(OperationKind.RotateCredentials, plan))),
                 SettingRow("监控管理", "管理 Komari Agent、主控与 Tunnel", Symbol.View, Action("管理", () => OperationSheet(OperationKind.Komari, plan)))));
             details.Children.Add(Details("恢复与后续操作", SettingsGroup(
                 SettingRow("未完成任务", "核对事务状态，再选择恢复操作", Symbol.Sync, Action("核对", () => Submit(new(OperationKind.Recover, selectedInstance, new())))),
@@ -159,6 +170,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private TextBox Field(string label, JsonObject model, string key, string defaultValue = "", bool numeric = false)
     {
         var box = new TextBox { Header = label, Text = model.Text(key, defaultValue), HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 180, FontSize = 13, MinHeight = 38, Padding = new Thickness(12, 9, 12, 9), CornerRadius = new CornerRadius(6), BorderThickness = new Thickness(1), BorderBrush = Brush(Paint.InputBorder), Background = Brush(Paint.Input), Foreground = Brush(Paint.Text) }; AutomationProperties.SetName(box, label);
+        DesktopTypography.Mark(box, TypeRole.Body, 14);
         box.TextChanged += (_, _) => { model[key] = numeric && int.TryParse(box.Text, out var number) ? JsonValue.Create(number) : JsonValue.Create(box.Text.Trim()); }; return box;
     }
     private UIElement FileField(string label, JsonObject model, string key, bool save = false)
@@ -169,54 +181,17 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private async Task<string?> PickFile(bool save, string extension)
     {
         var handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
-        var picker = new global::Windows.Storage.Pickers.FileOpenPicker(); picker.FileTypeFilter.Add(save ? extension : "*"); if (save && extension == ".yaml") picker.FileTypeFilter.Add(".yml"); WinRT.Interop.InitializeWithWindow.Initialize(picker, handle); return (await picker.PickSingleFileAsync())?.Path;
-    }
-    private void Deployment()
-    {
-        var existing = deploymentForm.Flag("Existing");
-        var mode = Row(Action("部署新 VPS", () => { deploymentForm["Existing"] = false; Navigate("deploy"); return Task.CompletedTask; }, !existing), Action("接入已有 VPS", () => { deploymentForm["Existing"] = true; Navigate("deploy"); return Task.CompletedTask; }, existing));
-        page.Children.Add(mode);
-        page.Children.Add(Card(Column(
-            SectionHeading("连接信息", Symbol.World, existing ? "读取已有配置，并建立本地受管归档。" : "填写实例信息，执行时再输入连接凭据。"),
-            Fields(Field("服务商", deploymentForm, "Provider"), Field("实例名称", deploymentForm, "Instance"),
-                Field("节点名称", deploymentForm, "NodeName"), Field("当前 root SSH 端口", deploymentForm, "SshPort", "22", true),
-                Field("IPv4", deploymentForm, "IPv4"), Field("IPv6（可选）", deploymentForm, "IPv6")),
-            FileField("SSH 私钥（可选，留空使用密码）", deploymentForm, "KeyPath"))));
-        if (!existing)
+        if (save)
         {
-            var role = Choice("实例用途", deploymentForm, "Role", DeploymentPlans.Roles.Select(value => (value, RoleLabel(value))));
-            role.SelectionChanged += (_, _) => Navigate("deploy");
-            var purpose = deploymentForm.Text("Role", "RealityEntry");
-            var purposeFields = new StackPanel { Spacing = 16 }; purposeFields.Children.Add(role);
-            if (purpose == "RealityEntry")
-            {
-                purposeFields.Children.Add(Field("目标域名 / SNI", deploymentForm, "RealityTarget"));
-                purposeFields.Children.Add(Details("端口与证书设置", Column(
-                    Fields(Field("主入口端口", deploymentForm, "RealityPort", "443", true), Field("备用端口（空为自动，0 为关闭）", deploymentForm, "RealityBackupPort", numeric: true)),
-                    Flag("使用自己的域名与本机 HTTPS 目标", deploymentForm, "LocalTarget"),
-                    Fields(Field("Cloudflare 区域", deploymentForm, "ZoneName"), Field("证书联系邮件", deploymentForm, "CertbotEmail")),
-                    FileField("证书 Token 私人文件", deploymentForm, "CloudflareTokenFile"))));
-            }
-            if (purpose == "AnyTlsEntry")
-                purposeFields.Children.Add(Column(Fields(Field("服务器名称", deploymentForm, "AnyTlsName"), Field("ECH public name", deploymentForm, "EchPublicName"),
-                    Field("Cloudflare 区域", deploymentForm, "ZoneName"), Field("证书联系邮件", deploymentForm, "CertbotEmail")), FileField("证书 Token 私人文件", deploymentForm, "CloudflareTokenFile")));
-            if (purpose == "ShadowsocksLanding")
-                purposeFields.Children.Add(Column(Field("可信入口地址（逗号分隔）", deploymentForm, "TrustedEntries"),
-                    Fields(Field("落地 TCP / UDP 端口", deploymentForm, "LandingPort", "45001", true), Field("入口组", deploymentForm, "TransitGroup", "US-West Entry")),
-                    Details("IPv6 专用出口用户", Column(Flag("启用第二用户", deploymentForm, "SecondaryIpv6Enabled"), Fields(Field("IPv6 源地址", deploymentForm, "SecondaryIpv6Address"), Field("绑定网卡（可选）", deploymentForm, "SecondaryBindInterface"))))));
-            page.Children.Add(Card(Column(SectionHeading("用途配置", Symbol.Setting), purposeFields)));
-            page.Children.Add(Card(Column(SectionHeading("网络参数", Symbol.Globe),
-                Fields(Field("套餐标称带宽（Mbps）", deploymentForm, "BandwidthMbps", "100", true), Field("参考 RTT（ms，可选）", deploymentForm, "ReferenceRttMs", "0", true)), Text("用于保守调优，不运行公网测速。", 12, true))));
-            page.Children.Add(Details("可选监控 Agent", Card(Column(Flag("启用 Komari Agent", deploymentForm, "KomariEnabled"), Field("主控地址", deploymentForm, "KomariEndpoint"), Text("Token 在执行时单独输入。", 12, true)))));
+            // Selecting a destination must not create an empty file before review.
+            return WindowsSavePathPicker.Select(handle, extension);
         }
-        else page.Children.Add(Card(Column(SectionHeading("归档信息", Symbol.Library), Field("套餐标称带宽（Mbps）", deploymentForm, "BandwidthMbps", "100", true), Text("连接后读取远端实际配置，生成应用内的实例归档。", 12, true))));
-        var review = Action("审阅计划", async () => { var plan = DeploymentPlans.Create(deploymentForm, ArchiveStore.ReadJson(paths.Resolve("config/versions.json")), paths, existing); var relative = plan.Text("Provider") + "/" + plan.Text("Instance") + "/MXH-VPS-Deploy"; await Submit(new(existing ? OperationKind.ConnectExisting : OperationKind.Deploy, relative, new JsonObject { ["Plan"] = plan })); }, true);
-        page.Children.Add(Text("执行前会确认操作范围与 SSH 主机身份。", 12, true)); pageAction.Content = review;
+        var picker = new global::Windows.Storage.Pickers.FileOpenPicker(); picker.FileTypeFilter.Add("*"); WinRT.Interop.InitializeWithWindow.Initialize(picker, handle); return (await picker.PickSingleFileAsync())?.Path;
     }
     private async Task Submit(OperationRequest request)
     {
         if (taskCancellation != null) throw new OperationException("已有任务运行，请等待结束。"); var review = coordinator.Review(request); var plan = request.Options["Plan"] as JsonObject; var detail = review.Summary;
-        if (plan != null) detail += "\n\n" + plan.Text("Provider") + " / " + plan.Text("Instance") + "\n" + RoleLabel(plan.Text("Role")) + "\n管理入口：" + plan.Text("Ports.SshPrimary") + " / " + plan.Text("Ports.SshRescue");
+        if (plan != null) detail += "\n\n" + plan.Text("Provider") + " / " + plan.Text("Instance") + "\n" + string.Join(" + ", DeploymentPlans.Purposes(plan).Select(RoleLabel)) + (plan.Flag("Komari.Enabled") ? " + Komari Agent" : "") + (DeploymentPlans.Purposes(plan).Count(r => r is "RealityEntry" or "AnyTlsEntry") > 1 ? "\n默认启用：" + RoleLabel(plan.Text("ActiveEntry")) : "") + "\n管理入口：" + plan.Text("Ports.SshPrimary") + " / " + plan.Text("Ports.SshRescue");
         if (!await ConfirmAsync(new("审阅并执行", detail), CancellationToken.None)) return;
         await RunBackground("准备任务", async token => { var progress = new Progress<TaskProgress>(p => taskText.Text = p.Stage + " · " + p.Message); var record = await Task.Run(() => coordinator.ExecuteAsync(review, request, progress, token)); taskText.Text = OutcomeLabel(record.Outcome) + " · " + record.Stage; Show(record.SafeError ?? OutcomeLabel(record.Outcome), record.Outcome is TaskOutcome.Failed or TaskOutcome.NeedsRecovery ? InfoBarSeverity.Error : record.Outcome == TaskOutcome.Completed ? InfoBarSeverity.Success : InfoBarSeverity.Warning); });
     }
@@ -231,11 +206,11 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private void Records()
     {
         var publisher = new CandidatePublisher(paths);
-        foreach (var pending in publisher.Pending()) page.Children.Add(Card(Column(Text("客户端发布待恢复", 18), Text("上次双文件发布未确认结束。恢复前会核对两份目标与备份的摘要。", 13, true), Action("核对并恢复", async () => { if (await ConfirmAsync(new("恢复客户端发布", "仅恢复此发布事务原来的两份权威文件；发现外部改动时停止。"), CancellationToken.None)) await RunBackground("恢复客户端发布", token => { token.ThrowIfCancellationRequested(); publisher.Recover(pending); Show("客户端发布已恢复。", InfoBarSeverity.Success); return Task.CompletedTask; }); }))));
+        foreach (var pending in publisher.Pending()) page.Children.Add(Card(Column(Text("配置导出待恢复", 18), Text("上次导出未确认结束。恢复前会核对该事务涉及的目标与备份摘要。", 13, true), Action("核对并恢复", async () => { if (await ConfirmAsync(new("恢复配置导出", "仅恢复此导出事务涉及的配置文件；发现外部改动时停止。"), CancellationToken.None)) await RunBackground("恢复配置导出", token => { token.ThrowIfCancellationRequested(); publisher.Recover(pending); Show("配置导出已恢复。", InfoBarSeverity.Success); return Task.CompletedTask; }); }))));
         var file = paths.Resolve("private/task-history.dotnet.json"); if (!File.Exists(file)) { page.Children.Add(Text("还没有任务记录。", 16, true)); return; }
         foreach (var item in JsonNode.Parse(File.ReadAllText(file))!.AsArray().Reverse()) { var record = item!.AsObject(); page.Children.Add(Card(Column(Text(OutcomeLabel((TaskOutcome)record.Number("Outcome")), 18), Text(record.Text("StartedAt") + " · " + record.Text("Stage"), 13, true), Text(record.Text("SafeError"), 13, true)))); }
     }
-    private void SaveDraft() { if (scheme != null) workbench.Save(scheme); }
+    private void SaveDraft() => SaveScheme();
     public Task<bool> ConfirmHostAsync(HostIdentity identity, CancellationToken cancellationToken) => ConfirmAsync(new("核对 SSH 主机身份", identity.Host + "\n" + identity.Algorithm + "\n" + identity.Sha256Fingerprint + "\n\n请与服务商控制台或可信记录核对。"), cancellationToken);
     public async Task<bool> ConfirmAsync(UserDecision decision, CancellationToken cancellationToken) => await OnUi(async () =>
     {

@@ -35,8 +35,10 @@ internal sealed class FakeKeys : IManagedKeyStore { public string Prepare(string
 internal sealed class FakeValidation : IProtocolValidation { public Task<JsonObject> ValidateAsync(JsonObject plan, JsonObject secrets, string privateDirectory, IUserInteraction user, IProgress<string> progress, CancellationToken cancellationToken) => Task.FromResult(new JsonObject { ["Status"] = "Passed" }); public void Export(JsonObject plan, JsonObject secrets, string directory) { } }
 internal sealed class FakeTools : IExternalToolRunner { public Task<CommandResult> RunAsync(string executable, IReadOnlyList<string> arguments, string? input, TimeSpan timeout, CancellationToken cancellationToken) => Task.FromResult(new CommandResult(1, "", "synthetic-credential")); }
 internal sealed class FakeAssets : IValidationAssets { public string ResolveCore(string name) => name; public string DataDirectory => "unused"; }
+internal sealed class SelectedAssets(IValidationAssets inner, string allowed) : IValidationAssets { public string ResolveCore(string name) => name == allowed ? inner.ResolveCore(name) : throw new Exception("Unselected core resolved."); public string DataDirectory => inner.DataDirectory; public string ExpectedVersion(string name) => inner.ExpectedVersion(name); }
 internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
 {
+    private readonly JsonObject protocolInventory = new();
     public const string Backup = "/root/vps-deploy-backups/20000101-000000/protocol-lifecycle";
     public List<string> Commands { get; } = new(); public int Mutations { get; private set; } public string FailAsset { get; set; } = ""; public string StatusTaskId { get; set; } = ""; public string StatusPhase { get; set; } = "None"; public string ArmedComponents { get; private set; } = "";
     public List<SshEndpoint> Endpoints { get; } = new();
@@ -48,6 +50,33 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
         if (asset == "protocol-migration-arm-rollback.sh") { var match = System.Text.RegularExpressions.Regex.Match(payload, "export VPS_PARAM_COMPONENTS=.+?'([A-Za-z0-9+/=]+)' "); ArmedComponents = Encoding.UTF8.GetString(Convert.FromBase64String(match.Groups[1].Value)); }
         if (asset == FailAsset) throw new IOException("synthetic connection lost");
         static string Marker(string name, string value) => "VPSDEPLOY_" + name + "_B64=" + Convert.ToBase64String(Encoding.UTF8.GetBytes(value)) + "\n";
+        string Parameter(string name)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(payload, "export VPS_PARAM_" + name + "=.+?'([A-Za-z0-9+/=]*)' ");
+            return match.Success ? Encoding.UTF8.GetString(Convert.FromBase64String(match.Groups[1].Value)) : "";
+        }
+        foreach (var role in DeploymentPlans.Roles[..3]) protocolInventory[role] ??= new JsonObject { ["Installed"] = false, ["Enabled"] = false, ["Active"] = false };
+        if (asset is "xray-apply-config.sh" or "anytls-apply-config.sh" or "sing-box-apply-config.sh")
+        {
+            var role = asset == "xray-apply-config.sh" ? "RealityEntry" : asset == "anytls-apply-config.sh" ? "AnyTlsEntry" : "ShadowsocksLanding";
+            protocolInventory[role] = new JsonObject { ["Installed"] = true, ["Enabled"] = true, ["Active"] = true };
+            if (role == "AnyTlsEntry") { protocolInventory["RealityEntry"]!["Enabled"] = false; protocolInventory["RealityEntry"]!["Active"] = false; }
+        }
+        if (asset == "protocol-lifecycle-apply-state.sh") foreach (var (role, name) in new[] { ("RealityEntry", "REALITY_ENABLED"), ("AnyTlsEntry", "ANYTLS_ENABLED"), ("ShadowsocksLanding", "SHADOWSOCKS_ENABLED") }) { protocolInventory[role]!["Enabled"] = Parameter(name) == "true"; protocolInventory[role]!["Active"] = Parameter(name) == "true"; }
+        var deploymentOutput = asset switch
+        {
+            "deployment-baseline-arm.sh" => "VPSDEPLOY_DEPLOYMENT_BASELINE_OK\n" + Marker("BASELINE_DIR", "/root/vps-deploy-transaction-baselines/" + Parameter("TRANSACTION_ID")),
+            "base-system.sh" => "VPSDEPLOY_BASE_OK\n", "target-audit.sh" => Marker("TARGET_JSON", "{\"automatic_pass\":true}"),
+            "xray-generate-credentials.sh" => Marker("XRAY_SECRET", Fixture.RealitySecrets()["Xray"]!.ToJsonString()),
+            "anytls-generate-ech.sh" => Marker("ECH_KEYS", "synthetic-ech-key") + Marker("ECH_CONFIG", "synthetic-ech-config"),
+            "certbot-dns-setup.sh" => "VPSDEPLOY_CERTBOT_DNS_OK\n", "local-https-target.sh" => "VPSDEPLOY_LOCAL_HTTPS_OK\n",
+            "protocol-lifecycle-apply-state.sh" => "VPSDEPLOY_PROTOCOL_STATE_APPLIED\n",
+            "protocol-lifecycle-status.sh" => "VPSDEPLOY_PROTOCOL_STATUS_OK\n" + Marker("PROTOCOL_INVENTORY", protocolInventory.ToJsonString()),
+            "final-validate.sh" => "VPSDEPLOY_FINAL_OK\n" + Marker("TIME_SYNC", "yes"),
+            "ssh-cutover.sh" => "VPSDEPLOY_CUTOVER_PENDING\n", "ssh-cutover-confirm.sh" => "VPSDEPLOY_CUTOVER_CONFIRMED\n",
+            "deployment-snapshot-delete.sh" => "VPSDEPLOY_SNAPSHOT_DELETE_OK\n", _ => null
+        };
+        if (deploymentOutput != null) return Task.FromResult(new CommandResult(0, deploymentOutput, ""));
         var output = asset switch { "audit.sh" => Marker("OS_ID", "debian") + Marker("OS_VERSION", "13") + Marker("ARCH", "x86_64") + Marker("MEMORY_KIB", "1048576") + Marker("EXISTING_SERVICES", "") + Marker("NFT_LINES", "0"), "maintenance-health-audit.sh" => Marker("HEALTH_AUDIT", "{\"SchemaVersion\":1}"), "protocol-migration-arm-rollback.sh" => Marker("BACKUP_DIR", Backup), "network-tuning.sh" => Marker("BACKUP_DIR", "/root/fixture-network"), "maintenance-transaction-commit.sh" => "VPSDEPLOY_MAINTENANCE_COMMITTED\n", "maintenance-transaction-status.sh" => Marker("TRANSACTION_BACKUP", Backup) + Marker("TRANSACTION_PHASE", StatusPhase) + Marker("CONTROL_TASK_ID", StatusTaskId), "protocol-migration-trigger-rollback.sh" => "VPSDEPLOY_MIGRATION_ROLLBACK_OK\n", _ => "" }; return Task.FromResult(new CommandResult(0, output, ""));
     }
     public Task<byte[]> ReadFileAsync(string absolutePath, CancellationToken cancellationToken) => Task.FromResult(Encoding.UTF8.GetBytes("{}"));

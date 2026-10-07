@@ -7,11 +7,14 @@ namespace Mxh.VpsDeploy.Desktop;
 
 public sealed partial class MainWindow
 {
-    private ComboBox Choice(string label, JsonObject model, string key, IEnumerable<(string Value, string Label)> choices)
+    private ComboBox Choice(string label, JsonObject model, string key, IEnumerable<(string Value, string Label)> choices, bool preserveMissing = false)
     {
         var box = new ComboBox { Header = label, HorizontalAlignment = HorizontalAlignment.Stretch, MinHeight = 38, FontSize = 13, CornerRadius = new CornerRadius(6), BorderThickness = new Thickness(1), BorderBrush = Brush(Paint.InputBorder), Background = Brush(Paint.Input), Foreground = Brush(Paint.Text) };
+        DesktopTypography.Mark(box, TypeRole.Body, 14);
         foreach (var (value, title) in choices) box.Items.Add(new ComboBoxItem { Content = title, Tag = value });
-        box.SelectedIndex = Math.Max(0, box.Items.Cast<ComboBoxItem>().ToList().FindIndex(i => (string)i.Tag == model.Text(key)));
+        var selectedIndex = box.Items.Cast<ComboBoxItem>().ToList().FindIndex(i => (string)i.Tag == model.Text(key));
+        box.SelectedIndex = preserveMissing ? selectedIndex : Math.Max(0, selectedIndex);
+        if (preserveMissing && selectedIndex < 0) box.PlaceholderText = "请选择有效的入口组";
         if (box.SelectedItem is ComboBoxItem first) model[key] = (string)first.Tag;
         box.SelectionChanged += (_, _) => { if (box.SelectedItem is ComboBoxItem item) model[key] = (string)item.Tag; }; return box;
     }
@@ -50,43 +53,6 @@ public sealed partial class MainWindow
         if (await ShowDialog(dialog) != ContentDialogResult.Primary) return;
         await Submit(new(kind, selectedInstance!, options));
     }
-    private void Clients()
-    {
-        if (scheme == null)
-        {
-            page.Children.Add(Card(Trailing(SectionHeading("客户端工作台", Symbol.Link, "在方案中管理节点、连接关系与发布目标。"), Action("创建方案", () => { scheme = ClientSchemes.New(paths); workbench.Save(scheme); Navigate("clients"); return Task.CompletedTask; }, true))));
-            var savedSchemes = workbench.List().ToArray();
-            if (savedSchemes.Length == 0) page.Children.Add(Card(Column(Text("还没有客户端方案", 18), Text("创建一个方案后，即可添加节点并生成两端配置。", 13, true))));
-            else { page.Children.Add(GroupLabel("已保存的方案")); page.Children.Add(SettingsGroup(savedSchemes.Select(saved => (UIElement)SettingRow(saved.Text("Name"), saved["Nodes"]!.AsArray().Count + " 个节点", Symbol.Link, Action("打开", () => { scheme = saved; if (scheme["Candidate"] is JsonObject candidate) { candidate["ValidationStatus"] = "Pending"; candidate["Targets"] = new JsonObject(); workbench.Save(scheme); } Navigate("clients"); return Task.CompletedTask; }))).ToArray())); }
-            return;
-        }
-        var schemeName = Field("方案名称", scheme, "Name"); schemeName.MinWidth = 320; schemeName.MaxWidth = 440; schemeName.HorizontalAlignment = HorizontalAlignment.Left;
-        page.Children.Add(Card(Trailing(schemeName, Row(Action("保存方案", () => { workbench.Save(scheme); Show("方案已保存。", InfoBarSeverity.Success); return Task.CompletedTask; }), Action("方案列表", () => { SaveDraft(); scheme = null; Navigate("clients"); return Task.CompletedTask; })))));
-        page.Children.Add(Trailing(GroupLabel("节点"), Row(Action("添加受管节点", AddManagedNodes), Action("手动添加", () => EditNode(null)), Action("读取现有配置", ReadClientSources))));
-        var nodes = scheme["Nodes"]!.AsArray();
-        var nodeRows = new List<UIElement>();
-        if (nodes.Count == 0) page.Children.Add(Card(Column(Text("还没有节点", 16), Text("添加受管实例中的节点，或手动填写连接信息。", 12, true))));
-        for (var i = 0; i < nodes.Count; i++)
-        {
-            var index = i; var node = nodes[i]!.AsObject();
-            var up = Action("↑", () => { if (index > 0) { var copy = nodes[index]!.DeepClone(); nodes.RemoveAt(index); nodes.Insert(index - 1, copy); DirtyScheme(); } return Task.CompletedTask; }); Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(up, "上移节点"); up.IsEnabled = index > 0;
-            var down = Action("↓", () => { if (index < nodes.Count - 1) { var copy = nodes[index]!.DeepClone(); nodes.RemoveAt(index); nodes.Insert(index + 1, copy); DirtyScheme(); } return Task.CompletedTask; }); Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(down, "下移节点"); down.IsEnabled = index < nodes.Count - 1;
-            nodeRows.Add(SettingRow(node.Text("name"), node.Text("kind") == "landing" ? "落地 → " + node.Text("transit_group") : "入口 → " + node.Text("region_group"), Symbol.Link,
-                Row(up, down, Action("编辑", () => EditNode(index)), Action("移除", () => { nodes.RemoveAt(index); DirtyScheme(); return Task.CompletedTask; }))));
-        }
-        if (nodeRows.Count != 0) page.Children.Add(SettingsGroup(nodeRows.ToArray()));
-        page.Children.Add(Details("分组与默认出口", SettingsGroup(
-            SettingRow("业务默认项", "为业务分组选择默认出口", Symbol.List, Action("编辑", EditBusinessGroups)),
-            SettingRow("默认出口顺序", "调整默认出口组的成员顺序", Symbol.Sort, Action("编辑", EditExitOrder)))));
-        var validated = scheme.Text("Candidate.ValidationStatus") == "Passed";
-        var generate = Action("生成候选", async () => { try { await RunBackground("正在生成候选", async token => await workbench.BuildAsync(scheme!, token)); } finally { Navigate("clients"); } Show("候选已生成。", InfoBarSeverity.Success); }, scheme["Candidate"] == null); generate.IsEnabled = nodes.Count != 0;
-        var validate = Action("校验候选", async () => { try { await RunBackground("正在校验候选", async token => await workbench.ValidateAsync(scheme!, token)); } finally { Navigate("clients"); } Show("两端核心校验通过。", InfoBarSeverity.Success); }, scheme["Candidate"] != null && !validated); validate.IsEnabled = scheme["Candidate"] != null;
-        var publish = Action("审阅并发布", PublishClients, validated); publish.IsEnabled = validated;
-        page.Children.Add(Card(Column(SectionHeading("配置发布", Symbol.Upload, validated ? "两端核心已通过校验，可以审阅发布。" : "先生成候选，再校验两端配置。"),
-            Row(generate, validate), Details("发布目标", Column(FileField("Clash 权威文件", scheme["Targets"]!.AsObject(), "Clash", true), FileField("sing-box 权威文件", scheme["Targets"]!.AsObject(), "SingBox", true))))));
-        pageAction.Content = publish;
-    }
-    private void DirtyScheme() { scheme!.Remove("Candidate"); workbench.Save(scheme); Navigate("clients"); }
     private async Task AddManagedNodes()
     {
         var all = new List<(ClientProfiles.NodePair Node, JsonObject Plan, string Relative)>();
@@ -96,7 +62,7 @@ public sealed partial class MainWindow
             var secrets = store.ReadSecret(secretFile); all.AddRange(ClientProfiles.Nodes(instance.Plan, secrets).Select(n => (n, instance.Plan, instance.RelativePath))); secrets.Clear();
         }
         var panel = new StackPanel { Spacing = 8 }; var selections = new List<(CheckBox Check, ClientProfiles.NodePair Node, JsonObject Plan, string Relative)>();
-        foreach (var item in all) { var check = new CheckBox { Content = item.Node.Name }; panel.Children.Add(check); selections.Add((check, item.Node, item.Plan, item.Relative)); }
+        foreach (var item in all) { var check = DesktopTypography.Mark(new CheckBox { Content = item.Node.Name }, TypeRole.Body, 14); panel.Children.Add(check); selections.Add((check, item.Node, item.Plan, item.Relative)); }
         if (all.Count == 0) panel.Children.Add(Text("没有可用的受管节点。"));
         var dialog = new ContentDialog { XamlRoot = shell.XamlRoot, RequestedTheme = ElementTheme.Dark, Title = "选择节点", Content = new ScrollViewer { Content = panel, MaxHeight = 420 }, PrimaryButtonText = "添加", CloseButtonText = "取消" };
         if (await ShowDialog(dialog) != ContentDialogResult.Primary) return;
@@ -110,23 +76,37 @@ public sealed partial class MainWindow
     }
     private async Task ReadClientSources()
     {
-        var sources = new JsonObject { ["Clash"] = "", ["SingBox"] = "" }; var panel = Column(FileField("Clash 来源", sources, "Clash"), FileField("sing-box 来源", sources, "SingBox"));
+        var selected = scheme ?? throw new OperationException("请先选择方案。"); var sources = new JsonObject { ["Clash"] = "", ["SingBox"] = "" }; var panel = new StackPanel { Spacing = 14 };
+        foreach (var format in ClientSchemes.Formats(selected)) panel.Children.Add(FileField(format == "Clash" ? "Clash 来源文件" : "sing-box 来源文件", sources, format));
+        panel.Children.Add(Text("读取节点，并沿用来源的规则、DNS 与高级设置。来源文件只读，导出位置在最后一步选择。", 14, true));
         var dialog = new ContentDialog { XamlRoot = shell.XamlRoot, RequestedTheme = ElementTheme.Dark, Title = "读取现有配置", Content = panel, PrimaryButtonText = "读取", CloseButtonText = "取消" };
         if (await ShowDialog(dialog) != ContentDialogResult.Primary) return;
+        var fingerprints = new JsonObject(); foreach (var format in ClientSchemes.Formats(selected)) { if (!File.Exists(sources.Text(format))) throw new OperationException("请选择存在的来源文件。"); fingerprints[format] = ClientSchemes.SourceFingerprint(sources.Text(format)); }
         JsonArray nodes = new(); await RunBackground("读取来源配置", async token => nodes = await workbench.ReadSourcesAsync(sources.Text("Clash"), sources.Text("SingBox"), token));
-        scheme!["Clash"] = sources.Text("Clash"); scheme["SingBox"] = sources.Text("SingBox"); scheme["SourceMode"] = "ExistingAuthority";
-        foreach (var node in nodes) { var copy = node!.DeepClone(); copy["region_group"] = "US-West Entry"; copy["transit_group"] = "US-West Entry"; scheme["Nodes"]!.AsArray().Add(copy); }
+        if (nodes.Count == 0) throw new OperationException("来源中未找到受支持的 Reality、AnyTLS 或 Shadowsocks 节点。");
+        foreach (var format in ClientSchemes.Formats(selected)) { if (fingerprints.Text(format) != ClientSchemes.SourceFingerprint(sources.Text(format))) throw new OperationException("读取期间来源发生变化。"); selected[format] = sources.Text(format); }
+        selected["SourceMode"] = "ExistingAuthority"; selected["SourceFingerprints"] = fingerprints;
+        var names = selected["Nodes"]!.AsArray().Select(n => n!.Text("name")).ToHashSet();
+        foreach (var node in nodes)
+        {
+            if (!names.Add(node!.Text("name"))) continue;
+            var copy = node!.DeepClone(); copy["region_group"] = "US-West Entry";
+            if (!selected["Layout"]!.Strings("region_groups").Contains(copy.Text("transit_group"))) copy["transit_group"] = "US-West Entry";
+            selected["Nodes"]!.AsArray().Add(copy);
+        }
         DirtyScheme();
     }
     private async Task EditNode(int? index)
     {
         var activeScheme = scheme ?? throw new OperationException("请先选择方案。");
         var existing = index.HasValue ? activeScheme["Nodes"]!.AsArray()[index.Value]!.AsObject() : null;
-        var model = new JsonObject { ["Name"] = existing?.Text("name") ?? "", ["Role"] = existing?.Text("clash.type") switch { "ss" => "ShadowsocksLanding", "anytls" => "AnyTlsEntry", _ => "RealityEntry" }, ["Address"] = existing?.Text("clash.server") ?? "", ["Port"] = existing?.Number("clash.port") ?? 443, ["Region"] = existing?.Text("region_group", "US-West Entry") ?? "US-West Entry", ["Transit"] = existing?.Text("transit_group", "US-West Entry") ?? "US-West Entry", ["Sni"] = existing?.Text("clash.servername", existing.Text("clash.sni")) ?? "", ["Uuid"] = existing?.Text("clash.uuid") ?? "", ["PublicKey"] = existing?.Text("clash.reality-opts.public-key") ?? "", ["ShortId"] = existing?.Text("clash.reality-opts.short-id") ?? "", ["Ech"] = existing?.Text("clash.ech-opts.config") ?? "", ["Method"] = existing?.Text("clash.cipher", "2022-blake3-aes-128-gcm") ?? "2022-blake3-aes-128-gcm" };
-        var password = SecretField("密码 / SS2022 组合密钥", existing?.Text("clash.password") ?? "");
+        string Read(string primary, string fallback, string defaultValue = "") => existing == null ? defaultValue : existing.Text(primary, existing.Text(fallback, defaultValue));
+        var echLines = existing?.At("sing_box.tls.ech.config") as JsonArray;
+        var model = new JsonObject { ["Name"] = existing?.Text("name") ?? "", ["Role"] = Read("clash.type", "sing_box.type") switch { "ss" or "shadowsocks" => "ShadowsocksLanding", "anytls" => "AnyTlsEntry", _ => "RealityEntry" }, ["Address"] = Read("clash.server", "sing_box.server"), ["Port"] = existing?.Number("clash.port", existing.Number("sing_box.server_port", 443)) ?? 443, ["Region"] = existing?.Text("region_group", "US-West Entry") ?? "US-West Entry", ["Transit"] = existing?.Text("transit_group", "US-West Entry") ?? "US-West Entry", ["Sni"] = Read("clash.servername", "clash.sni", Read("sing_box.tls.server_name", "sing_box.tls.server_name")), ["Uuid"] = Read("clash.uuid", "sing_box.uuid"), ["PublicKey"] = Read("clash.reality-opts.public-key", "sing_box.tls.reality.public_key"), ["ShortId"] = Read("clash.reality-opts.short-id", "sing_box.tls.reality.short_id"), ["Ech"] = existing?.Text("clash.ech-opts.config", echLines == null ? "" : string.Join("", echLines.Select(l => l!.ToString()).Where(l => !l.StartsWith("-----")))) ?? "", ["Method"] = Read("clash.cipher", "sing_box.method", "2022-blake3-aes-128-gcm") };
+        var password = SecretField("密码 / SS2022 组合密钥", Read("clash.password", "sing_box.password"));
         var uuid = SecretField("UUID", model.Text("Uuid"));
         var role = Choice("协议", model, "Role", DeploymentPlans.Roles[..3].Select(value => (value, RoleLabel(value)))); if (existing != null) role.IsEnabled = false;
-        var specifics = new StackPanel { Spacing = 16 }; var panel = Column(Fields(Field("节点名称", model, "Name"), role, Field("服务器地址", model, "Address"), Field("端口", model, "Port", numeric: true)), specifics); panel.MinWidth = 600;
+        var specifics = new StackPanel { Spacing = 16 }; var panel = Column(Fields(Field("节点名称", model, "Name"), role, Field("服务器地址", model, "Address"), Field("端口", model, "Port", numeric: true)), specifics); panel.MinWidth = 380;
         void Refresh()
         {
             specifics.Children.Clear();
@@ -137,10 +117,13 @@ public sealed partial class MainWindow
         var dialog = new ContentDialog { XamlRoot = shell.XamlRoot, RequestedTheme = ElementTheme.Dark, Title = existing == null ? "添加节点" : "编辑节点", Content = new ScrollViewer { Content = panel, MaxHeight = 500 }, PrimaryButtonText = "保存", CloseButtonText = "取消" };
         if (await ShowDialog(dialog) != ContentDialogResult.Primary) { password.Password = ""; uuid.Password = ""; return; }
         model["Uuid"] = uuid.Password.Trim(); uuid.Password = "";
+        if (model.Text("Name").Length is < 1 or > 120 || model.Text("Name").Any(char.IsControl) || model.Text("Address") == "" || model.Number("Port") is < 1 or > 65535) { password.Password = ""; throw new OperationException("请填写有效的名称、服务器地址和 1–65535 的端口。"); }
+        if (activeScheme["Nodes"]!.AsArray().Where((_, i) => i != index).Any(n => n!.Text("name") == model.Text("Name"))) { password.Password = ""; throw new OperationException("节点名称已存在。"); }
         var fakePlan = new JsonObject { ["NodeName"] = model.Text("Name"), ["Role"] = model.Text("Role"), ["Server"] = new JsonObject { ["IPv4"] = model.Text("Address"), ["IPv6"] = "" }, ["Ports"] = new JsonObject { ["XrayPrimary"] = model.Number("Port"), ["AnyTlsPrimary"] = model.Number("Port"), ["LandingShadowsocks"] = model.Number("Port") }, ["Reality"] = new JsonObject { ["ServerName"] = model.Text("Sni") }, ["AnyTls"] = new JsonObject { ["ServerName"] = model.Text("Sni") }, ["Shadowsocks"] = new JsonObject { ["Method"] = model.Text("Method") } };
         var fakeSecrets = new JsonObject { ["Xray"] = new JsonObject { ["Uuid"] = model.Text("Uuid"), ["RealityClientKey"] = model.Text("PublicKey"), ["ShortId"] = model.Text("ShortId") }, ["AnyTls"] = new JsonObject { ["Password"] = password.Password, ["EchClientConfigPem"] = "-----BEGIN ECH CONFIGS-----\n" + model.Text("Ech") + "\n-----END ECH CONFIGS-----\n" }, ["Shadowsocks"] = new JsonObject { ["ServerKey"] = password.Password.Split(':')[0], ["PrimaryUserKey"] = password.Password.Contains(':') ? password.Password[(password.Password.IndexOf(':') + 1)..] : "" } };
         var pair = ClientProfiles.Nodes(fakePlan, fakeSecrets).First();
         pair.Clash["name"] = model.Text("Name"); pair.SingBox["tag"] = model.Text("Name");
+        if (model.Text("Role") == "ShadowsocksLanding") { pair.Clash["password"] = password.Password; pair.SingBox["password"] = password.Password; }
         // Preserve legitimate advanced node settings when editing the fields exposed by this form.
         var clash = existing?["clash"]?.DeepClone().AsObject() ?? pair.Clash.DeepClone().AsObject(); var sing = existing?["sing_box"]?.DeepClone().AsObject() ?? pair.SingBox.DeepClone().AsObject();
         if (existing != null)
@@ -168,8 +151,9 @@ public sealed partial class MainWindow
     private async Task PublishClients()
     {
         var selected = scheme ?? throw new OperationException("请先选择方案。"); var clash = selected.Text("Targets.Clash"); var sing = selected.Text("Targets.SingBox"); workbench.PreparePublish(selected, clash, sing);
-        if (!await ConfirmAsync(new("发布客户端权威", "两端候选已校验。将备份并替换以下权威文件：\n" + clash + "\n" + sing + "\n客户端需要你自行导入。"), CancellationToken.None)) return;
-        await RunBackground("发布权威文件", token => { token.ThrowIfCancellationRequested(); workbench.Publish(selected, clash, sing); Show("两份权威已发布，备份和事务记录已保存。", InfoBarSeverity.Success); return Task.CompletedTask; });
+        RememberScheme();
+        if (!await ConfirmAsync(new("审阅配置导出", ClientSchemes.OutputLabel(selected) + " 的候选已校验。将导出到以下文件，已有文件会先备份：\n" + string.Join("\n", ClientSchemes.SelectedTargets(selected, clash, sing).Select(t => t.Path)) + "\n导出后由你自行导入客户端。"), CancellationToken.None)) return;
+        await RunBackground("导出配置文件", token => { token.ThrowIfCancellationRequested(); workbench.Publish(selected, clash, sing); Show("所选配置已导出，恢复副本与事务记录已保存。", InfoBarSeverity.Success); return Task.CompletedTask; });
     }
     private void Settings()
     {
@@ -177,6 +161,7 @@ public sealed partial class MainWindow
         var appearance = Choice("", settings, "Appearance", [("Dark", "深色"), ("Light", "浅色")]); appearance.MinWidth = 150; appearance.Tag = "Appearance"; Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(appearance, "颜色模式");
         appearance.SelectionChanged += (_, _) => SetAppearance(settings.Text("Appearance"), true);
         page.Children.Add(SettingsGroup(SettingRow("颜色模式", "切换深色与浅色界面", Symbol.Setting, appearance), FontSetting()));
+        page.Children.Add(GroupLabel("文字大小")); page.Children.Add(TypographySettings());
         var check = new ToggleSwitch { IsOn = settings.Flag("AutoCheckUpdates"), OnContent = "", OffContent = "", MinWidth = 0, Width = 48 }; check.Toggled += (_, _) => { settings["AutoCheckUpdates"] = check.IsOn; SaveSettings(); };
         page.Children.Add(GroupLabel("更新"));
         page.Children.Add(SettingsGroup(
@@ -186,7 +171,7 @@ public sealed partial class MainWindow
         page.Children.Add(Details("更新连接", Card(Column(proxy, Text("此地址仅供应用下载更新使用。", 12, true)))));
         page.Children.Add(GroupLabel("数据与配置"));
         page.Children.Add(SettingsGroup(
-            SettingRow("私人归档", "实例、客户端方案与凭据统一存放在应用目录", Symbol.Folder, Action("打开目录", () => { SafePath.CheckLinks(paths.Private); Directory.CreateDirectory(paths.Private); System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(paths.Private) { UseShellExecute = true }); return Task.CompletedTask; })),
+            SettingRow("私人归档", "实例、配置方案与凭据统一存放在应用目录", Symbol.Folder, Action("打开目录", () => { SafePath.CheckLinks(paths.Private); Directory.CreateDirectory(paths.Private); System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(paths.Private) { UseShellExecute = true }); return Task.CompletedTask; })),
             SettingRow("卸载数据处理", "卸载时可选择保留归档和本地配置，或彻底删除应用数据", Symbol.Delete, Text("卸载时选择", 12, true))));
         var version = ArchiveStore.ReadJson(paths.Resolve("config/application.json")).Text("version");
         page.Children.Add(GroupLabel("关于"));

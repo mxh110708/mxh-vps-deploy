@@ -56,6 +56,15 @@ foreach ($file in $files) {
             $publicWindowsCompatibility='8e0f7a12-'+'bfb3-'+'4fe8-'+'b9a5-'+'48fd50a15a9a'
             $target=$target -replace ('<supportedOS\s+Id="\{'+[regex]::Escape($publicWindowsCompatibility)+'\}"\s*/>'), '<supportedOS />'
         }
+        # Published Windows Shell COM identifiers in their exact declarations.
+        # Do not exempt other UUIDs or copies in configuration/public documents.
+        if($entry.Key -eq 'Concrete UUID' -and $relative.Replace('\','/') -eq 'desktop/Mxh.VpsDeploy.Windows/WindowsSavePathPicker.cs'){
+            $saveDialog='C0B4E2F3-'+'BA21-'+'4773-'+'8DBA-'+'335EC946EB8B'
+            $fileDialog='42F85136-'+'DB7E-'+'439C-'+'85F1-'+'E4075D135FC8'
+            $shellItem='43826D1E-'+'E718-'+'42EE-'+'BC55-'+'A1E261C37BFE'
+            $target=$target.Replace(('Type.GetTypeFromCLSID(new("'+$saveDialog+'"), true)'), 'Type.GetTypeFromCLSID(publicWindowsSaveDialog, true)')
+            foreach($identifier in @($fileDialog,$shellItem)){$target=$target.Replace(('[ComImport, Guid("'+$identifier+'")'), '[ComImport, publicWindowsShellInterface')}
+        }
         if ($target -match $entry.Value) {
             $findings.Add([pscustomobject]@{ Rule = $entry.Key; File = $relative })
         }

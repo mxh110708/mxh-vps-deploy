@@ -17,6 +17,8 @@ public sealed partial class WorkflowEngine
         if (audit.Text("PubkeyAuthentication") != "yes") throw new OperationException("远端未启用公钥认证，不能自动纳管；现有策略未修改。");
         c.Plan["ProtocolInventory"] = audit["ProtocolInventory"]!.DeepClone();
         c.Plan["Role"] = DeploymentPlans.Roles.FirstOrDefault(role => c.Plan.Flag("ProtocolInventory." + role + ".Enabled")) ?? "MonitorOnly";
+        c.Plan["Roles"] = new JsonArray(DeploymentPlans.Roles[..3].Where(role => c.Plan.Flag("ProtocolInventory." + role + ".Installed")).DefaultIfEmpty("MonitorOnly").Select(role => (JsonNode?)JsonValue.Create(role)).ToArray());
+        c.Plan["ActiveEntry"] = DeploymentPlans.Roles[..2].FirstOrDefault(role => c.Plan.Flag("ProtocolInventory." + role + ".Enabled")) ?? "";
         c.Plan["AdminUser"] = audit.Text("AdminUser", "root");
         var current = c.Plan.Number("Server.BootstrapSshPort");
         var ports = audit.Strings("SshPorts").Select(int.Parse).ToArray();
@@ -90,7 +92,7 @@ public sealed partial class WorkflowEngine
             await c.Run("ssh-transition.sh", new() { ["BOOTSTRAP_PORT"] = c.Plan.Text("Server.BootstrapSshPort"), ["SSH_PRIMARY"] = c.Plan.Text("Ports.SshPrimary"), ["SSH_RESCUE"] = c.Plan.Text("Ports.SshRescue") }, true);
             await VerifyManagement(c); c.State["CurrentManagementPort"] = c.Plan.Number("Ports.SshPrimary");
         });
-        if (c.Plan.Text("Role") == "RealityEntry" && c.Plan.Text("Reality.TargetMode") != "LocalOwnedTls") await Step("target-audit", async () =>
+        if (DeploymentPlans.Uses(c.Plan, "RealityEntry") && c.Plan.Text("Reality.TargetMode") != "LocalOwnedTls") await Step("target-audit", async () =>
         {
             var r = await c.Run("target-audit.sh", new() { ["TARGET"] = c.Plan.Text("Reality.Target"), ["SAMPLES"] = c.Plan.Text("Reality.TargetSamples"), ["MAX_MEDIAN_MS"] = c.Plan.Text("Reality.TargetMaxMedianMs") }, timeout: 900);
             var audit = JsonNode.Parse(RemoteAssets.Marker(r.Output, "TARGET_JSON"))!.AsObject(); ArchiveStore.WriteJson(c.File("target-audit.json"), audit);
@@ -100,11 +102,19 @@ public sealed partial class WorkflowEngine
         {
             var tokenFile = c.Plan.Text("TrustedTls.CloudflareTokenFile"); SafePath.CheckLinks(tokenFile); var token = File.ReadAllText(tokenFile).Trim();
             if (token == "" || token.Any(char.IsWhiteSpace)) throw new OperationException("证书 Token 文件应只含一行非空 Token。");
-            await c.Run("certbot-dns-setup.sh", new() { ["CLOUDFLARE_TOKEN"] = token, ["ZONE_NAME"] = c.Plan.Text("TrustedTls.ZoneName"), ["EMAIL"] = c.Plan.Text("TrustedTls.CertbotEmail"), ["PROPAGATION_SECONDS"] = "30", ["ANYTLS_ENABLED"] = Bool(c.Plan.Text("Role") == "AnyTlsEntry"), ["ANYTLS_CERT_NAME"] = c.Plan.Text("TrustedTls.AnyTlsCertificateName"), ["ANYTLS_DOMAINS"] = c.Plan.Text("Role") == "AnyTlsEntry" ? c.Plan.Text("AnyTls.ServerName") + "," + c.Plan.Text("AnyTls.EchPublicName") : "", ["REALITY_ENABLED"] = Bool(c.Plan.Text("Role") == "RealityEntry"), ["REALITY_CERT_NAME"] = c.Plan.Text("TrustedTls.RealityCertificateName"), ["REALITY_DOMAINS"] = c.Plan.Text("Role") == "RealityEntry" ? c.Plan.Text("Reality.ServerName") : "" }, true, 1800, "CERTBOT_DNS_OK");
+            var anyTls = DeploymentPlans.Uses(c.Plan, "AnyTlsEntry"); var localReality = DeploymentPlans.Uses(c.Plan, "RealityEntry") && c.Plan.Text("Reality.TargetMode") == "LocalOwnedTls";
+            await c.Run("certbot-dns-setup.sh", new() { ["CLOUDFLARE_TOKEN"] = token, ["ZONE_NAME"] = c.Plan.Text("TrustedTls.ZoneName"), ["EMAIL"] = c.Plan.Text("TrustedTls.CertbotEmail"), ["PROPAGATION_SECONDS"] = "30", ["ANYTLS_ENABLED"] = Bool(anyTls), ["ANYTLS_CERT_NAME"] = c.Plan.Text("TrustedTls.AnyTlsCertificateName"), ["ANYTLS_DOMAINS"] = anyTls ? c.Plan.Text("AnyTls.ServerName") + "," + c.Plan.Text("AnyTls.EchPublicName") : "", ["REALITY_ENABLED"] = Bool(localReality), ["REALITY_CERT_NAME"] = c.Plan.Text("TrustedTls.RealityCertificateName"), ["REALITY_DOMAINS"] = localReality ? c.Plan.Text("Reality.ServerName") : "" }, true, 1800, "CERTBOT_DNS_OK");
         });
-        if (c.Plan.Text("Role") == "RealityEntry" && c.Plan.Text("Reality.TargetMode") == "LocalOwnedTls") await Step("local-https-target", async () => { await c.Run("local-https-target.sh", new() { ["DOMAIN"] = c.Plan.Text("Reality.ServerName"), ["PORT"] = c.Plan.Text("Reality.LocalHttpsPort"), ["CERT_NAME"] = c.Plan.Text("TrustedTls.RealityCertificateName") }, true, 1200, "LOCAL_HTTPS_OK"); });
-        if (c.Plan.Text("Role") != "MonitorOnly") await Step("protocol-install", () => InstallProtocol(c, c.Plan.Text("Role"), false));
-        await Step("network-tuning", () => Tune(c, c.Plan.Number("NetworkTuning.BandwidthMbps"), c.Plan.Number("NetworkTuning.ReferenceRttMs")));
+        if (DeploymentPlans.Uses(c.Plan, "RealityEntry") && c.Plan.Text("Reality.TargetMode") == "LocalOwnedTls") await Step("local-https-target", async () => { await c.Run("local-https-target.sh", new() { ["DOMAIN"] = c.Plan.Text("Reality.ServerName"), ["PORT"] = c.Plan.Text("Reality.LocalHttpsPort"), ["CERT_NAME"] = c.Plan.Text("TrustedTls.RealityCertificateName") }, true, 1200, "LOCAL_HTTPS_OK"); });
+        // AnyTLS configuration temporarily stops Xray; always install it after Reality.
+        foreach (var role in DeploymentPlans.Roles[..3].Where(r => DeploymentPlans.Uses(c.Plan, r)))
+            await Step(c.Plan["Roles"] == null ? "protocol-install" : "protocol-install-" + role, () => InstallProtocol(c, role, false));
+        if (DeploymentPlans.Purposes(c.Plan).Count(r => r != "MonitorOnly") > 1) await Step("protocol-selection", async () =>
+        {
+            foreach (var role in DeploymentPlans.Purposes(c.Plan).Where(r => r != "MonitorOnly")) c.Plan.Put("ProtocolInventory." + role, new JsonObject { ["Installed"] = true, ["Enabled"] = DeploymentPlans.InitiallyEnabled(c.Plan, role) });
+            await ApplyProtocolState(c);
+        });
+        if (c.State.Text("Modules.network-tuning.Status") != "Success") c.State.Put("Modules.network-tuning", new JsonObject { ["Status"] = "Skipped", ["Reason"] = "ManualOnly" });
         await Step("nftables-transition", () => Firewall(c, false));
         if (c.Plan.Flag("Komari.Enabled")) await Step("komari-agent", async () =>
         {
@@ -157,7 +167,7 @@ public sealed partial class WorkflowEngine
         await c.Run("nftables-apply.sh", new() { ["TCP_PORTS"] = string.Join(',', tcp.Distinct()), ["RESTRICTED_PORT"] = ss ? c.Plan.Text("Ports.LandingShadowsocks") : "", ["ALLOWED_IPV4S"] = ss ? string.Join(',', c.Plan.Strings("Shadowsocks.TrustedEntryIPv4s")) : "", ["ALLOWED_IPV6S"] = ss ? string.Join(',', c.Plan.Strings("Shadowsocks.TrustedEntryIPv6s")) : "" }, true);
         await VerifyManagement(c);
     }
-    private static bool Enabled(JsonObject plan, string role) => plan.At("ProtocolInventory." + role) == null ? plan.Text("Role") == role : plan.Flag("ProtocolInventory." + role + ".Enabled");
+    private static bool Enabled(JsonObject plan, string role) => plan.At("ProtocolInventory." + role) == null ? DeploymentPlans.InitiallyEnabled(plan, role) : plan.Flag("ProtocolInventory." + role + ".Enabled");
     private async Task ArchiveConfigs(Context c)
     {
         await using var session = await c.Session();
@@ -185,5 +195,7 @@ public sealed partial class WorkflowEngine
         var inventory = JsonNode.Parse(RemoteAssets.Marker(result.Output, "PROTOCOL_INVENTORY"))!.AsObject();
         c.Plan["ProtocolInventory"] = inventory; c.State["ProtocolInventory"] = inventory.DeepClone();
         c.Plan["Role"] = DeploymentPlans.Roles[..3].FirstOrDefault(role => inventory.Flag(role + ".Enabled")) ?? "MonitorOnly";
+        c.Plan["Roles"] = new JsonArray(DeploymentPlans.Roles[..3].Where(role => inventory.Flag(role + ".Installed")).DefaultIfEmpty("MonitorOnly").Select(role => (JsonNode?)JsonValue.Create(role)).ToArray());
+        c.Plan["ActiveEntry"] = DeploymentPlans.Roles[..2].FirstOrDefault(role => inventory.Flag(role + ".Enabled")) ?? "";
     }
 }

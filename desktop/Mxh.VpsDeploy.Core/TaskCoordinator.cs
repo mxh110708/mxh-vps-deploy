@@ -82,9 +82,9 @@ public static class OperationPolicy
     public static string Summary(OperationRequest request) => request.Kind switch
     {
         OperationKind.ConnectExisting => "接入已有实例：只读识别现有配置，保留 SSH 认证、端口与防火墙。",
-        OperationKind.Deploy => "新机部署：先审计系统与已有服务，建立备份后配置双 SSH 入口和所选协议；最后独立验收。",
+        OperationKind.Deploy => "新机部署：先审计系统与已有服务，建立备份后配置双 SSH 入口和所选用途；最后独立验收。网络调优由部署后另行手动发起。",
         OperationKind.HealthAudit => "只读健康与漂移检查；不重启或修改服务。",
-        OperationKind.TuneNetwork => "只修改部署器自己的网络参数文件，不重放协议、SSH 或防火墙。",
+        OperationKind.TuneNetwork => "只修改部署器自己的网络参数文件，不重放协议、SSH 或防火墙。\n套餐标称带宽：" + request.Options.Number("BandwidthMbps") + " Mbps\n参考 RTT：" + (request.Options.Number("ReferenceRttMs") == 0 ? "不启用自适应估算" : request.Options.Number("ReferenceRttMs") + " ms") + "。",
         OperationKind.Recover => "先核对未完成事务的真实状态，再按明确范围恢复。",
         _ => "任务：" + request.Kind + "；组件：" + request.Options.Text("Scope", request.Options.Text("Protocol", "受管协议")) + "。操作前备份，失败按同一组件范围恢复。"
     };
