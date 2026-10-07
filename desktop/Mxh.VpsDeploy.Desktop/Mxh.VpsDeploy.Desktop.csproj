@@ -21,6 +21,7 @@
     <FrameworkReference Update="Microsoft.NETCore.App" RuntimeFrameworkVersion="10.0.12" />
     <ProjectReference Include="../Mxh.VpsDeploy.Windows/Mxh.VpsDeploy.Windows.csproj" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260804001" />
+    <Content Include="../../assets/gui/app.ico" Link="assets/gui/app.ico" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../assets/gui/fonts/*.ttf" Link="Fonts/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../assets/gui/fonts/*-OFL.txt" Link="Fonts/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

@@ -50,6 +50,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
         try { SetFont(settings.Text("FontId", "Route")); }
         catch (OperationException) { SetFont("Route"); fontFallback = true; }
         Title = "MXH VPS Deploy"; AppWindow.Resize(new global::Windows.Graphics.SizeInt32(1320, 880)); ExtendsContentIntoTitleBar = true;
+        AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "assets", "gui", "app.ico"));
         AppWindow.TitleBar.ButtonForegroundColor = ColorHelper.FromArgb(255, 230, 233, 238); AppWindow.TitleBar.ButtonBackgroundColor = ColorHelper.FromArgb(0, 0, 0, 0); AppWindow.TitleBar.ButtonInactiveBackgroundColor = ColorHelper.FromArgb(0, 0, 0, 0);
         Application.Current.Resources["ContentDialogMaxWidth"] = 760d; Application.Current.Resources["ContentDialogMinWidth"] = 400d; Application.Current.Resources["ContentDialogCornerRadius"] = new CornerRadius(12);
         Application.Current.Resources["ContentControlThemeFontFamily"] = InterfaceFont;

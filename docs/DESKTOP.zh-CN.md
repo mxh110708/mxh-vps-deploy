@@ -1,12 +1,14 @@
 # Windows 桌面版
 
-v0.8.0 采用 WinUI 3 + C#/.NET 桌面架构；此前 WPF 原生入口的 v0.7.0 发行已撤销。这里描述正式安装版和便携包的使用方式；发布不代表已经安装或连接生产。
+v0.8.1 采用 WinUI 3 + C#/.NET 桌面架构；此前 WPF 原生入口的 v0.7.0 发行已撤销。这里描述正式安装版和便携包的使用方式；发布不代表已经安装或连接生产。
 
 ## 启动与环境
 
 安装 EXE 默认按当前用户安装到 `%LOCALAPPDATA%\Programs\MXH VPS Deploy`，也可选择其他可写目录。支持 Windows 10 2004 及以上、Windows 11 amd64；从桌面或开始菜单打开，也可双击应用目录的 `MXH-VPS-Deploy.exe`。便携 ZIP 解压后直接运行 EXE。
 
 应用内置 .NET 与 WinUI 3，SSH.NET 直接负责 SSH/SFTP，不加载 PowerShell 或 WPF。Python 3.13.16 与 ruamel.yaml 0.18.10 仅用于现有配置的专用转换，不驱动界面或运维任务。运行不修改全局 PATH，不安装 SSH 服务。
+
+应用、窗口、安装包和卸载入口统一采用蓝、绿、暖金三块平面的图标。透明背景适配深浅桌面，多种尺寸用于任务栏、快捷方式和文件列表。设计与可编辑母版见 [图标说明](../assets/gui/ICON.zh-CN.md)。
 
 源码构建使用 .NET SDK 10.0.400；打包脚本需要 PowerShell 7.4+。原 `Start-VPSDeploy.ps1` 和 `Start-VPSDeploy.Cli.cmd` 保留成熟命令行；其环境要求仍按旧文档。源码目录未构建 EXE 时，默认启动文件不会调用旧 WPF 界面。
 

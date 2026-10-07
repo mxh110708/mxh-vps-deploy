@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>MXH Deploy — 模块归一</title>
+  <desc>蓝、绿、暖金三块圆角平面组成开放的部署框架，表达多个实例的统一管理。透明底与清晰留白适配深浅桌面。</desc>
+  <defs>
+    <linearGradient id="blue" gradientUnits="userSpaceOnUse" x1="44" y1="110" x2="165" y2="25">
+      <stop offset="0" stop-color="#007ACC" />
+      <stop offset="0.5" stop-color="#0084DE" />
+      <stop offset="1" stop-color="#007FD5" />
+    </linearGradient>
+    <linearGradient id="green" gradientUnits="userSpaceOnUse" x1="31" y1="109" x2="172" y2="227">
+      <stop offset="0" stop-color="#2CAF7E" />
+      <stop offset="0.5" stop-color="#25B37C" />
+      <stop offset="1" stop-color="#2AB17F" />
+    </linearGradient>
+    <linearGradient id="fold" gradientUnits="userSpaceOnUse" x1="159" y1="186" x2="204" y2="216">
+      <stop offset="0" stop-color="#229B6B" />
+      <stop offset="1" stop-color="#23A573" />
+    </linearGradient>
+    <linearGradient id="gold" gradientUnits="userSpaceOnUse" x1="168" y1="94" x2="221" y2="186">
+      <stop offset="0" stop-color="#FBC33F" />
+      <stop offset="0.5" stop-color="#FAC03F" />
+      <stop offset="1" stop-color="#FCC443" />
+    </linearGradient>
+  </defs>
+  <path d="M 146.2 18.8 C 148.6 17.4 151.0 17.3 153.6 18.8 L 195.8 43.3 C 199.4 45.4 201.8 49.4 200.6 53.0 C 200.0 54.9 198.8 56.1 196.7 57.3 L 87.9 119.9 C 84.9 121.6 82.5 121.6 79.5 119.9 L 35.7 94.5 C 30.4 91.5 30.4 85.9 35.7 82.8 L 146.2 18.8 Z" fill="url(#blue)" />
+  <path d="M 42.1 103.7 L 201.9 196.2 C 209.3 200.4 209.3 205.8 203.7 209.1 L 153.7 238.0 C 151.0 239.5 148.6 239.5 145.9 238.0 L 36.2 174.5 C 32.8 172.5 30.6 168.7 30.6 164.6 L 30.6 111.3 C 30.6 104.7 36.2 100.3 42.1 103.7 Z" fill="url(#green)" />
+  <path d="M 157.6 170.6 L 201.9 196.2 C 209.3 200.4 209.3 205.8 203.7 209.1 L 153.7 238.0 C 160.0 234.6 161.5 232.0 161.5 226.0 L 161.5 179.1 C 161.5 175.7 160.0 172.5 157.6 170.6 Z" fill="url(#fold)" />
+  <path d="M 211.4 62.9 C 216.3 60.0 221.0 62.4 221.0 68.2 L 221.0 194.3 C 221.0 199.5 218.9 202.4 213.7 205.7 C 216.2 201.8 216.0 199.7 212.0 197.4 L 163.1 169.1 C 159.6 167.1 158.3 164.5 158.3 160.7 L 158.3 96.6 C 158.3 92.8 159.8 90.1 163.4 88.0 L 211.4 62.9 Z" fill="url(#gold)" />
+</svg>

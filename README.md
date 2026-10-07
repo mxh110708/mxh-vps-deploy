@@ -2,7 +2,7 @@
 
 面向个人 Debian VPS 的中文部署与运维工具，由 Windows 控制端统一管理部署计划、远端操作、私有归档和客户端配置。
 
-正式版为 [v0.8.0](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.8.0)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
+正式版为 [v0.8.1](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.8.1)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
 
 桌面采用 **WinUI 3 界面 + C#/.NET 共享运维核心 + Windows 适配层**，提供深浅两种配色、原版与霞鹜文楷两套内置字体及自定义字体导入。安装版通过“设置 → 检查更新”下载、校验、原位安装并自动重启，保留私人数据和本地配置，无需卸载重装。参见 [桌面版使用与数据目录](docs/DESKTOP.zh-CN.md) 和 [架构与边界](docs/DOTNET-ARCHITECTURE.zh-CN.md)。
 
@@ -50,7 +50,7 @@ dotnet run --project .\desktop\Mxh.VpsDeploy.Tests -c Release -- $PWD
 
 ### 3. 启动工具
 
-在正式发行页下载 `mxh-vps-deploy-v0.8.0-windows-amd64-setup.exe`，按同页 `SHA256SUMS.txt` 核对后安装，通过桌面／开始菜单启动。便携 ZIP 解压后双击 `MXH-VPS-Deploy.exe`；需要应用内原位更新时使用安装版。源码可先构建预览：
+在正式发行页下载 `mxh-vps-deploy-v0.8.1-windows-amd64-setup.exe`，按同页 `SHA256SUMS.txt` 核对后安装，通过桌面／开始菜单启动。便携 ZIP 解压后双击 `MXH-VPS-Deploy.exe`；需要应用内原位更新时使用安装版。源码可先构建预览：
 
 ```powershell
 pwsh -NoProfile -File .\scripts\New-VpsReleasePackage.ps1 -Development -Destination '<预览输出目录>'
