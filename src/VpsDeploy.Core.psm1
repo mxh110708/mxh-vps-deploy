@@ -3,6 +3,12 @@ $ErrorActionPreference = 'Stop'
 $script:VpsWizardBackMarker = '__MXH_VPS_WIZARD_BACK__'
 $script:VpsWizardCancelMarker = '__MXH_VPS_WIZARD_CANCEL__'
 $script:VpsManagedDirectoryName = 'MXH-VPS-Deploy'
+$script:VpsInteractionSession = $null
+
+function Set-VpsInteractionSession {
+    param([AllowNull()][object]$Session)
+    $script:VpsInteractionSession = $Session
+}
 
 function Write-VpsUi {
     [CmdletBinding()]
@@ -12,6 +18,10 @@ function Write-VpsUi {
         [string]$Kind = 'Info'
     )
 
+    if ($null -ne $script:VpsInteractionSession) {
+        $script:VpsInteractionSession.Publish($Kind, $Message)
+        return
+    }
     $prefix = switch ($Kind) {
         'Success' { '[成功] ' }
         'Warning' { '[注意] ' }
@@ -44,6 +54,7 @@ function Test-VpsHelpCommand {
 }
 
 function Clear-VpsScreen {
+    if ($null -ne $script:VpsInteractionSession) { return }
     try { Clear-Host }
     catch {
         try { [Console]::Clear() }
@@ -295,6 +306,7 @@ function Read-VpsText {
     )
 
     $showPrompt = {
+        if ($null -ne $script:VpsInteractionSession) { return }
         Write-Host $Prompt
         if ($AllowClear -and $AllowEmpty) { Write-Host '  输入 !empty 清空已有值；直接回车保留默认值。' -ForegroundColor DarkGray }
         if (-not [string]::IsNullOrWhiteSpace($Default)) {
@@ -306,9 +318,15 @@ function Read-VpsText {
         }
     }
 
+    if ($null -ne $script:VpsInteractionSession -and $script:VpsInteractionSession.ArchiveRoot -and $Prompt -match '私有归档根目录') {
+        return $script:VpsInteractionSession.ArchiveRoot
+    }
     & $showPrompt
     while ($true) {
-        $value = Read-Host '请输入'
+        $value = if ($null -ne $script:VpsInteractionSession) {
+            $script:VpsInteractionSession.ReadText($Prompt, $Default, [bool]$AllowBack,
+                $(if ($ZeroIsValue) { '/back' } else { '0' }), $HelpText, [bool]($AllowClear -and $AllowEmpty))
+        } else { Read-Host '请输入' }
         if ($null -eq $value) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         if (Test-VpsClearCommand $value) {
             Clear-VpsScreen
@@ -355,6 +373,7 @@ function Read-VpsYesNo {
     )
 
     $showPrompt = {
+        if ($null -ne $script:VpsInteractionSession) { return }
         Write-Host $Prompt
         Write-Host ("  默认值：{0}（直接按 Enter/回车采用）" -f $(if ($Default) { '是' } else { '否' })) -ForegroundColor DarkGray
         if ($AllowBack) { Write-Host '  输入 0 返回上一级。' -ForegroundColor DarkGray }
@@ -362,7 +381,10 @@ function Read-VpsYesNo {
 
     & $showPrompt
     while ($true) {
-        $rawAnswer = Read-Host '请输入 y/n'
+        $rawAnswer = if ($null -ne $script:VpsInteractionSession) {
+            $script:VpsInteractionSession.ReadChoice($Prompt, [string[]]@('是', '否'),
+                $(if ($Default) { 0 } else { 1 }), [bool]$AllowBack, '', 'yesno')
+        } else { Read-Host '请输入 y/n' }
         if ($null -eq $rawAnswer) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         $answer = $rawAnswer.Trim().ToLowerInvariant()
         if (Test-VpsClearCommand $answer) {
@@ -400,6 +422,7 @@ function Read-VpsMenu {
         throw [ArgumentException]::new('菜单必须有选项，且默认编号必须位于选项范围内。')
     }
     $showMenu = {
+        if ($null -ne $script:VpsInteractionSession) { return }
         Write-Host ''
         Write-Host $Title -ForegroundColor Cyan
         for ($i = 0; $i -lt $Options.Count; $i++) {
@@ -412,7 +435,9 @@ function Read-VpsMenu {
     }
     & $showMenu
     while ($true) {
-        $raw = Read-Host '请选择'
+        $raw = if ($null -ne $script:VpsInteractionSession) {
+            $script:VpsInteractionSession.ReadChoice($Title, $Options, ($Default - 1), [bool]$AllowBack, $HelpText, 'menu')
+        } else { Read-Host '请选择' }
         if ($null -eq $raw) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         if (Test-VpsClearCommand $raw) {
             Clear-VpsScreen
@@ -479,6 +504,8 @@ function Get-VpsNavigationMessage {
 function Wait-VpsReturnToMainMenu {
     [CmdletBinding()]
     param()
+
+    if ($null -ne $script:VpsInteractionSession) { return }
 
     Write-Host ''
     if ([Console]::IsInputRedirected) {
@@ -1017,7 +1044,7 @@ function New-VpsInteractivePlan {
     Write-Host ''
     Write-Host 'MXH VPS Deploy - 新部署向导' -ForegroundColor White
     Write-Host '支持初始密码或服务商现有私钥；现有 OpenSSH 私钥默认复用，也可明确选择生成新的管理密钥。' -ForegroundColor DarkGray
-    Write-Host '返回统一输入 0；第一项输入 0 返回主菜单。' -ForegroundColor DarkGray
+    if ($null -eq $script:VpsInteractionSession) { Write-Host '返回统一输入 0；第一项输入 0 返回主菜单。' -ForegroundColor DarkGray }
 
     $defaultInstanceRoot = [IO.Path]::GetFullPath($InstanceRoot.Trim().Trim('"')).TrimEnd('\', '/')
 
@@ -2312,8 +2339,13 @@ function Initialize-VpsBootstrapAccess {
         }
         else {
             $arguments = Get-VpsSshArguments -Context $Context -Port $rootPort -User 'root' -Interactive -IdentityFile $bootstrapKeyPath
-            & $ssh @arguments $remote
-            if ($LASTEXITCODE -ne 0) { throw '现有服务商私钥引导失败。旧入口未做任何关闭操作。' }
+            if ($null -ne $script:VpsInteractionSession) {
+                $bootstrapResult = Invoke-VpsGuiSshAuthentication -Context $Context -FilePath $ssh -ArgumentList ($arguments + @($remote))
+                if ($bootstrapResult.ExitCode -ne 0) { throw '现有服务商私钥引导失败。旧入口未做任何关闭操作。' }
+            } else {
+                & $ssh @arguments $remote
+                if ($LASTEXITCODE -ne 0) { throw '现有服务商私钥引导失败。旧入口未做任何关闭操作。' }
+            }
         }
     }
     else {
@@ -2322,10 +2354,17 @@ function Initialize-VpsBootstrapAccess {
         }
         $arguments = Get-VpsSshArguments -Context $Context -Port $rootPort -User 'root' -Interactive
         while ($true) {
-            Write-VpsUi '即将打开 OpenSSH 密码提示，请输入服务商提供的 root 初始密码。' Warning
-            Write-VpsUi '密码及粘贴内容不会显示字符或星号；Windows Terminal 可用鼠标右键或 Ctrl+Shift+V 粘贴，确认剪贴板没有首尾空格或换行。' Info
-            & $ssh @arguments $remote
-            if ($LASTEXITCODE -eq 0) {
+            if ($null -ne $script:VpsInteractionSession) {
+                Write-VpsUi '正在连接初始 root 入口，认证时会显示隐藏输入框。' Info
+                $bootstrapResult = Invoke-VpsGuiSshAuthentication -Context $Context -FilePath $ssh -ArgumentList ($arguments + @($remote))
+                $bootstrapExitCode = $bootstrapResult.ExitCode
+            } else {
+                Write-VpsUi '即将打开 OpenSSH 密码提示，请输入服务商提供的 root 初始密码。' Warning
+                Write-VpsUi '密码及粘贴内容不会显示字符或星号；Windows Terminal 可用鼠标右键或 Ctrl+Shift+V 粘贴，确认剪贴板没有首尾空格或换行。' Info
+                & $ssh @arguments $remote
+                $bootstrapExitCode = $LASTEXITCODE
+            }
+            if ($bootstrapExitCode -eq 0) {
                 Write-VpsUi '初始密码认证成功，管理公钥已提交到服务器；正在进行独立公钥复验。' Success
                 break
             }
@@ -3949,6 +3988,9 @@ function Invoke-VpsModulePipeline {
     }
 
     foreach ($module in $selected) {
+        if ($null -ne $script:VpsInteractionSession -and $script:VpsInteractionSession.CancelRequested) {
+            throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)
+        }
         $previous = $Context.State.Modules[$module.Id]
         if (-not $OnlyModule -and $previous -and $previous.Status -eq 'Success') {
             Write-VpsUi "跳过已完成模块：$($module.Name)" Muted
@@ -4611,6 +4653,7 @@ function Start-VpsDeploy {
     }
     catch {
         if (-not (Test-VpsNavigationError $_)) { throw }
+        if ($null -ne $script:VpsInteractionSession) { $script:VpsInteractionSession.MarkNavigationEnd() }
         Write-VpsUi (Get-VpsNavigationMessage $_) Info
         return
     }
@@ -4621,8 +4664,10 @@ function Start-VpsDeploy {
 . (Join-Path $PSScriptRoot 'VpsDeploy.Operations.ps1')
 . (Join-Path $PSScriptRoot 'VpsDeploy.ClientConfig.ps1')
 . (Join-Path $PSScriptRoot 'VpsDeploy.Workbench.ps1')
+. (Join-Path $PSScriptRoot 'VpsDeploy.GuiSsh.ps1')
 
 Export-ModuleMember -Function @(
+    'Set-VpsInteractionSession',
     'Start-VpsDeploy', 'Write-VpsUi', 'Write-VpsLog', 'Read-VpsYesNo', 'Read-VpsText',
     'ConvertFrom-VpsSecureString', 'Invoke-VpsRemoteScript', 'Invoke-VpsSshCommand',
     'Invoke-VpsScpDownload', 'Invoke-VpsScpUpload', 'Initialize-VpsBootstrapAccess', 'Test-VpsSshConnection',

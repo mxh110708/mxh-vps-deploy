@@ -80,7 +80,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r ./requirements-client-merge.txt
       - name: Run project tests
         shell: pwsh
-        run: ./tests/Run-Tests.ps1 -ProjectRoot $PWD
+        run: pwsh -NoProfile -STA -File ./tests/Run-Tests.ps1 -ProjectRoot $PWD
       - name: Validate bundled client cores and generated configs
         shell: pwsh
         run: |

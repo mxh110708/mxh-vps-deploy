@@ -118,7 +118,7 @@ function Add-MxhSchemeSourceNodes {
                 $v.catalog=@(Read-MxhSchemeSources $ProjectRoot $v.clash $v.sing)
                 if(-not $v.catalog.Count){throw '来源中没有可管理的成对节点。'}
                 for($i=0;$i -lt $v.catalog.Count;$i++){Write-Host ("  {0}. {1}" -f ($i+1),$v.catalog[$i].name)}
-                @(Read-MxhIndexSelection '选择节点编号（逗号分隔）' $v.catalog.Count)
+                @(Read-MxhIndexSelection '选择节点编号（逗号分隔）' $v.catalog.Count -Options @($v.catalog|ForEach-Object name) -GuiPrompt '选择要加入方案的节点')
             }}
             @{Key='group';Read={param($v)
                 if($Scheme.Layout.region_groups.Count -eq 1){return $Scheme.Layout.region_groups[0]}
@@ -227,6 +227,7 @@ function Invoke-MxhSchemePublish {
 
 function Invoke-MxhClientWorkbench {
     param([string]$ProjectRoot,[string]$InstanceRoot,$Scheme,[switch]$DryRun)
+    try {
     while($true){
         Write-Host "`n方案：$($Scheme.Name) | 节点：$($Scheme.Entries.Count) | 未保存：$($Scheme.Dirty) | 候选：$([bool]$Scheme.Candidate)"
         foreach($entry in $Scheme.Entries){Write-Host "  $($entry.Node.name) [$($entry.Node.kind)] → $($entry.Node.region_group)$($entry.Node.transit_group)"}
@@ -254,6 +255,12 @@ function Invoke-MxhClientWorkbench {
             if(Test-VpsWizardBackError $_){continue}
             if(Test-VpsNavigationError $_){throw}
             Write-VpsUi $_.Exception.Message Warning
+        }
+    }
+    } finally {
+        if($null -ne $script:VpsInteractionSession -and $script:VpsInteractionSession.CancelRequested -and $Scheme.Dirty -and -not $DryRun){
+            Save-MxhClientScheme $Scheme $ProjectRoot
+            Write-VpsUi '当前配置方案已保存为私人草稿，可从客户端页面重新打开。' Info
         }
     }
 }

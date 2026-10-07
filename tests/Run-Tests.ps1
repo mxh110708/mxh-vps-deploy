@@ -1732,6 +1732,8 @@ Write-Host "All tests passed: $passed assertions" -ForegroundColor Green
 & (Join-Path $ProjectRoot 'tests/Test-MenuCopy.ps1') -ProjectRoot $ProjectRoot
 & (Join-Path $ProjectRoot 'tests/Test-AuditFixes.ps1') -ProjectRoot $ProjectRoot
 & (Join-Path $ProjectRoot 'tests/Test-PowerShell74Bootstrap.ps1') -ProjectRoot $ProjectRoot
+& (Join-Path $ProjectRoot 'tests/Test-AppUpdate.ps1') -ProjectRoot $ProjectRoot
+if($IsWindows){& (Join-Path $ProjectRoot 'tests/Test-Gui.ps1') -ProjectRoot $ProjectRoot}
 if($pythonCommandForClient){
     & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_client_compatibility.py')
     if($LASTEXITCODE -ne 0){throw 'Client template compatibility tests failed.'}

@@ -183,7 +183,9 @@ function Read-MxhSecretText {
     param([Parameter(Mandatory)][string]$Prompt,[switch]$AllowBack)
     while ($true) {
         $hint = if($AllowBack){'（隐藏输入；输入 0 返回上一级）'}else{'（隐藏输入）'}
-        $secure = Read-Host ($Prompt+$hint) -AsSecureString
+        $secure = if ($null -ne $script:VpsInteractionSession) {
+            $script:VpsInteractionSession.ReadSecret($Prompt, [bool]$AllowBack)
+        } else { Read-Host ($Prompt+$hint) -AsSecureString }
         if ($null -eq $secure) { throw [OperationCanceledException]::new($script:VpsWizardCancelMarker) }
         try { $value = ConvertFrom-VpsSecureString $secure }
         finally { $secure.Dispose() }
@@ -199,10 +201,16 @@ function Read-MxhIndexSelection {
     param(
         [Parameter(Mandatory)][string]$Prompt,
         [Parameter(Mandatory)][int]$Count,
-        [switch]$AllowEmpty
+        [switch]$AllowEmpty,
+        [string[]]$Options=@(),
+        [string]$GuiPrompt='选择项目'
     )
     while ($true) {
-        $raw = Read-VpsText $Prompt -AllowEmpty:$AllowEmpty -AllowBack
+        if($null -ne $script:VpsInteractionSession -and $Options.Count -eq $Count){
+            $raw=$script:VpsInteractionSession.ReadMultiple($GuiPrompt,$Options,[bool]$AllowEmpty)
+            if($null -eq $raw){throw [OperationCanceledException]::new($script:VpsWizardCancelMarker)}
+            if($raw -eq '0'){throw [InvalidOperationException]::new($script:VpsWizardBackMarker)}
+        }else{$raw = Read-VpsText $Prompt -AllowEmpty:$AllowEmpty -AllowBack}
         if (-not $raw -and $AllowEmpty) { return @() }
         try {
             return @($raw -split '[,;，\s]+' | Where-Object { $_ } | ForEach-Object {
@@ -241,7 +249,7 @@ function Read-MxhPlanSelection {
     for ($i = 0; $i -lt $Plans.Count; $i++) {
         Write-Host ("  {0}. {1} / {2} / {3}" -f ($i + 1), $Plans[$i].Plan.Provider, $Plans[$i].Plan.Instance, $Plans[$i].Plan.NodeName)
     }
-    $indexes = @(Read-MxhIndexSelection '输入要提取的编号（逗号分隔；留空跳过）' $Plans.Count -AllowEmpty)
+    $indexes = @(Read-MxhIndexSelection '输入要提取的编号（逗号分隔；留空跳过）' $Plans.Count -AllowEmpty -Options @($Plans|ForEach-Object{"$($_.Plan.Provider) · $($_.Plan.Instance) · $($_.Plan.NodeName)"}) -GuiPrompt '选择要提取节点的受管实例')
     return @($indexes | ForEach-Object { $Plans[$_] })
 }
 
@@ -650,7 +658,7 @@ function Invoke-MxhBuildClientAuthority {
         for ($i = 0; $i -lt $existingCandidates.Count; $i++) {
             Write-Host ("  {0}. {1} ({2})" -f ($i + 1), $existingCandidates[$i].tag, $existingCandidates[$i].type)
         }
-        $indexes=@(Read-MxhIndexSelection '直接复用哪些现有节点（逗号分隔；留空跳过，无需重新输入凭据）' $existingCandidates.Count -AllowEmpty)
+        $indexes=@(Read-MxhIndexSelection '直接复用哪些现有节点（逗号分隔；留空跳过，无需重新输入凭据）' $existingCandidates.Count -AllowEmpty -Options @($existingCandidates|ForEach-Object{"$($_.tag) · $($_.type)"}) -GuiPrompt '选择要复用的现有节点')
         if($indexes.Count){
             $selectors = @($authoritySing.outbounds | Where-Object { [string]$_.type -eq 'selector' })
             foreach ($index in $indexes) {
