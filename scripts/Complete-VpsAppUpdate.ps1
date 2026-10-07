@@ -19,6 +19,10 @@ try {
     }
     $parent = Get-Process -Id ([int]$job.ParentPid) -ErrorAction SilentlyContinue
     if ($parent -and -not $parent.WaitForExit(120000)) { throw '应用尚未安全退出，未更新任何文件。' }
+    if($job.ContainsKey('LauncherPid') -and [int]$job.LauncherPid -gt 0){
+        $launcher=Get-Process -Id ([int]$job.LauncherPid) -ErrorAction SilentlyContinue
+        if($launcher -and -not $launcher.WaitForExit(120000)){throw '应用入口尚未退出，未更新任何文件。'}
+    }
     Import-Module (Join-Path $stage 'VpsDeploy.Update.psm1') -Force
     if (Test-Path -LiteralPath (Join-Path $root '.git')) {
         Assert-VpsGitApplicationClean $root
@@ -29,12 +33,17 @@ try {
         $started = $true
         Install-VpsPortableApplicationUpdate $root $job.Package (Join-Path $stage 'rollback')
     }
-    $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'))
+    $native=Join-Path $root 'MXH-VPS-Deploy.exe'
+    $start = [Diagnostics.ProcessStartInfo]::new($(if(Test-Path -LiteralPath $native){$native}else{Join-Path $PSHOME 'pwsh.exe'}))
     $start.UseShellExecute=$false; $start.CreateNoWindow=$true
-    foreach ($arg in @('-NoLogo','-NoProfile','-STA','-WindowStyle','Hidden','-File',(Join-Path $root 'Start-VPSDeploy.Gui.ps1'))) { $start.ArgumentList.Add($arg) }
+    if(-not(Test-Path -LiteralPath $native)){foreach ($arg in @('-NoLogo','-NoProfile','-STA','-WindowStyle','Hidden','-File',(Join-Path $root 'Start-VPSDeploy.Gui.ps1'))) { $start.ArgumentList.Add($arg) }}
     [void][Diagnostics.Process]::Start($start)
     # Successful update: remove only this validated, newly created staging tree.
-    Remove-Item -LiteralPath $stage -Recurse -Force
+    if(Test-Path -LiteralPath (Join-Path $stage 'helper-runtime')){
+        $cleanup=[Diagnostics.ProcessStartInfo]::new((Join-Path $root 'app-helpers/CleanupUpdate.exe'))
+        $cleanup.UseShellExecute=$false;$cleanup.CreateNoWindow=$true;$cleanup.ArgumentList.Add($stage);$cleanup.ArgumentList.Add([string]$PID)
+        [void][Diagnostics.Process]::Start($cleanup)
+    }else{Remove-Item -LiteralPath $stage -Recurse -Force}
 } catch {
     $message = if ($started) { '更新未完成；私人数据保留。本次恢复材料保存在应用 .tmp 下，请处理后再更新。' } else { '更新未开始，当前应用文件保留。请重新打开应用后重试。' }
     if (-not $started -and $stage -and $PSScriptRoot -eq $stage -and (Split-Path -Leaf $stage) -match '^app-update-[0-9a-f]{32}$') {

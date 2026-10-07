@@ -1,5 +1,12 @@
 function Get-VpsGuiAskPassPath {
     param([Parameter(Mandatory)][string]$ProjectRoot)
+    $bundled=Join-Path $ProjectRoot 'app-helpers/AskPass.exe'
+    if(Test-Path -LiteralPath (Join-Path $ProjectRoot 'desktop-runtime.json')){
+        $runtime=Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'desktop-runtime.json')|ConvertFrom-Json -AsHashtable
+        $entry=@($runtime.files|Where-Object path -CEQ 'app-helpers/AskPass.exe')
+        if($entry.Count -ne 1 -or -not(Test-Path -LiteralPath $bundled) -or (Get-FileHash -LiteralPath $bundled).Hash.ToLowerInvariant() -ne $entry[0].sha256){throw '内置 SSH 图形认证辅助程序校验失败。'}
+        return $bundled
+    }
     $source=Join-Path $ProjectRoot 'src/gui/VpsDeploy.AskPass.cs'
     $directory=Join-Path $ProjectRoot '.cache/gui-ssh'
     if ((Test-Path $directory) -and ((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'SSH 图形认证缓存目录不能是联接。' }

@@ -133,7 +133,7 @@
         <DockPanel Margin="14,26,14,16">
           <StackPanel DockPanel.Dock="Top" Margin="10,0,0,22">
             <TextBlock x:Name="Brand" Text="MXH Deploy" FontSize="27" FontWeight="SemiBold"/>
-            <TextBlock x:Name="VersionLabel" Text="0.6.0" Foreground="#828282" Margin="0,7,0,0"/>
+            <TextBlock x:Name="VersionLabel" Text="0.7.0" Foreground="#828282" Margin="0,7,0,0"/>
           </StackPanel>
           <StackPanel DockPanel.Dock="Bottom" Margin="12,10,0,0">
             <TextBlock Text="Windows 控制端" Foreground="#777777" FontSize="11"/>
@@ -355,7 +355,7 @@
                   </Grid>
                   <Border BorderBrush="#3b414c" BorderThickness="0,1,0,0" Padding="0,18,0,0">
                     <StackPanel>
-                      <DockPanel><Button x:Name="CheckUpdate" DockPanel.Dock="Right" Content="检查更新" Padding="14,8"/><TextBlock x:Name="UpdateVersion" Text="当前版本 0.6.0" VerticalAlignment="Center"/></DockPanel>
+                      <DockPanel><Button x:Name="CheckUpdate" DockPanel.Dock="Right" Content="检查更新" Padding="14,8"/><TextBlock x:Name="UpdateVersion" Text="当前版本 0.7.0" VerticalAlignment="Center"/></DockPanel>
                       <TextBlock x:Name="UpdateStatus" Text="尚未检查" Foreground="#a6afbb" Margin="0,12,0,0"/>
                       <Expander x:Name="ReleaseNotes" Header="更新说明" Visibility="Collapsed"><TextBlock x:Name="ReleaseNotesText" Margin="8,12" MaxHeight="240"/></Expander>
                       <Button x:Name="ApplyUpdate" Content="更新并重启" Style="{StaticResource Primary}" HorizontalAlignment="Left" Visibility="Collapsed" Margin="0,16,0,0"/>

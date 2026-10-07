@@ -1,5 +1,9 @@
 @echo off
 setlocal
+if exist "%~dp0MXH-VPS-Deploy.exe" (
+  start "" "%~dp0MXH-VPS-Deploy.exe"
+  exit /b 0
+)
 where pwsh.exe >nul 2>nul
 if errorlevel 1 (
   echo PowerShell 7.4 or newer is required. Install it and run this file again.

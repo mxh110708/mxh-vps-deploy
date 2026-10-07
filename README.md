@@ -2,9 +2,9 @@
 
 面向个人 Debian VPS 的中文部署与运维工具，由 Windows 控制端统一管理部署计划、远端操作、私有归档和客户端配置。
 
-当前版本：[v0.6.0](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.6.0)，新增 Windows 桌面界面、应用目录统一归档和应用内更新。
+当前版本：[v0.7.0](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.7.0)，提供独立 Windows EXE、安装包、内置运行环境和安装版原位更新。
 
-桌面操作说明见 [桌面版使用与数据目录](docs/DESKTOP.zh-CN.md)。下载正式 Windows amd64 便携包并解压到可写目录，双击 `Start-VPSDeploy.cmd` 启动；后续通过设置页检查更新并原位更新。首次从旧命令行版切换需要同步完整桌面版。
+下载 `mxh-vps-deploy-v0.7.0-windows-amd64-setup.exe` 安装，从桌面或开始菜单打开 **MXH VPS Deploy**。后续在设置页检查更新并更新重启，无需卸载重装。卸载时可选择保留私人数据，或彻底删除应用及安装目录内的数据。详情见 [桌面版使用与数据目录](docs/DESKTOP.zh-CN.md)。
 
 支持新机部署、已有实例接入、协议管理、网络调优、维护恢复及实例退役。交互向导负责收集与确认，远端 Bash 模块负责执行，计划与状态文件用于继续任务和核对结果。
 
@@ -23,13 +23,13 @@
 | 项目 | 支持范围或要求 |
 |---|---|
 | 控制端 | Windows 10/11，amd64 |
-| PowerShell | 7.4 或更高版本，命令为 `pwsh.exe` |
-| SSH 工具 | Windows OpenSSH Client：`ssh.exe`、`scp.exe`、`ssh-keygen.exe` |
+| PowerShell | 安装版内置 7.4.20；源码开发需要 7.4+ |
+| SSH 工具 | 安装版内置 OpenSSH 客户端；不安装 SSH 服务 |
 | 目标 VPS | Debian 12/13，amd64，使用 systemd 和 apt |
 | 初始登录 | 可用的 root SSH 登录方式：密码或已有 OpenSSH 私钥 |
-| 客户端配置设计器 | Python 3.9+，以及项目固定的 YAML 依赖 |
+| 客户端配置设计器 | 安装版内置 Python 3.13.16 与固定 YAML 依赖；源码开发需要 Python 3.9+ |
 
-使用客户端配置设计器前安装依赖：
+源码开发或未打包的命令行使用者安装客户端构建依赖：
 
 ```powershell
 python -m pip install -r .\requirements-client-merge.txt
@@ -39,7 +39,7 @@ Debian 是远端目标环境，不是控制端运行平台。操作前请保留�
 
 ### 2. 本地自检
 
-在项目目录打开 PowerShell，运行：
+安装版从概述页进入“本地自检”。源码开发者在项目目录打开 PowerShell，运行：
 
 ```powershell
 pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
@@ -49,7 +49,7 @@ pwsh -NoProfile -File .\Start-VPSDeploy.ps1 -Mode ValidateProject
 
 ### 3. 启动工具
 
-双击 `Start-VPSDeploy.cmd` 打开桌面界面，或运行：
+安装版通过桌面／开始菜单启动，便携版双击 `MXH-VPS-Deploy.exe`。源码开发可双击 `Start-VPSDeploy.cmd`，或运行：
 
 ```powershell
 pwsh -NoProfile -STA -File .\Start-VPSDeploy.Gui.ps1

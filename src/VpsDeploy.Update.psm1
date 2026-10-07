@@ -35,16 +35,25 @@ function Get-VpsApplicationUpdate {
     if ($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v(\d+\.\d+\.\d+)$') { throw '未找到有效的正式版本。' }
     $version = [version]$Matches[1]
     $tag = [string]$release.tag_name
+    $distribution=Get-VpsApplicationDistribution $ProjectRoot
     $result = @{
         Available = ($version -gt $current); CurrentVersion = $current.ToString(); Version = $version.ToString()
         Tag = $tag; Notes = [string]$release.body; ReleaseUrl = [string]$release.html_url
+        Distribution=$distribution
     }
     if (-not $result.Available) { return $result }
     $name = "mxh-vps-deploy-$tag-windows-amd64.zip"
     $archives = @($release.assets | Where-Object name -CEQ $name)
     $checksums = @($release.assets | Where-Object name -CEQ 'SHA256SUMS.txt')
     if ($archives.Count -ne 1 -or $checksums.Count -ne 1) { throw '发布包或校验文件不完整。' }
-    foreach ($asset in @($archives[0],$checksums[0])) {
+    $required=@($archives[0],$checksums[0])
+    if($distribution -eq 'Installed'){
+        $setups=@($release.assets|Where-Object name -CEQ "mxh-vps-deploy-$tag-windows-amd64-setup.exe")
+        $manifests=@($release.assets|Where-Object name -CEQ "mxh-vps-deploy-$tag-windows-amd64.files.json")
+        if($setups.Count -ne 1 -or $manifests.Count -ne 1){throw '安装版更新附件不完整。'}
+        $required+=@($setups[0],$manifests[0]);$result.Installer=$setups[0];$result.FileManifest=$manifests[0]
+    }
+    foreach ($asset in $required) {
         Assert-VpsUpdateAssetUri $asset.browser_download_url $tag
         if ($asset.size -le 0 -or $asset.size -gt 314572800) { throw '发布附件大小异常。' }
         if ($asset.digest -notmatch '^sha256:[0-9a-f]{64}$') { throw '发布附件缺少 SHA-256。' }
@@ -52,9 +61,20 @@ function Get-VpsApplicationUpdate {
     $result.Archive = $archives[0]; $result.Checksums = $checksums[0]
     return $result
 }
+function Get-VpsApplicationDistribution {
+    param([Parameter(Mandatory)][string]$ProjectRoot)
+    $marker=Join-Path $ProjectRoot 'installation.json'
+    if(Test-Path -LiteralPath $marker){
+        $value=Get-Content -Raw -LiteralPath $marker|ConvertFrom-Json -AsHashtable
+        if($value.schema_version -ne 1 -or $value.type -ne 'installed' -or $value.app_id -ne 'mxh-vps-deploy-desktop'){throw '应用安装记录无效，请核对完整安装目录。'}
+        return 'Installed'
+    }
+    if(Test-Path -LiteralPath (Join-Path $ProjectRoot '.git')){return 'Git'}
+    return 'Portable'
+}
 function Assert-VpsApplicationFilePath {
     param([Parameter(Mandatory)][string]$RelativePath)
-    if ($RelativePath -match '(^/|\\|:|(^|/)\.\.?(/|$)|[<>|?*\x00-\x1f])' -or $RelativePath -match '(^|/)(\.git|\.tmp|\.cache|private|logs|state|exports|data)(/|$)' -or $RelativePath -match '\.(local\.json|private\.(json|txt)|key|pem)$' -or $RelativePath -match '(^|/)(root\.txt|params\.json|id_ed25519|id_rsa)$') {
+    if ($RelativePath -match '(^/|\\|:|(^|/)\.\.?(/|$)|[<>|?*\x00-\x1f])' -or $RelativePath -match '(^|/)(\.git|\.tmp|\.cache|private|logs|state|exports|data)(/|$)' -or $RelativePath -match '\.(local\.json|private\.(json|txt)|key|pem)$' -or $RelativePath -match '(^|/)(root\.txt|params\.json|id_ed25519|id_rsa|installation\.json)$') {
         throw '更新包包含不允许的路径。'
     }
     foreach ($part in $RelativePath.Split('/')) {
@@ -244,6 +264,7 @@ function Start-VpsApplicationUpdate {
     param([Parameter(Mandatory)][string]$ProjectRoot,[string]$Proxy,[Parameter(Mandatory)][int]$ParentProcessId,[AllowNull()][object]$InteractionSession)
     $info = Get-VpsApplicationUpdate $ProjectRoot $Proxy
     if (-not $info.Available) { throw '当前没有可安装的新版本。' }
+    if($info.Distribution -eq 'Installed'){return Start-VpsInstalledApplicationUpdate $ProjectRoot $info $Proxy $ParentProcessId $InteractionSession}
     if (Test-Path -LiteralPath (Join-Path $ProjectRoot '.git')) { Assert-VpsGitApplicationClean $ProjectRoot }
     if ($InteractionSession -and $InteractionSession.CancelRequested) { throw [OperationCanceledException]::new('__MXH_VPS_WIZARD_CANCEL__') }
     $stage = Join-Path $ProjectRoot ('.tmp/app-update-' + [guid]::NewGuid().ToString('N'))
@@ -264,13 +285,20 @@ function Start-VpsApplicationUpdate {
         if ($manifest.version -ne $info.Version) { throw '发布版本与下载包不一致。' }
         if ($InteractionSession -and $InteractionSession.CancelRequested) { throw [OperationCanceledException]::new('__MXH_VPS_WIZARD_CANCEL__') }
         $jobPath = Join-Path $stage 'update-job.private.json'
-        $job = @{ ProjectRoot=[IO.Path]::GetFullPath($ProjectRoot); Stage=$stage; Package=$package; Version=$info.Version; Tag=$info.Tag; ParentPid=$ParentProcessId; Proxy=$Proxy }
+        $launcherPid=0;[void][int]::TryParse($env:MXH_VPS_DESKTOP_PARENT,[ref]$launcherPid)
+        $job = @{ ProjectRoot=[IO.Path]::GetFullPath($ProjectRoot); Stage=$stage; Package=$package; Version=$info.Version; Tag=$info.Tag; ParentPid=$ParentProcessId; LauncherPid=$launcherPid; Proxy=$Proxy }
         $job | ConvertTo-Json | Set-Content -LiteralPath $jobPath -Encoding utf8
         # The helper itself remains outside the application files being replaced.
         $helper = Join-Path $stage 'Complete-VpsAppUpdate.ps1'
         Copy-Item -LiteralPath (Join-Path $ProjectRoot 'scripts/Complete-VpsAppUpdate.ps1') -Destination $helper
         Copy-Item -LiteralPath (Join-Path $ProjectRoot 'src/VpsDeploy.Update.psm1') -Destination (Join-Path $stage 'VpsDeploy.Update.psm1')
-        $process = [Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'))
+        $helperRuntime=Join-Path $PSHOME 'pwsh.exe'
+        if(Test-Path -LiteralPath (Join-Path $ProjectRoot 'desktop-runtime.json')){
+            $runtime=Join-Path $stage 'helper-runtime'
+            Copy-Item -LiteralPath (Join-Path $ProjectRoot 'runtime/powershell') -Destination $runtime -Recurse
+            $helperRuntime=Join-Path $runtime 'pwsh.exe'
+        }
+        $process = [Diagnostics.ProcessStartInfo]::new($helperRuntime)
         $process.UseShellExecute=$false; $process.CreateNoWindow=$true
         foreach($a in @('-NoProfile','-STA','-WindowStyle','Hidden','-File',$helper,'-JobPath',$jobPath)) { $process.ArgumentList.Add($a) }
         [void][Diagnostics.Process]::Start($process)
@@ -283,7 +311,50 @@ function Start-VpsApplicationUpdate {
         throw
     }
 }
+function Start-VpsInstalledApplicationUpdate {
+    param([string]$ProjectRoot,[Collections.IDictionary]$Info,[string]$Proxy,[int]$ParentProcessId,[AllowNull()][object]$InteractionSession)
+    $stage=Join-Path $ProjectRoot ('.tmp/app-update-'+[guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($stage)|Out-Null
+    try{
+        $download=@{TimeoutSec=240};if($Proxy){$download.Proxy=$Proxy}
+        foreach($asset in @($Info.Installer,$Info.FileManifest,$Info.Checksums)){
+            $path=Join-Path $stage $asset.name
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $path @download
+            if((Get-Item -LiteralPath $path).Length -ne $asset.size -or ('sha256:'+(Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant()) -ne $asset.digest){throw '安装版更新附件摘要不一致。'}
+        }
+        $checksumLines=@(Get-Content -LiteralPath (Join-Path $stage 'SHA256SUMS.txt'))
+        foreach($asset in @($Info.Installer,$Info.FileManifest)){
+            $expected=(Get-FileHash -LiteralPath (Join-Path $stage $asset.name)).Hash.ToLowerInvariant()+'  '+$asset.name
+            if($expected -cnotin $checksumLines){throw '安装版更新校验文件不一致。'}
+        }
+        $next=Join-Path $stage $Info.FileManifest.name
+        Copy-Item -LiteralPath $next -Destination (Join-Path $stage 'application-files.json')
+        $manifest=Read-VpsApplicationManifest $stage
+        Remove-Item -LiteralPath (Join-Path $stage 'application-files.json')
+        if($manifest.version -ne $Info.Version){throw '安装版更新版本不一致。'}
+        $guard=[Diagnostics.ProcessStartInfo]::new((Join-Path $ProjectRoot 'app-helpers/SetupGuard.exe'))
+        $guard.UseShellExecute=$false;$guard.CreateNoWindow=$true
+        $guard.ArgumentList.Add($ProjectRoot);$guard.ArgumentList.Add($next)
+        $check=[Diagnostics.Process]::Start($guard)
+        try{if(-not $check.WaitForExit(120000) -or $check.ExitCode -ne 0){throw '应用文件有改动或与本地文件冲突，未开始更新。'}}finally{$check.Dispose()}
+        if($InteractionSession -and $InteractionSession.CancelRequested){throw [OperationCanceledException]::new('__MXH_VPS_WIZARD_CANCEL__')}
+        $launcherPid=0;[void][int]::TryParse($env:MXH_VPS_DESKTOP_PARENT,[ref]$launcherPid)
+        $parent=Get-Process -Id $ParentProcessId -ErrorAction Stop
+        $launcher=if($launcherPid){Get-Process -Id $launcherPid -ErrorAction Stop}else{$null}
+        $job=@{ProjectRoot=[IO.Path]::GetFullPath($ProjectRoot);Stage=[IO.Path]::GetFullPath($stage);Version=$Info.Version;ParentPid=$ParentProcessId;LauncherPid=$launcherPid;ParentStarted=$parent.StartTime.ToUniversalTime().ToString('o');LauncherStarted=$(if($launcher){$launcher.StartTime.ToUniversalTime().ToString('o')}else{''});InstallerSha256=(Get-FileHash -LiteralPath (Join-Path $stage $Info.Installer.name)).Hash.ToLowerInvariant();ManifestSha256=(Get-FileHash -LiteralPath $next).Hash.ToLowerInvariant();CurrentManifestSha256=(Get-FileHash -LiteralPath (Join-Path $ProjectRoot 'application-files.json')).Hash.ToLowerInvariant()}
+        $jobPath=Join-Path $stage 'update-job.private.json';$job|ConvertTo-Json|Set-Content -LiteralPath $jobPath -Encoding utf8
+        $helper=Join-Path $stage 'InstalledUpdate.exe'
+        Copy-Item -LiteralPath (Join-Path $ProjectRoot 'app-helpers/InstalledUpdate.exe') -Destination $helper
+        $start=[Diagnostics.ProcessStartInfo]::new($helper);$start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.ArgumentList.Add($jobPath)
+        [void][Diagnostics.Process]::Start($start)
+        return @{RestartRequired=$true;Version=$Info.Version}
+    }catch{
+        $prefix=[IO.Path]::GetFullPath((Join-Path $ProjectRoot '.tmp')).TrimEnd('\')+'\'
+        if([IO.Path]::GetFullPath($stage).StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $stage -Recurse -Force}
+        throw
+    }
+}
 Export-ModuleMember -Function Get-VpsApplicationVersion, Get-VpsApplicationUpdate, Assert-VpsUpdateAssetUri, Assert-VpsApplicationFilePath,
     Read-VpsApplicationManifest, Expand-VpsVerifiedApplicationPackage, Assert-VpsApplicationWritableScope,
     Install-VpsPortableApplicationUpdate, Start-VpsApplicationUpdate, Assert-VpsGitApplicationClean,
-    Complete-VpsGitApplicationUpdate, Get-VpsGitApplicationRelease
+    Complete-VpsGitApplicationUpdate, Get-VpsGitApplicationRelease, Get-VpsApplicationDistribution

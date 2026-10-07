@@ -6,8 +6,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$excludedDirectories = @('.git', '.test-output', '.tmp', 'TestResults', '.cache', '__pycache__', 'private', 'data', 'state', 'logs', 'exports')
-$textExtensions = @('.ps1', '.psm1', '.psd1', '.sh', '.md', '.json', '.yml', '.yaml', '.txt', '.cmd', '.py', '.toml', '.ini', '.cs', '.xaml')
+$excludedDirectories = @('.git', '.test-output', '.tmp', 'TestResults', '.cache', '__pycache__', 'private', 'data', 'state', 'logs', 'exports', 'runtime')
+$textExtensions = @('.ps1', '.psm1', '.psd1', '.sh', '.md', '.json', '.yml', '.yaml', '.txt', '.cmd', '.py', '.toml', '.ini', '.cs', '.xaml', '.iss', '.isl', '.manifest')
 $privatePaths = '(?i)(^|/)(private|data|state|logs|exports|\.cache|\.tmp|\.test-output|TestResults)/|\.private\.(json|txt)$|(^|/)(root\.txt|params\.json|id_ed25519|id_rsa)$|\.(key|pem)$|^config/(client-layout|app-defaults)\.local\.json$'
 $patterns = [ordered]@{
     'Private key block' = '-----BEGIN (?:OPENSSH |RSA |EC )?PRIVATE KEY-----'

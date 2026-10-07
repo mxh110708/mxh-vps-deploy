@@ -102,6 +102,32 @@ try {
         try {Get-VpsApplicationUpdate $Root}finally{Remove-Item Function:\Invoke-RestMethod;Remove-Variable FixtureRelease -Scope Script}
     } $old $release} 'new release without complete verified assets rejected'
 
+    $installed=Join-Path $fixture 'installed-contract'
+    New-UpdateFixture $installed '1.0.0' @{'main.ps1'='installed app'}
+    @{schema_version=1;type='installed';app_id='mxh-vps-deploy-desktop';version='1.0.0'}|ConvertTo-Json|Set-Content (Join-Path $installed 'installation.json')
+    Assert-Update ((Get-VpsApplicationDistribution $installed) -eq 'Installed') 'installed marker selects installer update mode'
+    $installerRelease=@{tag_name='v1.1.0';draft=$false;prerelease=$false;body='Fixture installer';html_url='https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v1.1.0';assets=@()}
+    foreach($name in @('mxh-vps-deploy-v1.1.0-windows-amd64.zip','SHA256SUMS.txt','mxh-vps-deploy-v1.1.0-windows-amd64-setup.exe','mxh-vps-deploy-v1.1.0-windows-amd64.files.json')){
+        $installerRelease.assets+=@{name=$name;size=20;digest=('sha256:'+('a'*64));browser_download_url=('https://github.com/mxh110708/mxh-vps-deploy/releases/download/v1.1.0/'+$name)}
+    }
+    $installerInfo=& $updateModule {param($Root,$Release)
+        $script:FixtureRelease=$Release;function Invoke-RestMethod {return $script:FixtureRelease}
+        try{Get-VpsApplicationUpdate $Root}finally{Remove-Item Function:\Invoke-RestMethod;Remove-Variable FixtureRelease -Scope Script}
+    } $installed $installerRelease
+    Assert-Update ($installerInfo.Available -and $installerInfo.Distribution -eq 'Installed' -and $installerInfo.Installer.name.EndsWith('-setup.exe')) 'installed app selects verified setup EXE and file manifest'
+    $installerRelease.assets[2].browser_download_url='https://example.invalid/installer.exe'
+    Assert-UpdateThrows {& $updateModule {param($Root,$Release)
+        $script:FixtureRelease=$Release;function Invoke-RestMethod {return $script:FixtureRelease}
+        try{Get-VpsApplicationUpdate $Root}finally{Remove-Item Function:\Invoke-RestMethod;Remove-Variable FixtureRelease -Scope Script}
+    } $installed $installerRelease} 'installer download cannot leave official release path'
+    $installerRelease.assets=@($installerRelease.assets|Where-Object name -notlike '*.files.json')
+    Assert-UpdateThrows {& $updateModule {param($Root,$Release)
+        $script:FixtureRelease=$Release;function Invoke-RestMethod {return $script:FixtureRelease}
+        try{Get-VpsApplicationUpdate $Root}finally{Remove-Item Function:\Invoke-RestMethod;Remove-Variable FixtureRelease -Scope Script}
+    } $installed $installerRelease} 'installed update requires complete file ownership manifest'
+    @{schema_version=1;type='installed';app_id='other-app'}|ConvertTo-Json|Set-Content (Join-Path $installed 'installation.json')
+    Assert-UpdateThrows {Get-VpsApplicationDistribution $installed} 'invalid installer marker cannot fall back to destructive portable update'
+
     $gitFixture=Join-Path $fixture 'git';[IO.Directory]::CreateDirectory((Join-Path $gitFixture 'config'))|Out-Null
     Invoke-FixtureGit @('init','-b','main');Invoke-FixtureGit @('config','user.name','Update Fixture');Invoke-FixtureGit @('config','user.email','fixture@example.invalid')
     "private/`n*.local.json`n.tmp/"|Set-Content (Join-Path $gitFixture '.gitignore')

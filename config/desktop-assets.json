@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "powershell": {
+    "version": "7.4.20",
+    "file": "PowerShell-7.4.20-win-x64.zip",
+    "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.4.20/PowerShell-7.4.20-win-x64.zip",
+    "sha256": "fb88cd3731847006b157978d6c0a426390d346696d91d1ed85b5e5eb88cb2d40"
+  },
+  "python": {
+    "version": "3.13.16",
+    "file": "python-3.13.16-embed-amd64.zip",
+    "url": "https://www.python.org/ftp/python/3.13.16/python-3.13.16-embed-amd64.zip",
+    "sha256": "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297"
+  },
+  "yaml": {
+    "version": "0.18.10",
+    "file": "ruamel.yaml-0.18.10-py3-none-any.whl",
+    "url": "https://files.pythonhosted.org/packages/c2/36/dfc1ebc0081e6d39924a2cc53654497f967a084a436bb64402dfce4254d9/ruamel.yaml-0.18.10-py3-none-any.whl",
+    "sha256": "30f22513ab2301b3d2b577adc121c6471f28734d3d9728581245f1e76468b4f1"
+  },
+  "openssh": {
+    "version": "10.0.0.0p2",
+    "upstream_tag": "10.0.0.0p2-Preview",
+    "file": "OpenSSH-Win64.zip",
+    "url": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64.zip",
+    "sha256": "23f50f3458c4c5d0b12217c6a5ddfde0137210a30fa870e98b29827f7b43aba5"
+  },
+  "inno_setup": {
+    "version": "7.1.0",
+    "file": "innosetup-7.1.0-x64.exe",
+    "url": "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe",
+    "sha256": "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f"
+  }
+}

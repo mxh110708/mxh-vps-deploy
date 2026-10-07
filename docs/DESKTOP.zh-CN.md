@@ -1,10 +1,14 @@
 # Windows 桌面版
 
-桌面版从正式 v0.6.0 起提供。桌面端使用 Windows WPF 与现有 PowerShell 后端，不需要另外安装浏览器运行时。
+v0.7.0 提供独立 Windows EXE 和安装包。现有 WPF 界面与后端保留，所需 PowerShell、Python、YAML 依赖及 OpenSSH 客户端随应用提供，使用者无需手动安装这些环境。v0.6.0 是早期脚本启动版，没有 EXE 安装包。
 
 ## 启动
 
-双击应用目录中的 `Start-VPSDeploy.cmd`。需要 Windows 10/11 amd64 和 PowerShell 7.4+；客户端配置构建仍需要 Python 3.9+ 与项目固定的 YAML 依赖。初始 SSH 图形认证的轻量辅助程序使用 Windows 自带 .NET Framework 编译器生成在应用缓存中。
+运行正式 `mxh-vps-deploy-v0.7.0-windows-amd64-setup.exe`，选择可写安装目录。默认按当前 Windows 用户安装到 `%LOCALAPPDATA%\Programs\MXH VPS Deploy`，不要求管理员权限。安装后从桌面或开始菜单打开应用；也可直接运行应用目录的 `MXH-VPS-Deploy.exe`。
+
+需要 Windows 10/11 amd64。PowerShell 7.4.20、Python 3.13.16、ruamel.yaml 0.18.10、OpenSSH 10.0p2 客户端和预编译图形 SSH 辅助程序已随包提供。运行环境仅用于本应用，不修改全局 PATH、不安装 SSH 服务。OpenSSH 使用官方 `10.0.0.0p2-Preview` 标签的固定校验资产。
+
+便携 ZIP 同样内置运行环境，解压到可写目录后双击 EXE；没有安装卸载注册项。源码开发仍可使用 `Start-VPSDeploy.cmd`／GUI 脚本，需要开发环境。
 
 需要终端或脚本自动化时使用 `Start-VPSDeploy.Cli.cmd`、`Start-VPSDeploy.ps1`，原参数和交互语义保留。同一应用目录只允许一个桌面窗口运行。
 
@@ -29,7 +33,9 @@
 
 ```text
 <应用目录>/
-├─ Start-VPSDeploy.cmd
+├─ MXH-VPS-Deploy.exe
+├─ runtime/                         本应用内置运行环境
+├─ app-helpers/                     图形 SSH、安装校验与更新辅助程序
 ├─ config/
 │  ├─ app-defaults.local.json        原有本机覆盖文件，保留
 │  └─ client-layout.local.json       原有客户端偏好，保留
@@ -57,7 +63,15 @@
 
 下载只接受本项目正式 Release 的指定 Windows 包及 SHA-256 文件，并核对 GitHub 附件摘要、包摘要和逐文件清单。更新等待当前窗口退出后替换受管应用文件并重新启动，私人数据、`.local.json` 和未受管文件不属于替换范围。已被用户修改的受管文件、文件冲突或哈希不符会阻止更新。
 
-便携包使用 `application-files.json` 定义受管文件。Git 使用副本要求 main 干净，只快进到对应正式标签，不重置历史；私人忽略文件保留。成功后清理本次暂存和临时恢复副本；失败且需要恢复时保留本次材料。v0.5.3 旧命令行包不具备桌面更新清单，首次切换需由维护者同步完整桌面版。
+安装版下载正式安装 EXE、逐文件清单和校验文件，等待界面和程序入口退出后原位安装，再重启应用；不先卸载。安装器再次核对现有受管文件，拒绝覆盖用户改动或未受管文件冲突，私人数据和 local.json 保留。安装记录与 Windows 卸载入口同步到新版本。
+
+便携包使用 `application-files.json` 定义受管文件，更新辅助环境位于本次暂存内，替换后重启原生 EXE。Git 使用副本要求 main 干净，只快进到对应正式标签，不重置历史；Git 工作树不自动安装 EXE。成功后清理本次暂存，失败保留必要材料。v0.5.3 旧命令行版首次切换需运行完整安装包或由维护者同步源码；旧归档转换另行安排。
+
+## 卸载与数据选择
+
+Windows“已安装的应用”或应用卸载程序提供两项选择：默认“保留私人归档和本地配置”，以及“彻底删除应用及本地数据”。保留模式卸载程序文件，留下归档、密钥、方案、界面设置、local.json 和缓存，重新安装后可继续使用。
+
+彻底删除仅清理本应用安装目录内的数据。外部客户端权威文件、旧 VPS 实例目录和服务器不属于此范围。目录包含链接或不受支持的内容时停止，避免删除指向其他位置的文件。便携版由维护者按明确目录管理，不提供 Windows 卸载入口。
 
 ## 维护与验证
 
@@ -69,6 +83,8 @@
 pwsh -NoProfile -File .\scripts\New-VpsReleasePackage.ps1 -Destination '<发布输出目录>'
 ```
 
-该脚本只从公开 Git 文件清单打包，保密检查后生成文件清单和校验值，再解包复验。预览包使用 `-Development`，文件名带 `ui-preview`，应用更新不会将其当成正式附件。打包不等于已经推送、发布或安装。
+构建脚本从公开 Git 文件清单复制源码，按 `config/desktop-assets.json` 核对官方运行环境和便携 Inno 编译器，编译 x64 Windows GUI EXE、生成内置环境清单并实际执行原生入口加载 WPF，然后构建安装 EXE、便携 ZIP、逐文件清单和 SHA256SUMS。预览包使用 `-Development`，文件名带 `ui-preview`，应用更新不会将其当成正式附件。打包不等于已经推送、发布或安装。
+
+`tests/Test-DesktopInstaller.ps1` 使用不创建快捷方式或卸载注册项的 QA 包，在隔离目录实测安装、无全局环境启动、原位升级、本地修改／冲突拒绝、保留卸载、重新安装与彻底删除。它不安装用户实际使用应用、不迁移旧归档，也不连接 VPS。
 
 字体沿用 MXH Route 的 Schibsted Grotesk 与 Source Serif 4，中文使用 Microsoft YaHei UI；随包保留字体的 OFL 许可证。
