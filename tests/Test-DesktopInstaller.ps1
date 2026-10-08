@@ -40,7 +40,12 @@ try{
  if(Test-Path -LiteralPath ($proof+'.startup.txt')){Remove-Item -LiteralPath ($proof+'.startup.txt')}
  @{synthetic_only=$true}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $app 'qa-ui-review.fixture.json') -Encoding utf8
  $storageProof=Join-Path $app '.tmp/storage-ui/runtime-proof.json';[IO.Directory]::CreateDirectory((Split-Path -Parent $storageProof))|Out-Null
- Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'MXH-VPS-Deploy.exe') @('--ui-smoke',$storageProof,'--app-root',$app,'--exercise-storage','--exercise-additions')) -eq 0) 'native node picker, archive migration and deployment additions UI works'
+ $storageExit=Invoke-DesktopFixtureProcess (Join-Path $app 'MXH-VPS-Deploy.exe') @('--ui-smoke',$storageProof,'--app-root',$app,'--exercise-storage','--exercise-additions')
+ if($storageExit -ne 0 -and (Test-Path -LiteralPath $storageProof)){
+  $failure=Get-Content -Raw -LiteralPath $storageProof|ConvertFrom-Json
+  Write-Host ('Native storage UI proof: '+($failure|ConvertTo-Json -Depth 5 -Compress))
+ }
+ Assert-Desktop ($storageExit -eq 0) 'native node picker, archive migration and deployment additions UI works'
  $storageUi=Get-Content -Raw -LiteralPath (Join-Path $app '.tmp/storage-ui/storage-regression-proof.json')|ConvertFrom-Json
  Assert-Desktop ($storageUi.migration_roundtrip -and $storageUi.backup_opt_in -and $storageUi.select_and_clear_visible -and $storageUi.custom_font_rendered) 'storage and selection behavior is verified by the real WinUI frontend'
  $additionsUi=Get-Content -Raw -LiteralPath (Join-Path $app '.tmp/storage-ui/additions-regression-proof.json')|ConvertFrom-Json
