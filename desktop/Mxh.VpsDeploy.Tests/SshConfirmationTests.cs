@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json.Nodes;
 using Mxh.VpsDeploy.Core;
 using Mxh.VpsDeploy.Infrastructure;
@@ -14,7 +15,7 @@ internal sealed partial class BoundaryTests
         {
             if (File.Exists(readyFile)) File.Delete(readyFile);
             var start = new ProcessStartInfo(python) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
-            foreach (var arg in new[] { script, "--ready", readyFile, "--stats", statsFile }) start.ArgumentList.Add(arg);
+            foreach (var arg in new[] { script, "--ready", readyFile, "--stats", statsFile, "--operations" }) start.ArgumentList.Add(arg);
             var process = Process.Start(start)!;
             try
             {
@@ -40,6 +41,30 @@ internal sealed partial class BoundaryTests
             var known = new HostTestUser((_, _) => throw new Exception("Trusted host unexpectedly asked again."));
             await using (await factory.OpenAsync(endpoint, known, default)) { }
             Check(known.Confirmations == 0, "known identity requested repeated trust");
+            await using (var session = await factory.OpenAsync(endpoint, known, default))
+            {
+                var payload = "# MXH_TRANSPORT_FIXTURE\r\nset -euo pipefail\r\nprintf 'VPSDEPLOY_SCRIPT_OK\\n'\r\n" + string.Concat(Enumerable.Repeat("# 中文节点\r\n", 4096));
+                var result = await session.RunScriptAsync(payload, TimeSpan.FromSeconds(10), false, default);
+                RemoteAssets.RequireMarker(result, "SCRIPT_OK");
+                var stats = ArchiveStore.ReadJson(statsFile);
+                Check(stats.Number("uploads") == 1 && stats.Number("chmod") == 1 && stats.Number("script_exec") == 1, "script transfer skipped upload, permissions or actual Bash execution");
+                Check(stats.Number("last_mode") == 384, "remote script permissions are not owner-only 0600");
+                Check(stats.Number("upload_bytes") > 32768 && !stats.Flag("upload_has_cr"), "multi-buffer UTF-8 upload changed or retained CRLF");
+                Check(stats.Number("temporary_files") == 0 && stats.Number("cleanup") == 1, "successful script left temporary materials");
+                var downloaded = await session.ReadFileAsync("/fixture/read-only.txt", default);
+                Check(Encoding.UTF8.GetString(downloaded) == "fixture-read-only\n", "real SFTP read changed content");
+                result = await session.RunScriptAsync("# MXH_TRANSPORT_FIXTURE\nprintf 'fixture-error-details\\n' >&2\nexit 7\n", TimeSpan.FromSeconds(10), true, default);
+                Check(result.ExitCode == 7 && result.Error.Trim() == "fixture-error-details", "remote failure lost exit status or error channel");
+                stats = ArchiveStore.ReadJson(statsFile);
+                Check(stats.Number("temporary_files") == 0 && stats.Number("cleanup") == 2, "failed script left temporary materials");
+                try { await session.RunScriptAsync(payload + "# DENY_PERMISSIONS\r\n", TimeSpan.FromSeconds(10), false, default); throw new Exception("SFTP permission failure accepted."); }
+                catch (OperationException error) { Check(error.Code == "SftpAccessDenied", "script permission failure lost its typed cause"); }
+                stats = ArchiveStore.ReadJson(statsFile);
+                Check(stats.Number("script_exec") == 2 && stats.Number("temporary_files") == 0 && stats.Number("cleanup") == 3, "permission failure executed script or leaked temporary materials");
+                using var canceled = new CancellationTokenSource(); canceled.Cancel();
+                try { await session.RunScriptAsync(payload, TimeSpan.FromSeconds(10), false, canceled.Token); throw new Exception("Canceled script executed."); }
+                catch (OperationCanceledException) { Check(ArchiveStore.ReadJson(statsFile).Number("exec") == stats.Number("exec"), "pre-canceled transport sent remote commands"); }
+            }
             try { await using var invalid = await factory.OpenAsync(endpoint with { Password = "wrong-fixture-only" }, known, default); throw new Exception("Wrong password accepted."); }
             catch (OperationException error) { Check(error.Code == "SshAuthenticationFailed", "authentication failure lost typed cause"); }
             var isolatedStore = new ArchiveStore(new AppPaths(Path.Combine(root, "cancelled")), new TestProtector());

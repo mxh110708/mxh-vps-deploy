@@ -90,7 +90,8 @@ internal sealed class SshRemoteSession(SshClient ssh, SftpClient sftp, PrivateKe
         {
             var bytes = Encoding.UTF8.GetBytes(payload.Replace("\r\n", "\n").Replace('\r', '\n'));
             using var stream = new MemoryStream(bytes);
-            try { await Task.Run(() => sftp.UploadFile(stream, script, false), cancellationToken); sftp.ChangePermissions(script, 0x180); }
+            // SSH.NET expects chmod-style digits (600), not the numeric permission bits (0x180).
+            try { await Task.Run(() => sftp.UploadFile(stream, script, false), cancellationToken); sftp.ChangePermissions(script, 600); }
             catch (OperationCanceledException) { throw; }
             catch (Exception error) { throw TransportFailures.Describe(error, "SFTP 上传"); }
             finally { CryptographicOperations.ZeroMemory(bytes); }
