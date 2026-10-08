@@ -6,7 +6,7 @@ using Renci.SshNet;
 
 namespace Mxh.VpsDeploy.Infrastructure;
 
-public sealed class SshSessionFactory(ArchiveStore store) : IRemoteSessionFactory
+public sealed class SshSessionFactory(ArchiveStore store, TimeSpan? connectionTimeout = null) : IRemoteSessionFactory
 {
     private readonly HostTrust trust = new(store);
     public async Task<IRemoteSession> OpenAsync(SshEndpoint endpoint, IUserInteraction interaction, CancellationToken cancellationToken)
@@ -25,16 +25,42 @@ public sealed class SshSessionFactory(ArchiveStore store) : IRemoteSessionFactor
             }
             if (endpoint.Password != null) methods.Add(new PasswordAuthenticationMethod(endpoint.User, endpoint.Password));
             if (methods.Count == 0) throw new OperationException("请提供 SSH 密钥或密码。");
-            var connection = new ConnectionInfo(endpoint.Host, endpoint.Port, endpoint.User, methods.ToArray()) { Timeout = TimeSpan.FromSeconds(20) };
-            var ssh = new SshClient(connection); var sftp = new SftpClient(connection);
-            bool Accept(byte[] hostKey, string algorithm)
+            try
             {
-                return trust.AcceptAsync(endpoint.Host, endpoint.Port, algorithm, hostKey, interaction, cancellationToken).GetAwaiter().GetResult();
+                // At most one identity probe followed by one authenticated connection.
+                // Reject unknown keys immediately; ask the human after that connection ends.
+                for (var attempt = 0; attempt < 2; attempt++)
+                {
+                    var connection = new ConnectionInfo(endpoint.Host, endpoint.Port, endpoint.User, methods.ToArray()) { Timeout = connectionTimeout ?? TimeSpan.FromSeconds(20) };
+                    var ssh = new SshClient(connection); var sftp = new SftpClient(connection);
+                    HostIdentity? unknown = null; OperationException? identityFailure = null;
+                    bool Accept(byte[] hostKey, string algorithm)
+                    {
+                        var identity = HostTrust.Identity(endpoint.Host, endpoint.Port, algorithm, hostKey);
+                        try { if (trust.IsTrusted(identity)) return true; unknown = identity; }
+                        catch (Exception error) { identityFailure = SafeFailures.Describe(error); }
+                        return false;
+                    }
+                    ssh.HostKeyReceived += (_, e) => e.CanTrust = Accept(e.HostKey, e.HostKeyName);
+                    sftp.HostKeyReceived += (_, e) => e.CanTrust = Accept(e.HostKey, e.HostKeyName);
+                    try
+                    {
+                        await ssh.ConnectAsync(cancellationToken);
+                        await sftp.ConnectAsync(cancellationToken);
+                        return new SshRemoteSession(ssh, sftp, key);
+                    }
+                    catch (Exception error)
+                    {
+                        ssh.Dispose(); sftp.Dispose();
+                        if (identityFailure != null) throw identityFailure;
+                        if (error is OperationCanceledException) throw;
+                        if (unknown == null || attempt != 0) throw TransportFailures.Describe(error);
+                    }
+                    if (!await trust.ConfirmAsync(unknown!, interaction, cancellationToken)) throw new OperationCanceledException(cancellationToken);
+                }
+                throw new OperationException("未能建立已信任的 SSH 连接。", code: "SshIdentityProbeFailed");
             }
-            ssh.HostKeyReceived += (_, e) => e.CanTrust = Accept(e.HostKey, e.HostKeyName);
-            sftp.HostKeyReceived += (_, e) => e.CanTrust = Accept(e.HostKey, e.HostKeyName);
-            try { await ssh.ConnectAsync(cancellationToken); await sftp.ConnectAsync(cancellationToken); return new SshRemoteSession(ssh, sftp, key); }
-            catch { ssh.Dispose(); sftp.Dispose(); key?.Dispose(); throw; }
+            catch { key?.Dispose(); throw; }
         }, cancellationToken);
     }
 }
@@ -43,9 +69,14 @@ internal sealed class SshRemoteSession(SshClient ssh, SftpClient sftp, PrivateKe
 {
     public async Task<CommandResult> RunAsync(string command, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        using var remote = ssh.CreateCommand(command); remote.CommandTimeout = timeout;
-        await remote.ExecuteAsync(cancellationToken);
-        return new(remote.ExitStatus ?? -1, remote.Result, remote.Error);
+        try
+        {
+            using var remote = ssh.CreateCommand(command); remote.CommandTimeout = timeout;
+            await remote.ExecuteAsync(cancellationToken);
+            return new(remote.ExitStatus ?? -1, remote.Result, remote.Error);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error) { throw TransportFailures.Describe(error, "SSH 命令"); }
     }
     public async Task<CommandResult> RunScriptAsync(string payload, TimeSpan timeout, bool mutating, CancellationToken cancellationToken)
     {
@@ -60,6 +91,8 @@ internal sealed class SshRemoteSession(SshClient ssh, SftpClient sftp, PrivateKe
             var bytes = Encoding.UTF8.GetBytes(payload.Replace("\r\n", "\n").Replace('\r', '\n'));
             using var stream = new MemoryStream(bytes);
             try { await Task.Run(() => sftp.UploadFile(stream, script, false), cancellationToken); sftp.ChangePermissions(script, 0x180); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception error) { throw TransportFailures.Describe(error, "SFTP 上传"); }
             finally { CryptographicOperations.ZeroMemory(bytes); }
             cancellationToken.ThrowIfCancellationRequested();
             // Once a mutation starts, finish the remote step before honoring UI cancellation.
@@ -75,7 +108,9 @@ internal sealed class SshRemoteSession(SshClient ssh, SftpClient sftp, PrivateKe
     public async Task<byte[]> ReadFileAsync(string absolutePath, CancellationToken cancellationToken)
     {
         ValidateRemotePath(absolutePath);
-        return await Task.Run(() => { using var data = new MemoryStream(); sftp.DownloadFile(absolutePath, data); return data.ToArray(); }, cancellationToken);
+        try { return await Task.Run(() => { using var data = new MemoryStream(); sftp.DownloadFile(absolutePath, data); return data.ToArray(); }, cancellationToken); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error) { throw TransportFailures.Describe(error, "SFTP 读取"); }
     }
     public async Task DownloadAsync(string absolutePath, string destination, CancellationToken cancellationToken)
     {
@@ -87,6 +122,8 @@ internal sealed class SshRemoteSession(SshClient ssh, SftpClient sftp, PrivateKe
             await Task.Run(() => { using var file = new FileStream(temporary, FileMode.CreateNew); sftp.DownloadFile(absolutePath, file); file.Flush(true); }, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested(); SafePath.CheckLinks(destination); File.Move(temporary, destination, false);
         }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error) { throw TransportFailures.Describe(error, "SFTP 下载"); }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
     public static string ShellQuote(string value) => "'" + value.Replace("'", "'\"'\"'") + "'";

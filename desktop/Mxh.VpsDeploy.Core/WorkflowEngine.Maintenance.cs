@@ -89,6 +89,10 @@ public sealed partial class WorkflowEngine
     }
     private async Task Recover(Context c)
     {
+        if (!c.HasPending() && InstanceLifecycle.Describe(c.Plan, c.State, c.Pending).CanContinue)
+        {
+            c.Report("无需回滚", "当前只有未完成草稿，尚无待恢复事务。请选择继续部署或继续接入。"); return;
+        }
         if (c.Pending != null && c.Pending.Text("Phase") is not ("Committed" or "RolledBack")) { await Rollback(c); return; }
         if (c.State.Text("DeploymentTransaction.Status") is "Arming" or "Armed" or "LocalPrepared")
         {

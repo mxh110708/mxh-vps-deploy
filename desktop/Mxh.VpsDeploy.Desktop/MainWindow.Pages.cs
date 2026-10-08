@@ -58,6 +58,7 @@ public sealed partial class MainWindow
         var all = new List<(ClientProfiles.NodePair Node, JsonObject Plan, string Relative)>();
         foreach (var instance in store.ListInstances())
         {
+            var status = InstanceLifecycle.Read(store, instance.RelativePath, instance.Plan); if (!status.Managed || status.NeedsRecovery) continue;
             var secretFile = SafePath.Resolve(paths.Instance(instance.RelativePath), "secrets.dotnet.private.json"); if (!File.Exists(secretFile)) continue;
             var secrets = store.ReadSecret(secretFile); all.AddRange(ClientProfiles.Nodes(instance.Plan, secrets).Select(n => (n, instance.Plan, instance.RelativePath))); secrets.Clear();
         }

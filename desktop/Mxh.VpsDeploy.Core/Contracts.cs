@@ -2,7 +2,7 @@ using System.Text.Json.Nodes;
 
 namespace Mxh.VpsDeploy.Core;
 
-public enum OperationKind { ConnectExisting, Deploy, Resume, HealthAudit, TuneNetwork, ProtocolState, RotateCredentials, Upgrade, Restore, Recover, Komari, Decommission }
+public enum OperationKind { ConnectExisting, Deploy, Resume, HealthAudit, TuneNetwork, ProtocolState, RotateCredentials, Upgrade, Restore, Recover, Komari, Decommission, ResumeImport }
 public enum TaskOutcome { Running, Completed, CompletedWithWarnings, Cancelled, Failed, NeedsRecovery }
 public enum ComponentScope { Protocol, Network, Firewall, Ssh, KomariAgent, KomariController, Tunnel, ManagedInstance }
 public sealed record HostIdentity(string Host, int Port, string Algorithm, string Sha256Fingerprint, bool Changed);
@@ -29,7 +29,7 @@ public sealed record CommandResult(int ExitCode, string Output, string Error)
 {
     public void RequireSuccess(string safeDescription)
     {
-        if (ExitCode != 0) throw new OperationException(safeDescription);
+        if (ExitCode != 0) throw SafeFailures.Remote(this, safeDescription);
     }
 }
 public sealed record SshEndpoint(string Host, int Port, string User, string? KeyPath, string? Password = null, string? KeyPassphrase = null);
@@ -50,10 +50,12 @@ public sealed record OperationRequest(OperationKind Kind, string InstanceRelativ
 }
 public sealed record ReviewedOperation(OperationRequest Request, string Fingerprint, string PlanFingerprint, string Summary);
 public sealed record TaskProgress(string TaskId, string Stage, int Completed, int Total, string Message);
-public sealed record TaskRecord(string Id, OperationKind Kind, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt, TaskOutcome Outcome, string Stage, string? SafeError = null);
-public sealed class OperationException(string safeMessage, bool needsRecovery = false) : Exception(safeMessage)
+public sealed record TaskRecord(string Id, OperationKind Kind, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt, TaskOutcome Outcome, string Stage, string? SafeError = null, string? ErrorCode = null, string? NextAction = null, string? InstanceRelativePath = null);
+public sealed class OperationException(string safeMessage, bool needsRecovery = false, string? code = null, string? nextAction = null) : Exception(safeMessage)
 {
     public bool NeedsRecovery { get; } = needsRecovery;
+    public string? Code { get; } = code;
+    public string? NextAction { get; } = nextAction;
 }
 public sealed class KeyPassphraseRequiredException : Exception { }
 

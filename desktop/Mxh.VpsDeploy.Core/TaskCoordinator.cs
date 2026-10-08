@@ -37,7 +37,7 @@ public sealed class TaskCoordinator(ArchiveStore store, IOperationWorkflow workf
             using var instanceLock = store.LockInstance(current.InstanceRelativePath);
             var planHash = ArchiveFingerprint(current.InstanceRelativePath);
             if (planHash != review.PlanFingerprint) throw new OperationException("实例归档在审阅后发生变化，请重新读取并审阅。");
-            Current = new(Guid.NewGuid().ToString("N"), current.Kind, DateTimeOffset.UtcNow, null, TaskOutcome.Running, "准备");
+            Current = new(Guid.NewGuid().ToString("N"), current.Kind, DateTimeOffset.UtcNow, null, TaskOutcome.Running, "准备", InstanceRelativePath: current.InstanceRelativePath);
             store.AppendHistory(Current);
             var reporting = new InlineProgress<TaskProgress>(p => { Current = Current with { Stage = p.Stage }; progress.Report(p); });
             try
@@ -48,8 +48,9 @@ public sealed class TaskCoordinator(ArchiveStore store, IOperationWorkflow workf
             catch (OperationCanceledException) { Current = Current with { Outcome = TaskOutcome.Cancelled, FinishedAt = DateTimeOffset.UtcNow }; }
             catch (Exception exception)
             {
-                Current = Current with { Outcome = exception is OperationException { NeedsRecovery: true } ? TaskOutcome.NeedsRecovery : TaskOutcome.Failed,
-                    SafeError = exception is OperationException safe ? safe.Message : "任务失败，请核对当前阶段与恢复记录。", FinishedAt = DateTimeOffset.UtcNow };
+                var safe = SafeFailures.Describe(exception);
+                Current = Current with { Outcome = safe.NeedsRecovery ? TaskOutcome.NeedsRecovery : TaskOutcome.Failed,
+                    SafeError = safe.Message, ErrorCode = safe.Code, NextAction = safe.NextAction, FinishedAt = DateTimeOffset.UtcNow };
             }
             store.AppendHistory(Current);
             return Current;
@@ -82,6 +83,7 @@ public static class OperationPolicy
     public static string Summary(OperationRequest request) => request.Kind switch
     {
         OperationKind.ConnectExisting => "接入已有实例：只读识别现有配置，保留 SSH 认证、端口与防火墙。",
+        OperationKind.ResumeImport => "继续接入草稿：重新只读识别现有配置，完成应用内归档。",
         OperationKind.Deploy => "新机部署：先审计系统与已有服务，建立备份后配置双 SSH 入口和所选用途；最后独立验收。网络调优由部署后另行手动发起。",
         OperationKind.HealthAudit => "只读健康与漂移检查；不重启或修改服务。",
         OperationKind.TuneNetwork => "只修改部署器自己的网络参数文件，不重放协议、SSH 或防火墙。\n套餐标称带宽：" + request.Options.Number("BandwidthMbps") + " Mbps\n参考 RTT：" + (request.Options.Number("ReferenceRttMs") == 0 ? "不启用自适应估算" : request.Options.Number("ReferenceRttMs") + " ms") + "。",

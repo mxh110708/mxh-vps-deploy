@@ -92,11 +92,11 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private static TextBlock Text(string value, int size = 14, bool muted = false) => DesktopTypography.Mark(new TextBlock { Text = value, FontFamily = InterfaceFont, TextWrapping = TextWrapping.Wrap, Foreground = Brush(muted ? Paint.Muted : Paint.Text) }, size >= 30 ? TypeRole.Metric : size >= 16 ? TypeRole.Title : muted ? TypeRole.Note : TypeRole.Body, size);
     private static StackPanel Column(params UIElement[] children) { var panel = new StackPanel { Spacing = 14 }; foreach (var child in children) panel.Children.Add(child); return panel; }
     private static Border Card(UIElement content) => new() { Background = Brush(Paint.Surface), BorderBrush = Brush(Paint.Border), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Padding = new Thickness(22), Child = content };
-    private Button Action(string title, Func<Task> handler, bool accent = false)
+    private Button Action(string title, Func<Task> handler, bool accent = false, bool allowDuringTask = false)
     {
         var button = new Button { Content = title, MinHeight = 36, FontSize = 13, Padding = new Thickness(16, 8, 16, 8), CornerRadius = new CornerRadius(6), BorderThickness = new Thickness(1), BorderBrush = Brush(accent ? Paint.Accent : Paint.ButtonBorder), Background = Brush(accent ? Paint.Accent : Paint.Button), Foreground = Brush(accent ? Paint.AccentText : Paint.Text) }; AutomationProperties.SetName(button, title);
         DesktopTypography.Mark(button, TypeRole.Body, 13);
-        button.Click += async (_, _) => { try { if (taskCancellation != null) throw new OperationException("已有任务运行，请等待结束。"); await handler(); } catch (OperationCanceledException) { Show("已取消。"); } catch (Exception error) { Show(error is OperationException safe ? safe.Message : "操作未完成，请检查输入与当前任务。", InfoBarSeverity.Error); } }; return button;
+        button.Click += async (_, _) => { try { if (taskCancellation != null && !allowDuringTask) throw new OperationException("已有任务运行，请等待结束。"); await handler(); } catch (OperationCanceledException) { Show("已取消。"); } catch (Exception error) { var safe = SafeFailures.Describe(error); Show(safe.Message + (safe.NextAction == null ? "" : "\n" + safe.NextAction), InfoBarSeverity.Error); } }; return button;
     }
     private static StackPanel Row(params UIElement[] children) { var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center }; foreach (var child in children) panel.Children.Add(child); return panel; }
     private static Grid Fields(params FrameworkElement[] children)
@@ -115,8 +115,9 @@ public sealed partial class MainWindow : Window, IUserInteraction
     {
         content.Visibility = Visibility.Collapsed;
         var arrow = new TextBlock { Text = "\uE70D", FontFamily = new FontFamily("Segoe Fluent Icons"), FontSize = 11, Foreground = Brush(Paint.Icon), VerticalAlignment = VerticalAlignment.Center };
-        var button = Action(label, () => { var open = content.Visibility != Visibility.Visible; content.Visibility = open ? Visibility.Visible : Visibility.Collapsed; arrow.Text = open ? "\uE70E" : "\uE70D"; return Task.CompletedTask; });
-        button.Content = Trailing(Text(label, 13), arrow); button.HorizontalAlignment = HorizontalAlignment.Stretch; button.HorizontalContentAlignment = HorizontalAlignment.Stretch; button.Padding = new Thickness(16, 12, 16, 12); button.Background = Brush(Paint.Surface);
+        var button = Action(label, () => { var open = content.Visibility != Visibility.Visible; content.Visibility = open ? Visibility.Visible : Visibility.Collapsed; arrow.Text = open ? "\uE70E" : "\uE70D"; return Task.CompletedTask; }, allowDuringTask: true);
+        var header = new Grid { ColumnSpacing = 16 }; header.ColumnDefinitions.Add(new()); header.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); header.Children.Add(Text(label, 13)); Grid.SetColumn(arrow, 1); header.Children.Add(arrow);
+        button.Content = header; button.HorizontalAlignment = HorizontalAlignment.Stretch; button.HorizontalContentAlignment = HorizontalAlignment.Stretch; button.Padding = new Thickness(16, 12, 16, 12); button.Background = Brush(Paint.Surface);
         if (launchArguments.Contains("--review-screenshots")) disclosures[button] = content; return new StackPanel { Spacing = 14, Children = { button, content } };
     }
     private void Show(string message, InfoBarSeverity severity = InfoBarSeverity.Informational) { notice.Message = message; notice.Severity = severity; notice.IsOpen = true; }
@@ -154,7 +155,19 @@ public sealed partial class MainWindow : Window, IUserInteraction
         {
             if (picker.SelectedItem is not ComboBoxItem item) return;
             selectedInstance = (string)item.Tag; details.Children.Clear(); var plan = instances.First(x => x.RelativePath == selectedInstance).Plan;
-            details.Children.Add(Card(Column(SectionHeading(plan.Text("NodeName"), Symbol.World, RoleLabel(plan.Text("Role"))), Text(plan.Text("Server.IPv4") + (plan.Text("Server.IPv6") == "" ? "" : " / " + plan.Text("Server.IPv6")), 14, true), Text("本地归档 · 运行状态需通过健康检查确认", 12, true))));
+            var relative = selectedInstance; var status = InstanceLifecycle.Read(store, relative, plan);
+            details.Children.Add(Card(Column(SectionHeading(plan.Text("NodeName"), Symbol.World, string.Join(" + ", DeploymentPlans.Purposes(plan).Select(RoleLabel))), Text(plan.Text("Server.IPv4") + (plan.Text("Server.IPv6") == "" ? "" : " / " + plan.Text("Server.IPv6")), 14, true), Text(status.Label, 14, true))));
+            if (!status.Managed || status.NeedsRecovery)
+            {
+                var followup = Column(Text(status.NeedsRecovery ? "先核对未完成事务" : "继续未完成草稿", 18),
+                    Text(status.LastError == "" ? "该归档还不代表已部署完成。" : status.LastError),
+                    Text(status.NextAction == "" ? status.NeedsRecovery ? "先取得真实事务状态，不能直接重放部署。" : "继续使用已保存的计划；如要重建，可删除下面的本地归档。" : status.NextAction, 14, true));
+                if (status.CanContinue) followup.Children.Add(Action(status.ContinueKind == OperationKind.ResumeImport ? "继续接入" : "继续部署", () => Submit(new(status.ContinueKind, relative, new())), true));
+                if (status.NeedsRecovery) followup.Children.Add(Action("核对恢复状态", () => Submit(new(OperationKind.Recover, relative, new())), true));
+                details.Children.Add(Card(followup));
+            }
+            if (status.Managed && !status.NeedsRecovery)
+            {
             details.Children.Add(GroupLabel("日常维护"));
             details.Children.Add(SettingsGroup(
                 SettingRow("健康检查", "读取服务、监听与管理入口的当前状态", Symbol.Sync, Action("检查", () => Submit(new(OperationKind.HealthAudit, selectedInstance, new())))),
@@ -163,8 +176,11 @@ public sealed partial class MainWindow : Window, IUserInteraction
                 SettingRow("监控管理", "管理 Komari Agent、主控与 Tunnel", Symbol.View, Action("管理", () => OperationSheet(OperationKind.Komari, plan)))));
             details.Children.Add(Details("恢复与后续操作", SettingsGroup(
                 SettingRow("未完成任务", "核对事务状态，再选择恢复操作", Symbol.Sync, Action("核对", () => Submit(new(OperationKind.Recover, selectedInstance, new())))),
-                SettingRow("备份与部署", "从协议备份恢复，或继续已有部署", Symbol.Library, Row(Action("从备份恢复", () => OperationSheet(OperationKind.Restore, plan)), Action("继续部署", () => Submit(new(OperationKind.Resume, selectedInstance, new()))))),
+                SettingRow("协议备份", "从明确选择的协议备份恢复", Symbol.Library, Action("从备份恢复", () => OperationSheet(OperationKind.Restore, plan))),
                 SettingRow("实例退役", "停用或移除受管协议与 Agent", Symbol.Delete, Action("审阅退役", () => OperationSheet(OperationKind.Decommission, plan))))));
+            }
+            var delete = Action("删除实例", () => DeleteInstance(relative)); delete.IsEnabled = !status.NeedsRecovery;
+            details.Children.Add(SettingsGroup(SettingRow("删除本地实例", status.NeedsRecovery ? "先处理未确认事务，之后可删除本地归档" : "删除此实例的全部本地受管文件；审阅后执行", Symbol.Delete, delete)));
         };
         var selectionIndex = Math.Max(0, Array.FindIndex(instances, x => x.RelativePath == selectedInstance)); if (picker.SelectedIndex == selectionIndex) picker.SelectedIndex = -1; picker.SelectedIndex = selectionIndex;
     }
@@ -192,10 +208,13 @@ public sealed partial class MainWindow : Window, IUserInteraction
     }
     private async Task Submit(OperationRequest request)
     {
-        if (taskCancellation != null) throw new OperationException("已有任务运行，请等待结束。"); var review = coordinator.Review(request); var plan = request.Options["Plan"] as JsonObject; var detail = review.Summary;
-        if (plan != null) detail += "\n\n" + plan.Text("Provider") + " / " + plan.Text("Instance") + "\n" + string.Join(" + ", DeploymentPlans.Purposes(plan).Select(RoleLabel)) + (plan.Flag("Komari.Enabled") ? " + Komari Agent" : "") + (DeploymentPlans.Purposes(plan).Count(r => r is "RealityEntry" or "AnyTlsEntry") > 1 ? "\n默认启用：" + RoleLabel(plan.Text("ActiveEntry")) : "") + "\n管理入口：" + plan.Text("Ports.SshPrimary") + " / " + plan.Text("Ports.SshRescue");
-        if (!await ConfirmAsync(new("审阅并执行", detail), CancellationToken.None)) return;
-        await RunBackground("准备任务", async token => { var progress = new Progress<TaskProgress>(p => taskText.Text = p.Stage + " · " + p.Message); var record = await Task.Run(() => coordinator.ExecuteAsync(review, request, progress, token)); taskText.Text = OutcomeLabel(record.Outcome) + " · " + record.Stage; Show(record.SafeError ?? OutcomeLabel(record.Outcome), record.Outcome is TaskOutcome.Failed or TaskOutcome.NeedsRecovery ? InfoBarSeverity.Error : record.Outcome == TaskOutcome.Completed ? InfoBarSeverity.Success : InfoBarSeverity.Warning); });
+        if (taskCancellation != null) throw new OperationException("已有任务运行，请等待结束。");
+        var prepared = await ResolveExistingDraft(request); if (prepared == null) return; request = prepared;
+        var review = coordinator.Review(request);
+        if (!await ReviewOperation(review)) return;
+        activeOperation = request;
+        try { await RunBackground("准备任务", async token => { var progress = new Progress<TaskProgress>(p => taskText.Text = StageLabel(p.Stage) + " · " + p.Message); var record = await Task.Run(() => coordinator.ExecuteAsync(review, request, progress, token)); taskText.Text = OutcomeLabel(record.Outcome) + " · " + StageLabel(record.Stage); Show(TaskMessage(record), record.Outcome is TaskOutcome.Failed or TaskOutcome.NeedsRecovery ? InfoBarSeverity.Error : record.Outcome == TaskOutcome.Completed ? InfoBarSeverity.Success : InfoBarSeverity.Warning); }); }
+        finally { activeOperation = null; }
     }
     private async Task RunBackground(string label, Func<CancellationToken, Task> action)
     {
@@ -212,18 +231,18 @@ public sealed partial class MainWindow : Window, IUserInteraction
         var publisher = new CandidatePublisher(paths);
         foreach (var pending in publisher.Pending()) page.Children.Add(Card(Column(Text("配置导出待恢复", 18), Text("上次导出未确认结束。恢复前会核对该事务涉及的目标与备份摘要。", 13, true), Action("核对并恢复", async () => { if (await ConfirmAsync(new("恢复配置导出", "仅恢复此导出事务涉及的配置文件；发现外部改动时停止。"), CancellationToken.None)) await RunBackground("恢复配置导出", token => { token.ThrowIfCancellationRequested(); publisher.Recover(pending); Show("配置导出已恢复。", InfoBarSeverity.Success); return Task.CompletedTask; }); }))));
         var file = paths.Resolve("private/task-history.dotnet.json"); if (!File.Exists(file)) { page.Children.Add(Text("还没有任务记录。", 16, true)); return; }
-        foreach (var item in JsonNode.Parse(File.ReadAllText(file))!.AsArray().Reverse()) { var record = item!.AsObject(); page.Children.Add(Card(Column(Text(OutcomeLabel((TaskOutcome)record.Number("Outcome")), 18), Text(record.Text("StartedAt") + " · " + record.Text("Stage"), 13, true), Text(record.Text("SafeError"), 13, true)))); }
+        foreach (var item in JsonNode.Parse(File.ReadAllText(file))!.AsArray().Reverse()) { var record = item!.AsObject(); page.Children.Add(Card(Column(Text(OutcomeLabel((TaskOutcome)record.Number("Outcome")), 18), Text(record.Text("InstanceRelativePath").Replace("/MXH-VPS-Deploy", ""), 14), Text(record.Text("StartedAt") + " · " + StageLabel(record.Text("Stage")), 13, true), Text(record.Text("SafeError"), 14), Text(record.Text("NextAction"), 14, true), Text(record.Text("ErrorCode") == "" ? "" : "错误代码：" + record.Text("ErrorCode"), 12, true)))); }
     }
     private void SaveDraft() => SaveScheme();
-    public Task<bool> ConfirmHostAsync(HostIdentity identity, CancellationToken cancellationToken) => ConfirmAsync(new("核对 SSH 主机身份", identity.Host + "\n" + identity.Algorithm + "\n" + identity.Sha256Fingerprint + "\n\n请与服务商控制台或可信记录核对。"), cancellationToken);
+    public Task<bool> ConfirmHostAsync(HostIdentity identity, CancellationToken cancellationToken) => ConfirmHostIdentity(identity, cancellationToken);
     public async Task<bool> ConfirmAsync(UserDecision decision, CancellationToken cancellationToken) => await OnUi(async () =>
     {
-        var phrase = new TextBox { Header = decision.RequiredPhrase == null ? "" : "输入 " + decision.RequiredPhrase + " 确认", Visibility = decision.RequiredPhrase == null ? Visibility.Collapsed : Visibility.Visible }; var dialog = new ContentDialog { XamlRoot = shell.XamlRoot, RequestedTheme = ElementTheme.Dark, Title = decision.Title, Content = Column(Text(decision.Description), phrase), PrimaryButtonText = "确认", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close };
+        var phrase = new TextBox { Header = decision.RequiredPhrase == null ? "" : "输入 " + decision.RequiredPhrase + " 确认", Visibility = decision.RequiredPhrase == null ? Visibility.Collapsed : Visibility.Visible }; var dialog = OperationDialog(decision.Title, Column(Text(decision.Description), phrase), "确认");
         if (decision.RequiredPhrase != null) { dialog.IsPrimaryButtonEnabled = false; phrase.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = phrase.Text == decision.RequiredPhrase; } using var registration = cancellationToken.Register(() => DispatcherQueue.TryEnqueue(dialog.Hide)); return await ShowDialog(dialog) == ContentDialogResult.Primary;
     }, cancellationToken);
     public async Task<string?> SecretAsync(string title, CancellationToken cancellationToken) => await OnUi(async () =>
     {
-        var box = SecretField(title); var dialog = new ContentDialog { XamlRoot = shell.XamlRoot, RequestedTheme = ElementTheme.Dark, Title = "输入凭据", Content = box, PrimaryButtonText = "继续", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close }; using var registration = cancellationToken.Register(() => DispatcherQueue.TryEnqueue(dialog.Hide)); var result = await ShowDialog(dialog); var value = result == ContentDialogResult.Primary ? box.Password : null; box.Password = ""; return value;
+        var box = SecretField(title); var dialog = OperationDialog("输入凭据", box, "继续"); using var registration = cancellationToken.Register(() => DispatcherQueue.TryEnqueue(dialog.Hide)); var result = await ShowDialog(dialog); var value = result == ContentDialogResult.Primary ? box.Password : null; box.Password = ""; return value;
     }, cancellationToken);
     private async Task<T> OnUi<T>(Func<Task<T>> action, CancellationToken cancellationToken)
     {

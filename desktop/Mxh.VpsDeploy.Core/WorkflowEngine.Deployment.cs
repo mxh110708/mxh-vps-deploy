@@ -34,7 +34,6 @@ public sealed partial class WorkflowEngine
             if (role == "RealityEntry") { target["Target"] = data.Text("TargetHost"); c.Plan.Put("Ports.XrayBackup", data["BackupPort"]?.DeepClone()); }
             if (data["Secrets"] != null) c.Secrets[role == "RealityEntry" ? "Xray" : setting] = data["Secrets"]!.DeepClone();
         }
-        c.Plan.Put("Import.Status", JsonValue.Create("Completed")); c.Plan.Put("Import.CompletedAt", JsonValue.Create(DateTimeOffset.UtcNow));
         c.Plan.Put("Import.SshAuthenticationPreserved", JsonValue.Create(true));
         c.State["Audit"] = audit.DeepClone(); c.State["ProtocolInventory"] = c.Plan["ProtocolInventory"]!.DeepClone();
         c.State["CurrentManagementPort"] = current; c.State["Engine"] = "dotnet-v1";
@@ -43,11 +42,13 @@ public sealed partial class WorkflowEngine
         if (c.Plan.Text("Server.BootstrapKeyPath") != "") keys.Prepare(c.File("ssh"), c.Plan.Text("Server.BootstrapKeyPath"), c.KeyPassphrase);
         ArchiveStore.WriteJson(c.File("existing-import-audit.json"), audit); c.Save();
         await ArchiveConfigs(c); validation.Export(c.Plan, c.Secrets, c.File("client-exports"));
+        c.Plan.Put("Import.Status", JsonValue.Create("Completed")); c.Plan.Put("Import.CompletedAt", JsonValue.Create(DateTimeOffset.UtcNow)); c.Save();
         c.Report("接入完成", "已归档受支持配置，保留现有 SSH、服务和防火墙。");
     }
     private async Task Deploy(Context c)
     {
         if (c.Request.Kind == OperationKind.Resume && c.State.Text("Engine") != "dotnet-v1") throw new OperationException("旧驱动的未完成计划需由维护者核对转换，不能直接重放。");
+        if (c.Request.Kind == OperationKind.Resume && InstanceLifecycle.Describe(c.Plan, c.State, c.Pending).Managed) throw new OperationException("该实例已完成部署或接入，不能作为草稿重放。", code: "DeploymentAlreadyComplete", nextAction: "在实例页选择具体维护操作。");
         if (c.Request.Kind == OperationKind.Resume) c.State.Put("Modules.audit", null);
         c.State["Engine"] = "dotnet-v1"; c.Save();
         async Task Step(string id, Func<Task> action)
@@ -55,7 +56,15 @@ public sealed partial class WorkflowEngine
             c.Cancellation.ThrowIfCancellationRequested();
             if (c.State.Text("Modules." + id + ".Status") == "Success") return;
             c.State.Put("Modules." + id, new JsonObject { ["Status"] = "Running", ["StartedAt"] = DateTimeOffset.UtcNow }); c.Save();
-            await action(); c.State.Put("Modules." + id, new JsonObject { ["Status"] = "Success", ["FinishedAt"] = DateTimeOffset.UtcNow }); c.Save();
+            try { await action(); c.State.Put("Modules." + id, new JsonObject { ["Status"] = "Success", ["FinishedAt"] = DateTimeOffset.UtcNow }); c.Save(); }
+            catch (Exception error)
+            {
+                var safe = error is OperationCanceledException ? null : SafeFailures.Describe(error);
+                c.State.Put("Modules." + id + ".Status", JsonValue.Create(c.HasPending() ? "NeedsRecovery" : error is OperationCanceledException ? "Cancelled" : "Failed"));
+                c.State.Put("Modules." + id + ".FinishedAt", JsonValue.Create(DateTimeOffset.UtcNow));
+                if (safe != null) { c.State.Put("Modules." + id + ".SafeError", JsonValue.Create(safe.Message)); c.State.Put("Modules." + id + ".ErrorCode", JsonValue.Create(safe.Code)); }
+                c.Save(); throw;
+            }
         }
         await Step("audit", async () =>
         {

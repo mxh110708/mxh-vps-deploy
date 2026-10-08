@@ -78,6 +78,7 @@ public sealed partial class MainWindow
             if (review) { SetAppearance("Dark"); SetFont("Route"); }
             await RenderPages(outputDirectory, true);
             if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-desktop")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "desktop-regression-proof.json"), await DesktopRegression(outputDirectory));
+            if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-deployment")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "deployment-regression-proof.json"), await DeploymentRegression(outputDirectory));
             var preferenceVerified = false;
             if (flag == "--ui-smoke") await Compact(outputDirectory);
             if (review)

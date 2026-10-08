@@ -2,7 +2,9 @@
 
 面向个人 Debian VPS 的中文部署与运维工具，由 Windows 控制端统一管理部署计划、远端操作、私有归档和客户端配置。
 
-正式版为 [v0.9.1](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.9.1)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
+正式版为 [v0.9.2](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.9.2)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
+
+v0.9.2 修正首次 SSH 身份确认占用连接超时的问题，保留具体失败原因并正确结束步骤状态；补齐节点默认命名、条件监控字段、详细部署审阅、草稿续作和本地删除实例。详见 [部署体验修正](docs/DEPLOYMENT-FIXES-2026-10-08.zh-CN.md)。
 
 v0.9.1 增加独立更新弹窗，在同一窗口显示 GitHub 更新内容、下载与 SHA-256 校验进度，并显示安装进度窗口；同时修正检查结束后的状态，调整新安装的默认路径与“关于”图标。v0.9.0 引入的 sing-box / Clash 独立点亮目标、四类字号、多用途部署与独立网络调优见 [桌面调整说明](docs/DESKTOP-ADJUSTMENTS-2026-10-07.zh-CN.md)。安装版可通过应用内检查更新原位升级，保留私人数据；桌面发行不再同步旧命令行使用目录。
 

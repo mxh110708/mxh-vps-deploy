@@ -17,7 +17,7 @@ public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFac
         var directory = store.Paths.Instance(request.InstanceRelativePath);
         var planFile = SafePath.Resolve(directory, "deployment-plan.json");
         var initial = request.Kind is OperationKind.Deploy or OperationKind.ConnectExisting;
-        if (initial && File.Exists(planFile)) throw new OperationException("实例已有归档，请选择现有实例操作。");
+        if (initial && File.Exists(planFile)) throw new OperationException("此实例已有本地归档。未完成部署可继续草稿，或删除本地实例后重新创建。", code: "InstanceAlreadyExists", nextAction: "在实例页选择继续部署、继续接入或删除实例。");
         var plan = initial ? request.Options["Plan"]?.DeepClone().AsObject() ?? throw new OperationException("缺少部署计划。") : ArchiveStore.ReadJson(planFile);
         if (request.InstanceRelativePath != plan.Text("Provider") + "/" + plan.Text("Instance") + "/MXH-VPS-Deploy") throw new OperationException("所选实例与归档身份不一致。");
         if (initial) DeploymentPlans.Validate(plan, request.Kind == OperationKind.ConnectExisting);
@@ -26,33 +26,44 @@ public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFac
         var secretsFile = SafePath.Resolve(directory, "secrets.dotnet.private.json");
         var secrets = File.Exists(secretsFile) ? store.ReadSecret(secretsFile) : File.Exists(SafePath.Resolve(directory, "deployment-secrets.private.json")) ? ArchiveStore.ReadJson(SafePath.Resolve(directory, "deployment-secrets.private.json")) : new JsonObject();
         await using var context = new Context(this, request, taskId, directory, plan, state, secrets, progress, cancellationToken);
-        if (request.Kind != OperationKind.Recover && context.HasPending()) throw new OperationException("存在未完成事务，请先核对并恢复。");
-        if (initial) context.Save();
+        if (request.Kind != OperationKind.Recover && context.HasPending()) throw new OperationException("存在未完成事务，请先核对并恢复。", true, "PendingTransaction", "先在实例页核对事务状态，再按明确范围恢复。");
+        if (initial) { context.State["Engine"] = "dotnet-v1"; context.Save(); }
+        context.State["LastTask"] = new JsonObject { ["Id"] = taskId, ["Kind"] = request.Kind.ToString(), ["Outcome"] = "Running", ["StartedAt"] = DateTimeOffset.UtcNow };
+        context.Save();
         try
         {
             switch (request.Kind)
             {
                 case OperationKind.ConnectExisting: await Import(context); break;
+                case OperationKind.ResumeImport:
+                    if (plan.Text("Import.Status") != "Pending") throw new OperationException("该归档不是未完成的接入草稿。");
+                    await Import(context); break;
                 case OperationKind.Deploy:
                 case OperationKind.Resume: await Deploy(context); break;
                 case OperationKind.HealthAudit: await Health(context); break;
                 case OperationKind.Recover: await Recover(context); break;
                 default: await Maintain(context); break;
             }
-            return context.Warnings ? TaskOutcome.CompletedWithWarnings : TaskOutcome.Completed;
+            var outcome = context.Warnings ? TaskOutcome.CompletedWithWarnings : TaskOutcome.Completed;
+            context.Finish(outcome); return outcome;
         }
         catch (Exception failure)
         {
             if (context.Pending != null && context.Pending.Text("Phase") is not ("Committed" or "RolledBack"))
             {
                 try { await Rollback(context); }
-                catch { throw new OperationException("操作结果或回滚未确认，请进入恢复中心核对。备份已保留。", true); }
+                catch { var uncertain = new OperationException("操作结果或回滚未确认，备份已保留。", true, "RollbackUnconfirmed", "先核对该实例的未完成事务，不能自动重复写入。"); context.Finish(TaskOutcome.NeedsRecovery, uncertain); throw uncertain; }
             }
-            if (context.Pending?.Text("Phase") == "Committed" && context.Pending.Text("TaskId") == context.Id) return TaskOutcome.CompletedWithWarnings;
-            if (context.State.Text("DeploymentTransaction.Status") is "Arming" or "Armed" or "LocalPrepared") throw new OperationException("部署中断，恢复记录已保留；请先进入恢复中心核对。", true);
-            if (failure is OperationCanceledException) throw;
-            if (failure is OperationException) throw;
-            throw new OperationException("当前步骤未确认完成，请核对任务与私人恢复记录。", context.MutationStarted);
+            if (context.Pending?.Text("Phase") == "Committed" && context.Pending.Text("TaskId") == context.Id) { context.Finish(TaskOutcome.CompletedWithWarnings); return TaskOutcome.CompletedWithWarnings; }
+            if (context.State.Text("DeploymentTransaction.Status") is "Arming" or "Armed" or "LocalPrepared")
+            {
+                var safe = SafeFailures.Describe(failure);
+                var uncertain = new OperationException("部署中断：" + safe.Message, true, safe.Code, "本次部署基线尚未确认结束。先核对事务状态，再选择恢复操作。");
+                context.Finish(TaskOutcome.NeedsRecovery, uncertain); throw uncertain;
+            }
+            if (failure is OperationCanceledException) { context.Finish(TaskOutcome.Cancelled); throw; }
+            var error = SafeFailures.Describe(failure, context.MutationStarted && context.Pending?.Text("Phase") != "RolledBack");
+            context.Finish(error.NeedsRecovery ? TaskOutcome.NeedsRecovery : TaskOutcome.Failed, error); throw error;
         }
     }
 
@@ -68,14 +79,25 @@ public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFac
         public JsonObject? Pending { get; set; } = System.IO.File.Exists(SafePath.Resolve(directory, "operation-pending.dotnet.json")) ? ArchiveStore.ReadJson(SafePath.Resolve(directory, "operation-pending.dotnet.json")) : null;
         public bool Warnings { get; set; }
         public bool MutationStarted { get; set; }
+        public string CurrentStage { get; private set; } = "准备";
         public int Port => State.Number("CurrentManagementPort", Plan.Number("Ports.SshPrimary", Plan.Number("Server.BootstrapSshPort")));
         private readonly Dictionary<string, string> passwords = new(StringComparer.Ordinal);
         private string? passphrase;
         public string? KeyPassphrase { get => passphrase; set => passphrase = value; }
         private int stage;
         public string File(string relative) => SafePath.Resolve(Directory, relative);
-        public void Report(string stageName, string message) => progress.Report(new(Id, stageName, ++stage, 0, message));
-        public bool HasPending() => Pending != null && Pending.Text("Phase") is not ("Committed" or "RolledBack") || State.Text("DeploymentTransaction.Status") is "Arming" or "Armed" or "LocalPrepared" || State.At("MaintenanceTransaction") != null && !State.Flag("MaintenanceTransaction.Committed") || State.Flag("Migration.RollbackArmed") && !State.Flag("Migration.Committed");
+        public void Report(string stageName, string message) { CurrentStage = stageName; progress.Report(new(Id, stageName, ++stage, 0, message)); }
+        public bool HasPending() => InstanceLifecycle.HasPending(State, Pending);
+        public void Finish(TaskOutcome outcome, OperationException? error = null)
+        {
+            State.Put("LastTask.Outcome", JsonValue.Create(outcome.ToString())); State.Put("LastTask.Stage", JsonValue.Create(CurrentStage));
+            State.Put("LastTask.FinishedAt", JsonValue.Create(DateTimeOffset.UtcNow)); State.Put("LastTask.RemoteMutationStarted", JsonValue.Create(MutationStarted));
+            State.Put("LastTask.SafeError", error?.Message == null ? null : JsonValue.Create(error.Message));
+            State.Put("LastTask.ErrorCode", error?.Code == null ? null : JsonValue.Create(error.Code));
+            State.Put("LastTask.NextAction", error?.NextAction == null ? null : JsonValue.Create(error.NextAction));
+            if (Request.Kind is OperationKind.Deploy or OperationKind.Resume or OperationKind.ConnectExisting or OperationKind.ResumeImport) State["LastDeploymentTask"] = State["LastTask"]!.DeepClone();
+            Save();
+        }
         public void Save()
         {
             ArchiveStore.WriteJson(File("deployment-plan.json"), Plan);

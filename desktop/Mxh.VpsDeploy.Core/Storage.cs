@@ -97,12 +97,28 @@ public sealed class ArchiveStore(AppPaths paths, ISecretProtector protector)
         var clear = protector.Unprotect(Convert.FromBase64String(value.Text("data")));
         try { return JsonNode.Parse(clear)!.AsObject(); } finally { CryptographicOperations.ZeroMemory(clear); }
     }
-    public FileStream LockInstance(string relative)
+    public FileStream LockInstanceGuard(string relative)
     {
-        var directory = Paths.Instance(relative); Directory.CreateDirectory(directory);
-        try { return new FileStream(SafePath.Resolve(directory, ".operation.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
-        catch (IOException) { throw new OperationException("该实例已有任务运行，请等待其结束。"); }
+        OperationPolicy.Validate(new(OperationKind.HealthAudit, relative, new()));
+        var identity = Path.GetFullPath(Paths.Instance(relative)); if (OperatingSystem.IsWindows()) identity = identity.ToUpperInvariant();
+        var file = Paths.Resolve("private/instance-locks/" + Digest(Encoding.UTF8.GetBytes(identity)) + ".lock");
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        try { return new FileStream(file, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+        catch (IOException) { throw new OperationException("该实例已有任务运行，请等待其结束。", code: "InstanceBusy"); }
     }
+    public IDisposable LockInstance(string relative)
+    {
+        var guard = LockInstanceGuard(relative);
+        try
+        {
+            var directory = Paths.Instance(relative); Directory.CreateDirectory(directory);
+            var legacy = new FileStream(SafePath.Resolve(directory, ".operation.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            return new InstanceLock(guard, legacy);
+        }
+        catch (IOException) { guard.Dispose(); throw new OperationException("该实例已有任务运行，请等待其结束。", code: "InstanceBusy"); }
+        catch { guard.Dispose(); throw; }
+    }
+    private sealed class InstanceLock(FileStream guard, FileStream legacy) : IDisposable { public void Dispose() { legacy.Dispose(); guard.Dispose(); } }
     public IEnumerable<(string RelativePath, JsonObject Plan)> ListInstances()
     {
         if (!Directory.Exists(Paths.Instances)) yield break;

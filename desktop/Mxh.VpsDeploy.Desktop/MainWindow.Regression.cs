@@ -95,6 +95,7 @@ public sealed partial class MainWindow
             var check = Find<CheckBox>(shell).Single(b => b.Tag as string == "Purpose.RealityEntry"); var fill = Find<Rectangle>(check).Single(r => r.Name == "NormalRectangle").Fill as SolidColorBrush;
             Require(fill != null && fill.Color.Equals(DesktopTheme.Color(Paint.Accent)), "用途选框未使用当前主题色。"); await Shot("deploy-multiple-purposes");
             SelectPage("network"); Require(page.Children.Count > 0 && heading.Text == "网络调优", "网络调优入口不可用。"); await Shot("network-independent"); proof["manual_network_boundary"] = true; proof["multiple_purposes"] = true;
+            proof["deployment_experience"] = await DeploymentRegression(outputDirectory);
             return proof;
         }
         finally
