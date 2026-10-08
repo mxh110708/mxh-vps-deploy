@@ -115,6 +115,7 @@ public sealed partial class WorkflowEngine
     {
         var kind = c.Request.Kind; var option = c.Request.Options;
         OperationPolicy.Validate(c.Request); ValidateMaintenance(c);
+        MaintenanceTargets.Validate(c.Request, c.Plan, c.State, Versions);
         var auditResult = await c.Run("audit.sh");
         var audit = new JsonObject { ["OsId"] = RemoteAssets.Marker(auditResult.Output, "OS_ID"), ["OsVersion"] = RemoteAssets.Marker(auditResult.Output, "OS_VERSION"), ["Architecture"] = RemoteAssets.Marker(auditResult.Output, "ARCH"), ["MemoryKiB"] = long.Parse(RemoteAssets.Marker(auditResult.Output, "MEMORY_KIB")) }; Supported(audit); c.State["Audit"] = audit;
         await VerifyManagement(c);
@@ -124,6 +125,13 @@ public sealed partial class WorkflowEngine
             foreach (var role in DeploymentPlans.Roles[..3]) if (inventory.Flag(role + ".Installed") != c.Plan.Flag("ProtocolInventory." + role + ".Installed", c.Plan.Text("Role") == role) || inventory.Flag(role + ".Enabled") != Enabled(c.Plan, role)) throw new OperationException("远端协议状态与归档不一致，请先只读核对漂移，未自动覆盖。");
         }
         var scope = option.Text("Scope", "Protocol");
+        if (kind == OperationKind.Komari)
+        {
+            var status = await c.Run("maintenance-komari.sh", new() { ["ACTION"] = "Status" }, timeout: 60);
+            var service = scope switch { "KomariAgent" => "komari-agent.service", "KomariController" => "komari.service", _ => "cloudflared.service" };
+            var line = status.Output.Split('\n').SingleOrDefault(value => value.StartsWith(service + "=", StringComparison.Ordinal));
+            if (line == null || !line[(service.Length + 1)..].StartsWith("true,", StringComparison.Ordinal)) throw new OperationException("远端没有对应的已安装组件，操作已停止。请重新接入并核对组件归档。", code: "ComponentMissing");
+        }
         var components = scope switch { "Protocol" => new[] { "Protocols" }, "Network" => ["Network"], "Firewall" => ["Firewall"], "KomariAgent" => ["KomariAgent"], "KomariController" => ["KomariController"], "Tunnel" => ["Cloudflared"], "ManagedInstance" => ["Protocols", "KomariAgent", "Firewall"], _ => throw new OperationException("不受支持的组件范围。") };
         if (kind == OperationKind.TuneNetwork) components = ["Network"];
         if (kind == OperationKind.ProtocolState && c.Plan.Text("Firewall.Mode") != "PreserveExisting") components = ["Protocols", "Firewall"];
@@ -222,8 +230,6 @@ public sealed partial class WorkflowEngine
     }
     private async Task Upgrade(Context c)
     {
-        var scope = c.Request.Options.Text("Scope");
-        if (scope is "KomariAgent" or "KomariController") { await Komari(c, true); return; }
         var role = c.Request.Options.Text("Protocol");
         if (!DeploymentPlans.Roles[..3].Contains(role) || !Enabled(c.Plan, role)) throw new OperationException("升级前请先启用对应协议，以便完成真实连接验收。");
         await InstallProtocol(c, role, true); await ApplyProtocolState(c, role); await RefreshInventory(c); await ServerGate(c); await ValidateProtocols(c); await ArchiveConfigs(c); validation.Export(c.Plan, c.Secrets, c.File("client-exports"));
@@ -261,9 +267,9 @@ public sealed partial class WorkflowEngine
         await c.Run("maintenance-protocol-config-apply.sh", new() { ["ROLE"] = role, ["CONFIG_JSON"] = config.ToJsonString(), ["WAS_ACTIVE"] = "true", ["EXPECTED_CONFIG_SHA256"] = RemoteAssets.Marker(current.Output, "SERVER_CONFIG_SHA256") }, true, marker: "CREDENTIAL_CONFIG_APPLIED");
         await ServerGate(c); await ValidateProtocols(c); await ArchiveConfigs(c); validation.Export(c.Plan, c.Secrets, c.File("client-exports"));
     }
-    private async Task Komari(Context c, bool upgrade = false)
+    private async Task Komari(Context c)
     {
-        var scope = c.Request.Options.Text("Scope"); var action = upgrade ? "Upgrade" : c.Request.Options.Text("Action");
+        var scope = c.Request.Options.Text("Scope"); var action = c.Request.Options.Text("Action");
         if (!(scope switch { "KomariAgent" => action is "Upgrade" or "Remove", "KomariController" => action is "Upgrade" or "Backup" or "Restore", "Tunnel" => action == "RotateToken", _ => false })) throw new OperationException("监控操作或组件范围无效。");
         var version = Versions;
         var parameters = new Dictionary<string, string>();
@@ -285,7 +291,7 @@ public sealed partial class WorkflowEngine
                 if (action == "Restore")
                 {
                     var root = c.File("komari-backups"); SafePath.CheckTree(root);
-                    var records = Directory.EnumerateFiles(root, "*.json").Select(ArchiveStore.ReadJson).Where(x => x.Text("RemoteBackup") == c.Request.Options.Text("Backup") && !x.Flag("IncludeTunnel")).ToArray();
+                    var records = Directory.EnumerateFiles(root, "*.json").Select(ArchiveStore.ReadJson).Where(x => x.Text("RemoteBackup") == c.Request.Options.Text("Backup") && x.At("IncludeTunnel") != null && !x.Flag("IncludeTunnel")).ToArray();
                     if (records.Length != 1) throw new OperationException("缺少唯一的主控专用恢复归档。");
                     parameters["BACKUP_SHA256"] = records[0].Text("Sha256"); await VerifyRemoteArchive(c, parameters["BACKUP_FILE"], parameters["BACKUP_SHA256"]);
                     parameters["FINAL_ACTIVE"] = Bool(c.State.Flag("KomariController.Active"));
@@ -295,6 +301,7 @@ public sealed partial class WorkflowEngine
         }
         if (action == "RotateToken") parameters["TUNNEL_TOKEN"] = await user.SecretAsync("Tunnel Token", c.Cancellation) ?? throw new OperationCanceledException();
         await c.Run("maintenance-komari.sh", parameters, true, 1200, "KOMARI_LIFECYCLE_OK");
+        if (scope == "KomariAgent" && action == "Upgrade") c.Plan.Put("Komari.AgentVersion", JsonValue.Create(version.Text("komari_agent.version")));
         if (scope == "KomariAgent" && action == "Remove") { c.Plan.Put("Komari.Enabled", JsonValue.Create(false)); c.State["KomariInstalled"] = false; }
         if (scope == "KomariController" && action == "Upgrade")
         {

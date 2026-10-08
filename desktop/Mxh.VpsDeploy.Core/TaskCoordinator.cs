@@ -37,7 +37,7 @@ public sealed class TaskCoordinator(ArchiveStore store, IOperationWorkflow workf
             using var instanceLock = store.LockInstance(current.InstanceRelativePath);
             var planHash = ArchiveFingerprint(current.InstanceRelativePath);
             if (planHash != review.PlanFingerprint) throw new OperationException("实例归档在审阅后发生变化，请重新读取并审阅。");
-            Current = new(Guid.NewGuid().ToString("N"), current.Kind, DateTimeOffset.UtcNow, null, TaskOutcome.Running, "准备", InstanceRelativePath: current.InstanceRelativePath);
+            Current = new(Guid.NewGuid().ToString("N"), current.Kind, DateTimeOffset.UtcNow, null, TaskOutcome.Running, "准备", InstanceRelativePath: current.InstanceRelativePath, TargetLabel: OperationPolicy.TargetLabel(current));
             store.AppendHistory(Current);
             var reporting = new InlineProgress<TaskProgress>(p => { Current = Current with { Stage = p.Stage }; progress.Report(p); });
             try
@@ -76,10 +76,17 @@ public static class OperationPolicy
         }
         if (request.Kind == OperationKind.TuneNetwork && request.Options.Number("BandwidthMbps") <= 0) throw new OperationException("请填写套餐标称带宽。");
         var scopeName = request.Options.Text("Scope", "Protocol");
-        if (request.Kind == OperationKind.Upgrade && scopeName is not ("Protocol" or "KomariAgent" or "KomariController") || request.Kind == OperationKind.Restore && scopeName != "Protocol" || request.Kind == OperationKind.RotateCredentials && scopeName != "Protocol") throw new OperationException("任务与所选组件范围不匹配。");
+        if (request.Kind == OperationKind.Upgrade && scopeName != "Protocol" || request.Kind == OperationKind.Restore && scopeName != "Protocol" || request.Kind == OperationKind.RotateCredentials && scopeName != "Protocol") throw new OperationException("任务与所选组件范围不匹配。监控组件请从对应的监控入口管理。");
+        if (request.Kind == OperationKind.Komari && request.Options.ContainsKey("Protocol")) throw new OperationException("监控与访问操作不能混入代理协议。");
         if (request.Kind == OperationKind.Decommission && (scopeName != "ManagedInstance" || request.Options.Text("Action") is not ("Disable" or "RemoveManaged"))) throw new OperationException("请选择明确的实例退役范围。");
         if (request.Kind == OperationKind.Komari && !(scopeName switch { "KomariAgent" => request.Options.Text("Action") is "Upgrade" or "Remove", "KomariController" => request.Options.Text("Action") is "Upgrade" or "Backup" or "Restore", "Tunnel" => request.Options.Text("Action") == "RotateToken", _ => false })) throw new OperationException("该监控组件不支持所选操作。");
     }
+    public static string TargetLabel(OperationRequest request) => request.Kind switch
+    {
+        OperationKind.Upgrade => request.Options.Text("Protocol") switch { "RealityEntry" => "Xray · Reality 入口", "AnyTlsEntry" => "sing-box · AnyTLS / ECH 入口", "ShadowsocksLanding" => "sing-box · Shadowsocks 落地", _ => "代理核心" },
+        OperationKind.Komari => (request.Options.Text("Scope") switch { "KomariAgent" => "Komari Agent", "KomariController" => "Komari 主控", _ => "Cloudflare Tunnel" }) + " · " + (request.Options.Text("Action") switch { "Upgrade" => "升级", "Remove" => "卸载", "Backup" => "一致性备份", "Restore" => "恢复备份", _ => "Token 轮换" }),
+        _ => ""
+    };
     public static string Summary(OperationRequest request) => request.Kind switch
     {
         OperationKind.ConnectExisting => "接入已有实例：只读识别现有配置，保留 SSH 认证、端口与防火墙。",
@@ -88,6 +95,8 @@ public static class OperationPolicy
         OperationKind.HealthAudit => "只读健康与漂移检查；不重启或修改服务。",
         OperationKind.TuneNetwork => "只修改部署器自己的网络参数文件，不重放协议、SSH 或防火墙。\n套餐标称带宽：" + request.Options.Number("BandwidthMbps") + " Mbps\n参考 RTT：" + (request.Options.Number("ReferenceRttMs") == 0 ? "不启用自适应估算" : request.Options.Number("ReferenceRttMs") + " ms") + "。",
         OperationKind.Recover => "先核对未完成事务的真实状态，再按明确范围恢复。",
+        OperationKind.Upgrade => "升级对象：" + TargetLabel(request) + "\n目标版本：" + request.Options.Text("TargetVersion") + "\n先核对状态并备份，再更新程序、重启所选服务并独立验收；失败按协议范围恢复。协议备份覆盖本机受管代理协议，恢复时须一并审阅。",
+        OperationKind.Komari => "操作：" + TargetLabel(request) + (request.Options.Text("Action") == "Upgrade" ? "\n目标版本：" + request.Options.Text("TargetVersion") : "") + "\n" + (request.Options.Text("Scope") switch { "KomariAgent" => request.Options.Text("Action") == "Remove" ? "卸载当前 VPS 的 Agent，停止向主控上报；不删除主控历史数据。" : "备份并更新当前 VPS 的 Agent，保留连接配置和原启停状态。", "KomariController" => "先备份当前 VPS 的主控程序和数据；一致性备份、升级及恢复需要短暂停止主控，再恢复原启停状态。只处理主控专用备份，不包含 Tunnel。", _ => "只轮换当前 VPS 的 Tunnel 连接 Token 并重启 Tunnel；新 Token 在执行时输入，不修改 Cloudflare DNS 或主控数据。" }),
         _ => "任务：" + request.Kind + "；组件：" + request.Options.Text("Scope", request.Options.Text("Protocol", "受管协议")) + "。操作前备份，失败按同一组件范围恢复。"
     };
 }

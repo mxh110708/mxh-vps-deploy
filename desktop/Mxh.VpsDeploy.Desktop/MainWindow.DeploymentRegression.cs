@@ -67,7 +67,7 @@ public sealed partial class MainWindow
         {
             selectedInstance = relative; SelectPage("instances"); await Task.Delay(80);
             Require(Find<Button>(shell).Any(b => b.Content as string == "继续部署") && Find<Button>(shell).Any(b => b.Content as string == "删除实例"), "草稿缺少继续或删除操作。");
-            Require(!Find<Button>(shell).Any(b => b.Content as string == "组件升级") && Find<TextBlock>(shell).Any(t => t.Text == "SSH 连接超时。"), "草稿误显示维护或失败原因丢失。");
+            Require(!Find<Button>(shell).Any(b => b.Content as string == "升级核心") && Find<TextBlock>(shell).Any(t => t.Text == "SSH 连接超时。"), "草稿误显示维护或失败原因丢失。");
             await Shot("instance-failed-draft");
             await DialogShot("dialog-delete-instance", InstanceDeletionDialog(new InstanceDeletion(store).Review(relative)));
         }

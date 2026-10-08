@@ -50,7 +50,7 @@ public sealed record OperationRequest(OperationKind Kind, string InstanceRelativ
 }
 public sealed record ReviewedOperation(OperationRequest Request, string Fingerprint, string PlanFingerprint, string Summary);
 public sealed record TaskProgress(string TaskId, string Stage, int Completed, int Total, string Message);
-public sealed record TaskRecord(string Id, OperationKind Kind, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt, TaskOutcome Outcome, string Stage, string? SafeError = null, string? ErrorCode = null, string? NextAction = null, string? InstanceRelativePath = null);
+public sealed record TaskRecord(string Id, OperationKind Kind, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt, TaskOutcome Outcome, string Stage, string? SafeError = null, string? ErrorCode = null, string? NextAction = null, string? InstanceRelativePath = null, string? TargetLabel = null);
 public sealed class OperationException(string safeMessage, bool needsRecovery = false, string? code = null, string? nextAction = null) : Exception(safeMessage)
 {
     public bool NeedsRecovery { get; } = needsRecovery;

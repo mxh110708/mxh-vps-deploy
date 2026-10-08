@@ -143,13 +143,13 @@ public sealed partial class MainWindow : Window, IUserInteraction
         grid.Children.Add(Card(Column(Row(new SymbolIcon(Symbol.World) { Foreground = Brush(Paint.Accent) }, Text("受管实例", 15)), Row(Text(store.ListInstances().Count().ToString(), 32), Text("个实例", 12, true)), Action("查看实例", () => { SelectPage("instances"); return Task.CompletedTask; }))));
         var right = Card(Column(Row(new SymbolIcon(Symbol.Link) { Foreground = Brush(Paint.Accent) }, Text("配置方案", 15)), Row(Text(workbench.List().Count().ToString(), 32), Text("个方案", 12, true)), Action("打开配置设计", () => { SelectPage("clients"); return Task.CompletedTask; }))); Grid.SetColumn(right, 1); grid.Children.Add(right); page.Children.Add(grid);
         page.Children.Add(Card(Trailing(Column(Text("开始新的部署", 18), Text("部署新的 VPS，或接入已经配置好的实例。", 13, true)), Row(Action("新建部署", () => { deploymentForm["Existing"] = false; SelectPage("deploy"); return Task.CompletedTask; }, true), Action("接入已有 VPS", () => { deploymentForm["Existing"] = true; SelectPage("deploy"); return Task.CompletedTask; })) )));
-        var file = paths.Resolve("private/task-history.dotnet.json"); var last = File.Exists(file) ? JsonNode.Parse(File.ReadAllText(file))!.AsArray().LastOrDefault() : null;
+        var last = new TaskHistory(store).Read().LastOrDefault();
         page.Children.Add(Card(Column(Text("最近任务", 18), Text(last == null ? "暂时还没有任务记录" : OutcomeLabel((TaskOutcome)last.Number("Outcome")), 14, last == null), Text(last == null ? "完成部署、维护或配置导出后，可在记录页查看结果。" : last.Text("Stage"), 13, true), Action("查看记录", () => { SelectPage("records"); return Task.CompletedTask; }))));
     }
     private void Instances()
     {
         var instances = store.ListInstances().ToArray(); if (instances.Length == 0) { page.Children.Add(Card(Column(Text("还没有受管实例", 22), Text("从部署页创建，或接入已有 VPS。", 14, true), Action("开始", () => { SelectPage("deploy"); return Task.CompletedTask; }, true)))); return; }
-        var selection = new JsonObject(); var picker = Choice("选择实例", selection, "Instance", instances.Select(instance => (instance.RelativePath, instance.Plan.Text("Provider") + " / " + instance.Plan.Text("Instance"))));
+        var selection = new JsonObject(); var picker = Choice("选择实例", selection, "Instance", instances.Select(instance => (instance.RelativePath, instance.Plan.Text("Provider") + " / " + instance.Plan.Text("Instance"))), preventWheelSelection: true);
         var details = new StackPanel { Spacing = 20 }; page.Children.Add(picker); page.Children.Add(details);
         picker.SelectionChanged += (_, _) =>
         {
@@ -171,9 +171,10 @@ public sealed partial class MainWindow : Window, IUserInteraction
             details.Children.Add(GroupLabel("日常维护"));
             details.Children.Add(SettingsGroup(
                 SettingRow("健康检查", "读取服务、监听与管理入口的当前状态", Symbol.Sync, Action("检查", () => Submit(new(OperationKind.HealthAudit, selectedInstance, new())))),
-                SettingRow("协议与组件", "管理入口协议，或升级受管组件", Symbol.Setting, Row(Action("协议管理", () => OperationSheet(OperationKind.ProtocolState, plan)), Action("组件升级", () => OperationSheet(OperationKind.Upgrade, plan)))),
-                SettingRow("协议凭据", "轮换正在运行的协议凭据", Symbol.Permissions, Action("凭据轮换", () => OperationSheet(OperationKind.RotateCredentials, plan))),
-                SettingRow("监控管理", "管理 Komari Agent、主控与 Tunnel", Symbol.View, Action("管理", () => OperationSheet(OperationKind.Komari, plan)))));
+                SettingRow("代理协议", "管理已安装协议的启用、停用、切换与卸载", Symbol.Setting, Action("协议管理", () => OperationSheet(OperationKind.ProtocolState, plan))),
+                SettingRow("代理核心", "升级此 VPS 上的 Xray 或 sing-box；审阅时显示对象与版本", Symbol.Download, Action("升级核心", () => OperationSheet(OperationKind.Upgrade, plan))),
+                SettingRow("协议凭据", "轮换正在运行的协议凭据", Symbol.Permissions, Action("凭据轮换", () => OperationSheet(OperationKind.RotateCredentials, plan)))));
+            details.Children.Add(GroupLabel("监控与访问")); details.Children.Add(MonitoringControls(plan, InstanceState(relative)));
             details.Children.Add(Details("恢复与后续操作", SettingsGroup(
                 SettingRow("未完成任务", "核对事务状态，再选择恢复操作", Symbol.Sync, Action("核对", () => Submit(new(OperationKind.Recover, selectedInstance, new())))),
                 SettingRow("协议备份", "从明确选择的协议备份恢复", Symbol.Library, Action("从备份恢复", () => OperationSheet(OperationKind.Restore, plan))),
@@ -226,13 +227,6 @@ public sealed partial class MainWindow : Window, IUserInteraction
         finally { taskCancellation.Dispose(); taskCancellation = null; pageHost.IsEnabled = true; pageAction.IsEnabled = true; foreach (var button in navigation.Values) button.IsEnabled = true; cancel.Visibility = Visibility.Collapsed; taskProgress.Visibility = Visibility.Collapsed; if (closing) { SaveDraft(); Close(); } }
     }
     private static string OutcomeLabel(TaskOutcome outcome) => outcome switch { TaskOutcome.Completed => "已完成", TaskOutcome.CompletedWithWarnings => "已完成，含未验收项", TaskOutcome.Cancelled => "已取消", TaskOutcome.NeedsRecovery => "待恢复", TaskOutcome.Failed => "失败", _ => "上次任务未确认结束" };
-    private void Records()
-    {
-        var publisher = new CandidatePublisher(paths);
-        foreach (var pending in publisher.Pending()) page.Children.Add(Card(Column(Text("配置导出待恢复", 18), Text("上次导出未确认结束。恢复前会核对该事务涉及的目标与备份摘要。", 13, true), Action("核对并恢复", async () => { if (await ConfirmAsync(new("恢复配置导出", "仅恢复此导出事务涉及的配置文件；发现外部改动时停止。"), CancellationToken.None)) await RunBackground("恢复配置导出", token => { token.ThrowIfCancellationRequested(); publisher.Recover(pending); Show("配置导出已恢复。", InfoBarSeverity.Success); return Task.CompletedTask; }); }))));
-        var file = paths.Resolve("private/task-history.dotnet.json"); if (!File.Exists(file)) { page.Children.Add(Text("还没有任务记录。", 16, true)); return; }
-        foreach (var item in JsonNode.Parse(File.ReadAllText(file))!.AsArray().Reverse()) { var record = item!.AsObject(); page.Children.Add(Card(Column(Text(OutcomeLabel((TaskOutcome)record.Number("Outcome")), 18), Text(record.Text("InstanceRelativePath").Replace("/MXH-VPS-Deploy", ""), 14), Text(record.Text("StartedAt") + " · " + StageLabel(record.Text("Stage")), 13, true), Text(record.Text("SafeError"), 14), Text(record.Text("NextAction"), 14, true), Text(record.Text("ErrorCode") == "" ? "" : "错误代码：" + record.Text("ErrorCode"), 12, true)))); }
-    }
     private void SaveDraft() => SaveScheme();
     public Task<bool> ConfirmHostAsync(HostIdentity identity, CancellationToken cancellationToken) => ConfirmHostIdentity(identity, cancellationToken);
     public async Task<bool> ConfirmAsync(UserDecision decision, CancellationToken cancellationToken) => await OnUi(async () =>

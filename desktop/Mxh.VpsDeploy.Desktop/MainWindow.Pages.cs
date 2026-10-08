@@ -7,9 +7,11 @@ namespace Mxh.VpsDeploy.Desktop;
 
 public sealed partial class MainWindow
 {
-    private ComboBox Choice(string label, JsonObject model, string key, IEnumerable<(string Value, string Label)> choices, bool preserveMissing = false)
+    private ComboBox Choice(string label, JsonObject model, string key, IEnumerable<(string Value, string Label)> choices, bool preserveMissing = false, bool preventWheelSelection = false)
     {
-        var box = new ComboBox { Header = label, HorizontalAlignment = HorizontalAlignment.Stretch, MinHeight = 38, FontSize = 13, CornerRadius = new CornerRadius(6), BorderThickness = new Thickness(1), BorderBrush = Brush(Paint.InputBorder), Background = Brush(Paint.Input), Foreground = Brush(Paint.Text) };
+        ComboBox box = preventWheelSelection ? new InstanceSelector() : new ComboBox();
+        box.Header = label; box.HorizontalAlignment = HorizontalAlignment.Stretch; box.MinHeight = 38; box.FontSize = 13;
+        box.CornerRadius = new CornerRadius(6); box.BorderThickness = new Thickness(1); box.BorderBrush = Brush(Paint.InputBorder); box.Background = Brush(Paint.Input); box.Foreground = Brush(Paint.Text);
         DesktopTypography.Mark(box, TypeRole.Body, 14);
         foreach (var (value, title) in choices) box.Items.Add(new ComboBoxItem { Content = title, Tag = value });
         var selectedIndex = box.Items.Cast<ComboBoxItem>().ToList().FindIndex(i => (string)i.Tag == model.Text(key));
@@ -20,27 +22,13 @@ public sealed partial class MainWindow
     }
     private async Task OperationSheet(OperationKind kind, JsonObject plan)
     {
-        var options = new JsonObject { ["Scope"] = kind == OperationKind.TuneNetwork ? "Network" : kind == OperationKind.Decommission ? "ManagedInstance" : "Protocol", ["Protocol"] = plan.Text("Role"), ["BandwidthMbps"] = plan.Number("NetworkTuning.BandwidthMbps"), ["ReferenceRttMs"] = plan.Number("NetworkTuning.ReferenceRttMs") };
+        if (kind == OperationKind.Upgrade) { await UpgradeCore(plan); return; }
+        if (kind == OperationKind.Komari) throw new OperationException("请从实例页选择具体的监控或访问组件。");
+        var options = new JsonObject { ["Scope"] = kind == OperationKind.TuneNetwork ? "Network" : kind == OperationKind.Decommission ? "ManagedInstance" : "Protocol" };
         var panel = Column(Text("选择本次操作范围，再审阅执行。", 14, true));
-        ComboBox? component = null;
-        if (kind is OperationKind.Upgrade or OperationKind.Komari) { component = Choice("组件", options, "Scope", kind == OperationKind.Komari ? [("KomariAgent", "Komari Agent"), ("KomariController", "Komari Controller"), ("Tunnel", "Cloudflare Tunnel")] : [("Protocol", "代理协议"), ("KomariAgent", "Komari Agent"), ("KomariController", "Komari Controller")]); panel.Children.Add(component); }
-        if (kind is OperationKind.ProtocolState or OperationKind.RotateCredentials or OperationKind.Upgrade) panel.Children.Add(Choice("协议", options, "Protocol", DeploymentPlans.Roles[..3].Where(role => plan.Flag("ProtocolInventory." + role + ".Installed") || plan.Text("Role") == role).Select(role => (role, RoleLabel(role)))));
+        if (kind is OperationKind.ProtocolState or OperationKind.RotateCredentials) panel.Children.Add(Choice("协议", options, "Protocol", DeploymentPlans.Roles[..3].Where(role => plan.Flag("ProtocolInventory." + role + ".Installed", plan.Text("Role") == role)).Select(role => (role, RoleLabel(role)))));
         if (kind == OperationKind.ProtocolState) panel.Children.Add(Choice("操作", options, "Action", [("Switch", "切换到此入口"), ("Enable", "启用"), ("Disable", "停用备用"), ("Uninstall", "卸载此协议")]));
-        if (kind == OperationKind.Komari)
-        {
-            var actions = new StackPanel { Spacing = 16 }; panel.Children.Add(actions);
-            void RefreshActions()
-            {
-                actions.Children.Clear(); options.Remove("Action");
-                var choice = Choice("操作", options, "Action", options.Text("Scope") switch { "KomariController" => [("Upgrade", "更新主控"), ("Backup", "主控一致性备份"), ("Restore", "恢复主控备份")], "Tunnel" => [("RotateToken", "轮换 Tunnel Token")], _ => [("Upgrade", "更新 Agent"), ("Remove", "卸载 Agent")] }); actions.Children.Add(choice);
-                var backups = new StackPanel(); actions.Children.Add(backups);
-                void RefreshBackups() { backups.Children.Clear(); if (options.Text("Action") != "Restore") return; var root = SafePath.Resolve(paths.Instance(selectedInstance!), "komari-backups"); if (Directory.Exists(root)) { SafePath.CheckTree(root); backups.Children.Add(Choice("主控恢复点", options, "Backup", Directory.EnumerateFiles(root, "*.json").Select(ArchiveStore.ReadJson).Where(b => !b.Flag("IncludeTunnel")).Select(b => (b.Text("RemoteBackup"), b.Text("At"))))); } }
-                choice.SelectionChanged += (_, _) => RefreshBackups(); RefreshBackups();
-                if (options.Text("Scope") == "KomariController") actions.Children.Add(Text("一致性备份和升级需要短暂停止主控。操作完成后恢复原运行状态，Tunnel 不在本次范围。", 13, true));
-            }
-            component!.SelectionChanged += (_, _) => RefreshActions(); RefreshActions();
-        }
-        if (kind == OperationKind.TuneNetwork) { panel.Children.Add(Field("套餐标称带宽（Mbps）", options, "BandwidthMbps", numeric: true)); panel.Children.Add(Field("参考 RTT（ms，可选）", options, "ReferenceRttMs", numeric: true)); }
+        if (kind == OperationKind.TuneNetwork) { options["BandwidthMbps"] = plan.Number("NetworkTuning.BandwidthMbps"); options["ReferenceRttMs"] = plan.Number("NetworkTuning.ReferenceRttMs"); panel.Children.Add(Field("套餐标称带宽（Mbps）", options, "BandwidthMbps", numeric: true)); panel.Children.Add(Field("参考 RTT（ms，可选）", options, "ReferenceRttMs", numeric: true)); }
         if (kind == OperationKind.Restore)
         {
             var directory = SafePath.Resolve(paths.Instance(selectedInstance!), "maintenance-backups");
@@ -49,7 +37,7 @@ public sealed partial class MainWindow
             panel.Children.Add(Choice("恢复范围", options, "RestoreMode", [("ConfigOnly", "仅恢复协议配置"), ("Full", "恢复协议程序、文件与服务")])); panel.Children.Add(Text("仅限协议范围；SSH、网络、防火墙和监控保持当前配置。", 13, true));
         }
         if (kind == OperationKind.Decommission) { panel.Children.Add(Choice("退役级别", options, "Action", [("Disable", "停用受管协议与 Agent"), ("RemoveManaged", "卸载受管协议与 Agent")])); panel.Children.Add(Text("保留 SSH 和基础系统；主控与 Tunnel 不包含在此范围。", 13, true)); }
-        var dialog = new ContentDialog { XamlRoot = shell.XamlRoot, RequestedTheme = ElementTheme.Dark, Title = kind switch { OperationKind.ProtocolState => "协议管理", OperationKind.Upgrade => "组件升级", OperationKind.RotateCredentials => "凭据轮换", OperationKind.TuneNetwork => "网络参数", OperationKind.Komari => "监控管理", OperationKind.Restore => "从备份恢复", _ => "实例退役" }, Content = panel, PrimaryButtonText = "审阅", CloseButtonText = "取消" };
+        var dialog = OperationDialog(kind switch { OperationKind.ProtocolState => "协议管理", OperationKind.RotateCredentials => "凭据轮换", OperationKind.TuneNetwork => "网络参数", OperationKind.Restore => "从备份恢复", _ => "实例退役" }, panel, "审阅");
         if (await ShowDialog(dialog) != ContentDialogResult.Primary) return;
         await Submit(new(kind, selectedInstance!, options));
     }

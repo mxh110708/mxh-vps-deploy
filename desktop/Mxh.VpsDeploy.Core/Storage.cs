@@ -130,14 +130,5 @@ public sealed class ArchiveStore(AppPaths paths, ISecretProtector protector)
             if (plan != null) yield return (Path.GetRelativePath(Paths.Instances, Path.GetDirectoryName(file)!).Replace('\\', '/'), plan);
         }
     }
-    public void AppendHistory(TaskRecord record)
-    {
-        var file = Paths.Resolve("private/task-history.dotnet.json");
-        var old = File.Exists(file) ? JsonNode.Parse(File.ReadAllText(file))!.AsArray() : new JsonArray();
-        var index = old.Select((v, i) => (v, i)).FirstOrDefault(p => p.v?.AsObject().Text("Id") == record.Id);
-        var node = JsonSerializer.SerializeToNode(record, JsonOptions);
-        if (index.v != null) old[index.i] = node; else old.Add(node);
-        while (old.Count > 120) old.RemoveAt(0);
-        WriteJson(file, old);
-    }
+    public void AppendHistory(TaskRecord record) => new TaskHistory(this).Append(record);
 }

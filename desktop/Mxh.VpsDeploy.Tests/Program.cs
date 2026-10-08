@@ -16,7 +16,7 @@ internal sealed partial class BoundaryTests(string repository)
     private async Task RefusesAsync(Func<Task> action, string message) { try { await action(); } catch (OperationException) { assertions++; return; } throw new Exception(message); }
     public async Task Run()
     {
-        using var f = new Fixture(repository); Paths(f); Fonts(f); await Coordinator(f); Publisher(f); SinglePublisher(f); Profiles(f); MultiPurpose(f); Keys(f); await Workflows(f); await DesktopDeployment(f); await Credentials(f); await Workbench(f); await Trust(f); await DeploymentExperience(f);
+        using var f = new Fixture(repository); Paths(f); Fonts(f); await Coordinator(f); Publisher(f); SinglePublisher(f); Profiles(f); MultiPurpose(f); Keys(f); await Workflows(f); await DesktopDeployment(f); await Credentials(f); await Workbench(f); await Trust(f); await DeploymentExperience(f); await MaintenanceExperience(f);
         var python = Environment.GetEnvironmentVariable("MXH_TEST_PYTHON"); if (!string.IsNullOrEmpty(python)) await RealClientWorkbench(f, python);
         Console.WriteLine($"PASS: {assertions} C# boundary and workflow assertions; no production connections.");
     }
