@@ -25,3 +25,7 @@ jobs:
       - run: python -m pip install --disable-pip-version-check paramiko==5.0.0
       - run: dotnet restore desktop/Mxh.VpsDeploy.Tests/Mxh.VpsDeploy.Tests.csproj --locked-mode
       - run: dotnet run --project desktop/Mxh.VpsDeploy.Tests/Mxh.VpsDeploy.Tests.csproj -c Release --no-restore -- "${{ github.workspace }}"
+      - if: runner.os == 'Windows'
+        run: dotnet restore desktop/Mxh.VpsDeploy.Windows.Tests/Mxh.VpsDeploy.Windows.Tests.csproj --locked-mode
+      - if: runner.os == 'Windows'
+        run: dotnet run --project desktop/Mxh.VpsDeploy.Windows.Tests/Mxh.VpsDeploy.Windows.Tests.csproj -c Release --no-restore -- "${{ github.workspace }}"

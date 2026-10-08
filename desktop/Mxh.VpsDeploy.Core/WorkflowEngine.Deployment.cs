@@ -74,6 +74,8 @@ public sealed partial class WorkflowEngine
             if (audit.Text("ExistingServices") != "" || audit.Number("NftRuleLines") != 0) throw new OperationException("检测到已有服务或防火墙，新机流程已停止，未覆盖。");
             c.State["Audit"] = audit; ArchiveStore.WriteJson(c.File("initial-audit.json"), audit);
         });
+        c.Report("management-key", "正在准备本地管理密钥及访问权限。");
+        var managementKey = keys.Prepare(c.File("ssh"), c.Plan.Text("Server.BootstrapKeyPath"), c.KeyPassphrase);
         await Step("deployment-baseline", async () =>
         {
             if (!Regex.IsMatch(c.Plan.Text("DeploymentTransaction.Id"), "^[a-f0-9]{32}$")) throw new OperationException("部署事务身份无效。");
@@ -84,8 +86,7 @@ public sealed partial class WorkflowEngine
         });
         await Step("bootstrap-access", async () =>
         {
-            var key = keys.Prepare(c.File("ssh"), c.Plan.Text("Server.BootstrapKeyPath"), c.KeyPassphrase);
-            var publicKey = File.ReadAllText(key + ".pub").Trim();
+            var publicKey = File.ReadAllText(managementKey + ".pub").Trim();
             await c.Run("bootstrap-access.sh", new() { ["PUBLIC_KEY"] = publicKey }, true, bootstrap: true);
             await c.VerifySsh(c.Plan.Number("Server.BootstrapSshPort"), "root");
         });

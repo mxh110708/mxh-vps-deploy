@@ -18,9 +18,10 @@ public sealed class WindowsManagedKeyAccess : IPrivateKeyAccess
     public void PrepareManagedCopy(string path)
     {
         SafePath.CheckLinks(path);
-        // Only called for a newly created app-owned copy, never for a provider source.
+        // Protect only the app-managed copy, including a previous interrupted preparation.
+        // Updating the DACL does not require changing the file owner or elevated privileges.
         var user = WindowsIdentity.GetCurrent().User ?? throw new OperationException("无法识别当前 Windows 用户。");
-        var access = new FileSecurity(); access.SetOwner(user); access.SetAccessRuleProtection(true, false);
+        var access = new FileSecurity(); access.SetAccessRuleProtection(true, false);
         access.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
         new FileInfo(path).SetAccessControl(access);
     }

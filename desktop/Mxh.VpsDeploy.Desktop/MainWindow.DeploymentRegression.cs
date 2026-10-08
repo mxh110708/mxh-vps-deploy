@@ -70,6 +70,21 @@ public sealed partial class MainWindow
             Require(!Find<Button>(shell).Any(b => b.Content as string == "升级核心") && Find<TextBlock>(shell).Any(t => t.Text == "SSH 连接超时。"), "草稿误显示维护或失败原因丢失。");
             await Shot("instance-failed-draft");
             await DialogShot("dialog-delete-instance", InstanceDeletionDialog(new InstanceDeletion(store).Review(relative)));
+            var stateFile = SafePath.Resolve(directory, "deployment-state.json"); var draft = ArchiveStore.ReadJson(stateFile);
+            try
+            {
+                var pending = draft.DeepClone().AsObject();
+                pending["DeploymentTransaction"] = new JsonObject { ["Status"] = "Armed" };
+                pending["LastDeploymentTask"] = new JsonObject { ["Outcome"] = "NeedsRecovery", ["SafeError"] = "管理密钥权限准备失败。", ["NextAction"] = "先核对恢复状态。" };
+                ArchiveStore.WriteJson(stateFile, pending); Show("管理密钥权限准备失败。", InfoBarSeverity.Error);
+                RefreshTaskResultPage(); await Task.Delay(100);
+                Require(!Find<Button>(shell).Any(b => b.Content as string == "继续部署") && Find<Button>(shell).Any(b => b.Content as string == "核对恢复状态"), "新失败后仍显示旧草稿入口。");
+                Require(!Find<Button>(shell).Single(b => b.Content as string == "删除实例").IsEnabled, "待恢复实例仍可删除。");
+                Require(Find<TextBlock>(shell).Any(t => t.Text == "管理密钥权限准备失败。") && !Find<TextBlock>(shell).Any(t => t.Text == "SSH 连接超时。") && notice.IsOpen && notice.Severity == InfoBarSeverity.Error, "新任务原因未刷新或通知丢失。");
+                await Shot("instance-pending-refreshed");
+            }
+            finally { ArchiveStore.WriteJson(stateFile, draft); notice.IsOpen = false; RefreshTaskResultPage(); }
+            Require(Find<Button>(shell).Any(b => b.Content as string == "继续部署") && Find<Button>(shell).Single(b => b.Content as string == "删除实例").IsEnabled, "解除事务后界面未刷新。");
         }
         finally { new InstanceDeletion(store).Delete(new InstanceDeletion(store).Review(relative)); selectedInstance = null; }
         var light = DesktopTheme.IsLight;
@@ -80,6 +95,6 @@ public sealed partial class MainWindow
             await DialogShot("dialog-ssh-first-trust-light", HostIdentityDialog(identity));
         }
         finally { SetAppearance(light ? "Light" : "Dark"); }
-        return new JsonObject { ["generated_and_custom_names"] = true, ["monitor_fields_conditional"] = true, ["detailed_review_scrolls"] = true, ["first_trust_comparison"] = true, ["draft_status_and_actions"] = true, ["local_delete_review"] = true, ["remote_connections"] = 0 };
+        return new JsonObject { ["generated_and_custom_names"] = true, ["monitor_fields_conditional"] = true, ["detailed_review_scrolls"] = true, ["first_trust_comparison"] = true, ["draft_status_and_actions"] = true, ["task_result_refresh"] = true, ["pending_disables_continue_and_delete"] = true, ["local_delete_review"] = true, ["remote_connections"] = 0 };
     }
 }

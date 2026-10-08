@@ -215,7 +215,13 @@ public sealed partial class MainWindow : Window, IUserInteraction
         if (!await ReviewOperation(review)) return;
         activeOperation = request;
         try { await RunBackground("准备任务", async token => { var progress = new Progress<TaskProgress>(p => taskText.Text = StageLabel(p.Stage) + " · " + p.Message); var record = await Task.Run(() => coordinator.ExecuteAsync(review, request, progress, token)); taskText.Text = OutcomeLabel(record.Outcome) + " · " + StageLabel(record.Stage); Show(TaskMessage(record), record.Outcome is TaskOutcome.Failed or TaskOutcome.NeedsRecovery ? InfoBarSeverity.Error : record.Outcome == TaskOutcome.Completed ? InfoBarSeverity.Success : InfoBarSeverity.Warning); }); }
-        finally { activeOperation = null; if (request.Kind == OperationKind.HealthAudit && currentPage == "instances") { var shown = notice.IsOpen; var message = notice.Message; var severity = notice.Severity; SelectPage("instances"); if (shown) Show(message, severity); } }
+        finally { activeOperation = null; RefreshTaskResultPage(); }
+    }
+    private void RefreshTaskResultPage()
+    {
+        if (currentPage is not ("instances" or "records" or "overview")) return;
+        var shown = notice.IsOpen; var message = notice.Message; var severity = notice.Severity;
+        SelectPage(currentPage); if (shown) Show(message, severity);
     }
     private async Task RunBackground(string label, Func<CancellationToken, Task> action)
     {

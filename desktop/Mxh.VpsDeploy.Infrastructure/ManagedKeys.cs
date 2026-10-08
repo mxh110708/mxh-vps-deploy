@@ -10,7 +10,13 @@ public sealed class ManagedKeys(IPrivateKeyAccess access) : IManagedKeyStore
     public string Prepare(string directory, string source, string? passphrase = null)
     {
         Directory.CreateDirectory(directory); var target = SafePath.Resolve(directory, "id_vps_management");
-        if (File.Exists(target)) { ValidateAndWritePublic(target, passphrase); return target; }
+        if (File.Exists(target))
+        {
+            // A previous ACL failure can leave the private copy without its public file.
+            // Validate and protect that same key before completing it; never generate a replacement.
+            using (var check = Open(target, passphrase)) { }
+            access.PrepareManagedCopy(target); ValidateAndWritePublic(target, passphrase); return target;
+        }
         if (source != "")
         {
             SafePath.CheckLinks(source); if (!File.Exists(source)) throw new OperationException("SSH 私钥不存在。");

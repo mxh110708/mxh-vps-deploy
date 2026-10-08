@@ -70,7 +70,7 @@ public sealed partial class MainWindow
     }
     private static string StageLabel(string stage) => stage switch
     {
-        "audit" => "系统审计", "deployment-baseline-arm" => "部署基线备份", "bootstrap-access" => "建立管理访问", "base-system" => "系统准备",
+        "audit" => "系统审计", "management-key" => "准备管理密钥", "deployment-baseline-arm" => "部署基线备份", "bootstrap-access" => "建立管理访问", "base-system" => "系统准备",
         "ssh-transition" => "管理入口切换", "target-audit" => "Reality 目标检查", "certbot-dns-setup" => "证书配置", "local-https-target" => "本机 HTTPS 配置",
         "deployment-commit" => "部署提交", "maintenance-transaction-status" => "事务状态核对", "无需回滚" => "草稿状态核对",
         "network-tuning" => "网络调优", "validate" => "独立验收", "health" => "健康检查", "import" => "接入识别", _ => stage

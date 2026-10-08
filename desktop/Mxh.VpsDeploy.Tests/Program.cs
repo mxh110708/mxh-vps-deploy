@@ -19,6 +19,7 @@ internal sealed partial class BoundaryTests(string repository)
         using var f = new Fixture(repository); Paths(f); Fonts(f); await Coordinator(f); Publisher(f); SinglePublisher(f); Profiles(f); MultiPurpose(f); Keys(f); await Workflows(f); await DesktopDeployment(f); await Credentials(f); await Workbench(f); await Trust(f); await DeploymentExperience(f); await MaintenanceExperience(f);
         await MonitoringArchiveExperience(f);
         await PrivateDirectoryExperience();
+        await ManagedKeyDeployment(f);
         var sshPython = Environment.GetEnvironmentVariable("MXH_TEST_SSH_PYTHON"); if (!string.IsNullOrEmpty(sshPython)) await LocalSshConfirmation(f, sshPython);
         var python = Environment.GetEnvironmentVariable("MXH_TEST_PYTHON"); if (!string.IsNullOrEmpty(python)) await RealClientWorkbench(f, python);
         Console.WriteLine($"PASS: {assertions} C# boundary and workflow assertions; no production connections.");

@@ -72,6 +72,8 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
         var deploymentOutput = asset switch
         {
             "deployment-baseline-arm.sh" => "VPSDEPLOY_DEPLOYMENT_BASELINE_OK\n" + Marker("BASELINE_DIR", "/root/vps-deploy-transaction-baselines/" + Parameter("TRANSACTION_ID")),
+            "deployment-baseline-status.sh" => Marker("DEPLOYMENT_BASELINE_STATUS", "Ready"),
+            "deployment-baseline-rollback.sh" => "VPSDEPLOY_DEPLOYMENT_ROLLBACK_OK\n",
             "base-system.sh" => "VPSDEPLOY_BASE_OK\n", "target-audit.sh" => Marker("TARGET_JSON", "{\"automatic_pass\":true}"),
             "xray-generate-credentials.sh" => Marker("XRAY_SECRET", Fixture.RealitySecrets()["Xray"]!.ToJsonString()),
             "anytls-generate-ech.sh" => Marker("ECH_KEYS", "synthetic-ech-key") + Marker("ECH_CONFIG", "synthetic-ech-config"),

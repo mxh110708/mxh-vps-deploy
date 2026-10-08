@@ -7,7 +7,7 @@ internal sealed partial class BoundaryTests
 {
     public async Task RunDeploymentTests()
     {
-        using var fixture = new Fixture(repository); await DeploymentExperience(fixture);
+        using var fixture = new Fixture(repository); await DeploymentExperience(fixture); await ManagedKeyDeployment(fixture);
         var python = Environment.GetEnvironmentVariable("MXH_TEST_SSH_PYTHON");
         if (!string.IsNullOrEmpty(python)) await LocalSshConfirmation(fixture, python);
         Console.WriteLine($"PASS: {assertions} deployment, failure, trust and deletion assertions; synthetic fixtures only.");
