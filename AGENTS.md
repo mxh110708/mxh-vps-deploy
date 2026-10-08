@@ -28,6 +28,8 @@ Build a local preview with `scripts/New-VpsReleasePackage.ps1 -Destination <outp
 
 `tests/Test-DesktopInstaller.ps1` performs real install/update/uninstall tests using QA installers with no shortcuts or uninstall registry entries, under an isolated project fixture. CI runs this once in the Windows Python 3.13/runner job; do not duplicate all package tests across the matrix. Verify installers with native EXE startup and actual lifecycle behavior, not only file extensions or script parsing. Never deploy a QA installer as a release.
 
+Scope local verification to the behavior changed. Run dedicated update/installer lifecycle verification when update code, the installer or release structure changes; ordinary UI changes do not require repeating it. Do not repeat public-release download probes when delivery metadata and assets have not changed.
+
 ## Coding Style & Naming Conventions
 
 Follow surrounding formatting: four-space PowerShell/Python indentation, strict PowerShell error handling, and LF Bash files. Use existing `Verb-VpsNoun` functions, explicit parameter validation, and professional Chinese prompts. Preserve return/cancel semantics. Keep templates generic; retain legitimate custom configuration and fail closed on ambiguous layouts.

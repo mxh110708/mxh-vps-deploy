@@ -2,9 +2,9 @@
 
 面向个人 Debian VPS 的中文部署与运维工具，由 Windows 控制端统一管理部署计划、远端操作、私有归档和客户端配置。
 
-正式版为 [v0.9.0](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.9.0)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
+正式版为 [v0.9.1](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.9.1)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
 
-v0.9.0 提供 sing-box / Clash 独立点亮目标、四类字号、多用途部署与独立网络调优，详见 [本轮说明](docs/DESKTOP-ADJUSTMENTS-2026-10-07.zh-CN.md)。安装版可通过应用内检查更新原位升级，保留私人数据；桌面发行不再同步旧命令行使用目录。
+v0.9.1 增加独立更新弹窗，在同一窗口显示 GitHub 更新内容、下载与 SHA-256 校验进度，并显示安装进度窗口；同时修正检查结束后的状态，调整新安装的默认路径与“关于”图标。v0.9.0 引入的 sing-box / Clash 独立点亮目标、四类字号、多用途部署与独立网络调优见 [桌面调整说明](docs/DESKTOP-ADJUSTMENTS-2026-10-07.zh-CN.md)。安装版可通过应用内检查更新原位升级，保留私人数据；桌面发行不再同步旧命令行使用目录。
 
 桌面采用 **WinUI 3 界面 + C#/.NET 共享运维核心 + Windows 适配层**，提供深浅两种配色、原版与霞鹜文楷两套内置字体及自定义字体导入。安装版通过“设置 → 检查更新”下载、校验、原位安装并自动重启，保留私人数据和本地配置，无需卸载重装。参见 [桌面版使用与数据目录](docs/DESKTOP.zh-CN.md) 和 [架构与边界](docs/DOTNET-ARCHITECTURE.zh-CN.md)。
 
@@ -52,7 +52,7 @@ dotnet run --project .\desktop\Mxh.VpsDeploy.Tests -c Release -- $PWD
 
 ### 3. 启动工具
 
-在正式发行页下载 `mxh-vps-deploy-v0.9.0-windows-amd64-setup.exe`，按同页 `SHA256SUMS.txt` 核对后安装，通过桌面／开始菜单启动。便携 ZIP 解压后双击 `MXH-VPS-Deploy.exe`；需要应用内原位更新时使用安装版。源码可先构建预览：
+在正式发行页下载 `mxh-vps-deploy-v0.9.1-windows-amd64-setup.exe`，按同页 `SHA256SUMS.txt` 核对后安装，通过桌面／开始菜单启动。便携 ZIP 解压后双击 `MXH-VPS-Deploy.exe`；需要应用内原位更新时使用安装版。源码可先构建预览：
 
 ```powershell
 pwsh -NoProfile -File .\scripts\New-VpsReleasePackage.ps1 -Development -Destination '<预览输出目录>'

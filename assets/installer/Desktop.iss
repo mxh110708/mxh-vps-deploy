@@ -21,7 +21,7 @@ AppVersion={#AppVersion}
 AppPublisher=MXH
 AppPublisherURL=https://github.com/mxh110708/mxh-vps-deploy
 AppSupportURL=https://github.com/mxh110708/mxh-vps-deploy/issues
-DefaultDirName={localappdata}\Programs\MXH VPS Deploy
+DefaultDirName=C:\Programs\MXH VPS Deploy
 DefaultGroupName=MXH VPS Deploy
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64os
@@ -75,6 +75,19 @@ Filename: "{app}\MXH-VPS-Deploy.exe"; Description: "启动 MXH VPS Deploy"; Flag
 [Code]
 var
   DeleteApplicationData: Boolean;
+#if IsTestBuild == "1"
+  QaProgressRecorded: Boolean;
+
+procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
+begin
+  if not QaProgressRecorded and WizardSilent and WizardForm.Visible and WizardForm.ProgressGauge.Visible then begin
+    ForceDirectories(ExpandConstant('{app}\.tmp'));
+    SaveStringToFile(ExpandConstant('{app}\.tmp/qa-install-window.json'),
+      '{"version":"{#AppVersion}","progress_window_visible":true,"progress_gauge_visible":true}', False);
+    QaProgressRecorded := True;
+  end;
+end;
+#endif
 
 function DataPathSafe(const Directory: String): Boolean;
 var

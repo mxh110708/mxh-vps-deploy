@@ -175,7 +175,9 @@ public sealed partial class MainWindow
             SettingRow("卸载数据处理", "卸载时可选择保留归档和本地配置，或彻底删除应用数据", Symbol.Delete, Text("卸载时选择", 12, true))));
         var version = ArchiveStore.ReadJson(paths.Resolve("config/application.json")).Text("version");
         page.Children.Add(GroupLabel("关于"));
-        page.Children.Add(SettingsGroup(SettingRow("MXH VPS Deploy", "Windows 桌面应用", Symbol.Help, Text("v" + version, 13, true))));
+        var appIcon = new Image { Name = "AboutApplicationIcon", Width = 32, Height = 32, Source = new Microsoft.UI.Xaml.Media.Imaging.SvgImageSource(new Uri("ms-appx:///assets/gui/app.svg")) };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(appIcon, "MXH VPS Deploy 应用图标");
+        page.Children.Add(SettingsGroup(SettingRow("MXH VPS Deploy", "Windows 桌面应用", appIcon, Text("v" + version, 13, true))));
     }
     private void SaveSettings() => ArchiveStore.WriteJson(paths.Resolve("private/desktop-settings.json"), settings);
 }

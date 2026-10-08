@@ -9,7 +9,12 @@ using Mxh.VpsDeploy.Core;
 namespace Mxh.VpsDeploy.Windows;
 
 public sealed record UpdateAsset(string Name, string Url, string Sha256, long Bytes);
-public sealed record ApplicationUpdate(string Version, UpdateAsset Installer, UpdateAsset Manifest, UpdateAsset Checksums);
+public sealed record ApplicationUpdate(string Version, UpdateAsset Installer, UpdateAsset Manifest, UpdateAsset Checksums, string ReleaseNotes = "");
+public enum UpdatePhase { Preparing, Downloading, Verifying, Ready }
+public sealed record ApplicationUpdateProgress(UpdatePhase Phase, long CompletedBytes, long TotalBytes)
+{
+    public double Percent => TotalBytes > 0 ? Math.Clamp(100d * CompletedBytes / TotalBytes, 0, 100) : 0;
+}
 
 public sealed class WindowsUpdates : IDisposable
 {
@@ -41,10 +46,19 @@ public sealed class WindowsUpdates : IDisposable
             if (url != "https://github.com/mxh110708/mxh-vps-deploy/releases/download/" + tag + "/" + filename) throw new OperationException("发行资产来源异常。");
             return new(filename, url, digest[7..], bytes);
         }
-        return new(version, Asset(name + "-setup.exe", 300L * 1024 * 1024), Asset(name + ".files.json", 2 * 1024 * 1024), Asset("SHA256SUMS.txt", 1024 * 1024));
+        return new(version, Asset(name + "-setup.exe", 300L * 1024 * 1024), Asset(name + ".files.json", 2 * 1024 * 1024), Asset("SHA256SUMS.txt", 1024 * 1024), release.Text("body"));
     }
-    public async Task<string> PrepareAsync(ApplicationUpdate update, CancellationToken cancellationToken)
+    public Task<string> PrepareAsync(ApplicationUpdate update, CancellationToken cancellationToken) => PrepareAsync(update, null, cancellationToken);
+    public async Task<string> PrepareAsync(ApplicationUpdate update, IProgress<ApplicationUpdateProgress>? progress, CancellationToken cancellationToken)
     {
+        UpdatePhase? lastPhase = null; var lastPercent = -1;
+        void Report(UpdatePhase phase, long completed = 0, long total = 0)
+        {
+            var value = new ApplicationUpdateProgress(phase, completed, total); var percent = (int)value.Percent;
+            if (phase == lastPhase && percent == lastPercent) return;
+            lastPhase = phase; lastPercent = percent; progress?.Report(value);
+        }
+        Report(UpdatePhase.Preparing);
         var marker = paths.Resolve("installation.json");
         if (!File.Exists(marker)) throw new OperationException("此目录尚未使用安装包安装，请先选择正式安装包。");
         var installed = ArchiveStore.ReadJson(marker);
@@ -60,16 +74,26 @@ public sealed class WindowsUpdates : IDisposable
         var stage = paths.Resolve(".tmp/app-update-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(stage);
         try
         {
-            foreach (var asset in new[] { update.Installer, update.Manifest })
+            var assets = new[] { update.Installer, update.Manifest }; var totalBytes = assets.Sum(a => a.Bytes); long downloaded = 0;
+            Report(UpdatePhase.Downloading, 0, totalBytes);
+            foreach (var asset in assets)
             {
                 if (!sums.TryGetValue(asset.Name, out var hash) || hash != asset.Sha256) throw new OperationException("发行资产与校验清单不一致。");
                 var destination = SafePath.Resolve(stage, asset.Name);
                 using var response = await client.GetAsync(asset.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken); response.EnsureSuccessStatusCode();
                 await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken))
                 await using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true))
-                    await CopyLimitedAsync(input, output, asset.Bytes, cancellationToken);
+                    await CopyLimitedAsync(input, output, asset.Bytes, cancellationToken, bytes => Report(UpdatePhase.Downloading, downloaded + bytes, totalBytes));
+                downloaded += asset.Bytes;
+                if (new FileInfo(destination).Length != asset.Bytes) throw new OperationException("更新资产大小不匹配，未安装。");
+            }
+            long verified = 0; Report(UpdatePhase.Verifying, 0, totalBytes);
+            foreach (var asset in assets)
+            {
+                var destination = SafePath.Resolve(stage, asset.Name);
                 await using var read = File.OpenRead(destination);
-                if (read.Length != asset.Bytes || Convert.ToHexStringLower(await SHA256.HashDataAsync(read, cancellationToken)) != hash) throw new OperationException("更新资产摘要或大小不匹配，未安装。");
+                if (read.Length != asset.Bytes || await HashAsync(read, bytes => Report(UpdatePhase.Verifying, verified + bytes, totalBytes), cancellationToken) != asset.Sha256) throw new OperationException("更新资产摘要或大小不匹配，未安装。");
+                verified += asset.Bytes;
             }
             if (ArchiveStore.ReadJson(SafePath.Resolve(stage, update.Manifest.Name)).Text("version") != update.Version) throw new OperationException("更新版本与清单不一致。");
             var originalHelper = paths.Resolve("app-helpers/InstalledUpdate.exe");
@@ -80,7 +104,8 @@ public sealed class WindowsUpdates : IDisposable
             var helper = SafePath.Resolve(stage, "InstalledUpdate.exe"); File.Copy(originalHelper, helper, false);
             using var process = Process.GetCurrentProcess();
             var job = new JsonObject { ["ProjectRoot"] = paths.Root, ["Stage"] = stage, ["Version"] = update.Version, ["ParentPid"] = 0, ["ParentStarted"] = "", ["LauncherPid"] = process.Id, ["LauncherStarted"] = process.StartTime.ToUniversalTime().ToString("o"), ["InstallerSha256"] = update.Installer.Sha256, ["ManifestSha256"] = update.Manifest.Sha256, ["CurrentManifestSha256"] = ArchiveStore.Digest(File.ReadAllBytes(paths.Resolve("application-files.json"))) };
-            ArchiveStore.WriteJson(SafePath.Resolve(stage, "update-job.private.json"), job); return stage;
+            cancellationToken.ThrowIfCancellationRequested();
+            ArchiveStore.WriteJson(SafePath.Resolve(stage, "update-job.private.json"), job); Report(UpdatePhase.Ready, totalBytes, totalBytes); return stage;
         }
         catch { SafePath.CheckTree(stage); Directory.Delete(stage, true); throw; }
     }
@@ -89,20 +114,38 @@ public sealed class WindowsUpdates : IDisposable
         SafePath.CheckTree(stage);
         var start = new ProcessStartInfo(SafePath.Resolve(stage, "InstalledUpdate.exe")) { UseShellExecute = false, CreateNoWindow = true }; start.ArgumentList.Add(SafePath.Resolve(stage, "update-job.private.json")); using var helper = Process.Start(start);
     }
+    public void Discard(string stage)
+    {
+        var root = paths.Resolve(".tmp") + Path.DirectorySeparatorChar;
+        if (!Path.GetFullPath(stage).StartsWith(root, StringComparison.OrdinalIgnoreCase) || !Regex.IsMatch(Path.GetFileName(stage), "^app-update-[a-f0-9]{32}$")) throw new OperationException("更新暂存不属于当前应用，未清理。");
+        var job = ArchiveStore.ReadJson(SafePath.Resolve(stage, "update-job.private.json"));
+        if (job.Text("ProjectRoot") != paths.Root || job.Text("Stage") != stage || job.Number("LauncherPid") != Environment.ProcessId) throw new OperationException("更新暂存身份发生变化，未清理。");
+        SafePath.CheckTree(stage); Directory.Delete(stage, true);
+    }
     private async Task<byte[]> ReadLimitedAsync(string url, int maximum, CancellationToken token)
     {
         using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token); response.EnsureSuccessStatusCode();
         await using var input = await response.Content.ReadAsStreamAsync(token); using var output = new MemoryStream();
         await CopyLimitedAsync(input, output, maximum, token); return output.ToArray();
     }
-    private static async Task CopyLimitedAsync(Stream input, Stream output, long maximum, CancellationToken token)
+    private static async Task CopyLimitedAsync(Stream input, Stream output, long maximum, CancellationToken token, Action<long>? progress = null)
     {
         var buffer = new byte[65536]; long total = 0; int length;
         while ((length = await input.ReadAsync(buffer, token)) != 0)
         {
             total += length; if (total > maximum) throw new OperationException("更新下载超过发行声明的大小，已停止。");
             await output.WriteAsync(buffer.AsMemory(0, length), token);
+            progress?.Invoke(total);
         }
+    }
+    private static async Task<string> HashAsync(Stream input, Action<long> progress, CancellationToken token)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256); var buffer = new byte[65536]; long total = 0; int length;
+        while ((length = await input.ReadAsync(buffer, token)) != 0)
+        {
+            token.ThrowIfCancellationRequested(); hash.AppendData(buffer, 0, length); total += length; progress(total);
+        }
+        token.ThrowIfCancellationRequested(); return Convert.ToHexStringLower(hash.GetHashAndReset());
     }
     public void Dispose() => client.Dispose();
 }

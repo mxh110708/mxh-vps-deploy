@@ -64,12 +64,15 @@ public sealed partial class MainWindow
     }
 
     private static Grid SettingRow(string title, string description, Symbol icon, FrameworkElement control)
+        => SettingRow(title, description, new SymbolIcon(icon) { Width = 20, Height = 20, Foreground = Brush(Paint.Icon) }, control);
+
+    private static Grid SettingRow(string title, string description, FrameworkElement icon, FrameworkElement control)
     {
         var grid = new Grid { Padding = new Thickness(22, 19, 22, 19), ColumnSpacing = 18 };
         grid.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        grid.Children.Add(new SymbolIcon(icon) { Width = 20, Height = 20, Foreground = Brush(Paint.Icon), VerticalAlignment = VerticalAlignment.Center });
+        icon.VerticalAlignment = VerticalAlignment.Center; grid.Children.Add(icon);
         var text = new StackPanel { Spacing = 5, VerticalAlignment = VerticalAlignment.Center };
         text.Children.Add(Text(title, 14)); if (description.Length != 0) text.Children.Add(Text(description, 12, true));
         Grid.SetColumn(text, 1); grid.Children.Add(text);

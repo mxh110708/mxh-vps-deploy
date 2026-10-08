@@ -14,14 +14,38 @@ public sealed partial class MainWindow
     private async Task CheckUpdates(bool automatic)
     {
         if (taskCancellation != null) { if (!automatic) Show("请等待当前任务结束后再更新。"); return; }
+        updateTask = true;
         try { await RunBackground("正在检查应用更新", async token =>
         {
             using var updates = CreateUpdates(); var update = await updates.CheckAsync(token);
-            if (update == null) { if (!automatic) Show("当前没有更高版本的正式桌面更新。", InfoBarSeverity.Success); return; }
-            if (!await ConfirmAsync(new("发现更新 " + update.Version, "下载并校验正式安装包，关闭应用后原位更新并重新打开。私人归档和本地配置保留。"), token)) return;
-            taskText.Text = "正在下载并校验应用更新。"; var stage = await updates.PrepareAsync(update, token); token.ThrowIfCancellationRequested(); SaveDraft(); SaveSettings(); updates.Start(stage); RecordUpdateStart(stage); closing = true;
+            if (update == null) { taskText.Text = "已是最新版本"; if (!automatic) Show("当前没有更高版本的正式桌面更新。", InfoBarSeverity.Success); return; }
+            taskText.Text = "发现新版本 v" + update.Version;
+            string? stage = null;
+            try
+            {
+                stage = await PrepareUpdateInDialog(updates, update, token);
+                if (stage == null) { taskText.Text = "已取消更新"; return; }
+                token.ThrowIfCancellationRequested(); SaveDraft(); SaveSettings();
+                taskText.Text = "正在打开安装进度窗口…"; var prepared = stage; updates.Start(prepared); stage = null; closing = true; RecordUpdateStart(prepared);
+            }
+            finally { if (stage != null) updates.Discard(stage); }
         }); }
-        catch (Exception error) { Show(error is OperationException safe ? safe.Message : "更新检查或下载未完成，请核对网络与更新代理。", InfoBarSeverity.Warning); }
+        catch (OperationCanceledException) { taskText.Text = "已取消更新"; Show("应用更新已取消。"); }
+        catch (Exception error) { taskText.Text = "应用更新未完成"; Show(error is OperationException safe ? safe.Message : "更新检查或下载未完成，请核对网络与更新代理。", InfoBarSeverity.Warning); }
+        finally { updateTask = false; }
+    }
+    private void DisplayUpdateProgress(ApplicationUpdateProgress value)
+    {
+        var bar = updateDialogProgress ?? taskProgress; bar.IsIndeterminate = value.TotalBytes == 0; bar.Value = value.Percent;
+        taskText.Text = value.Phase switch
+        {
+            UpdatePhase.Preparing => "正在读取更新清单…",
+            UpdatePhase.Downloading => $"正在下载应用更新 · {value.Percent:F0}% · {value.CompletedBytes / 1048576d:F1} / {value.TotalBytes / 1048576d:F1} MB",
+            UpdatePhase.Verifying => $"正在校验应用更新 · {value.Percent:F0}%",
+            _ => "下载与校验完成"
+        };
+        if (updateDialogStatus != null) updateDialogStatus.Text = taskText.Text;
+        ObserveUpdateProgress(value);
     }
     private async Task UiSmoke()
     {
@@ -40,7 +64,7 @@ public sealed partial class MainWindow
                 foreach (var id in new[] { "overview", "instances", "deploy", "clients", "network", "records", "settings" })
                 {
                     if (id == "clients" && flag == "--ui-smoke" && launchArguments.Contains("--exercise-forms")) scheme = ClientSchemes.New(paths);
-                    SelectPage(id); shell.UpdateLayout(); await Task.Delay(120); if (shell.ActualWidth < 800 || shell.ActualHeight < 500 || page.Children.Count == 0 || notice.Severity == InfoBarSeverity.Error && notice.IsOpen) throw new OperationException("WinUI 页面加载或布局失败。");
+                    Program.Trace(launchArguments, "Render " + id); SelectPage(id); shell.UpdateLayout(); await Task.Delay(120); if (shell.ActualWidth < 800 || shell.ActualHeight < 500 || page.Children.Count == 0 || notice.Severity == InfoBarSeverity.Error && notice.IsOpen) throw new OperationException("WinUI 页面加载或布局失败。");
                     if (flag == "--ui-smoke") await Capture(SafePath.Resolve(directory, id + ".png")); if (record) pages.Add(id);
                 }
             }

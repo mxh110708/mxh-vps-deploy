@@ -27,7 +27,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private readonly TextBlock caption = new() { FontSize = 13, Foreground = Brush(Paint.Muted), TextWrapping = TextWrapping.Wrap };
     private readonly InlineNotice notice = new();
     private readonly TextBlock taskText = new() { Text = "就绪", FontSize = 13, Foreground = Brush(Paint.Muted), TextWrapping = TextWrapping.Wrap };
-    private readonly Border taskProgress = new() { Height = 3, Background = Brush(Paint.Accent), Visibility = Visibility.Collapsed };
+    private readonly TransferProgressBar taskProgress = new() { Name = "TaskProgress", Height = 4, IsIndeterminate = false, Foreground = Brush(Paint.Accent), Background = Brush(Paint.Button), Visibility = Visibility.Collapsed };
     private readonly Button cancel = new() { Content = "取消任务", Visibility = Visibility.Collapsed };
     private readonly SemaphoreSlim dialogs = new(1);
     private readonly JsonObject settings;
@@ -36,6 +36,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private string? selectedInstance;
     private CancellationTokenSource? taskCancellation;
     private bool closing;
+    private bool updateTask;
     private string currentPage = "overview";
     private readonly string[] launchArguments;
 
@@ -71,7 +72,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
         taskBar.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) }); taskBar.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); taskBar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         taskBar.Children.Add(new StackPanel { Spacing = 6, VerticalAlignment = VerticalAlignment.Center, Children = { taskText, taskProgress } }); Grid.SetColumn(pageAction, 1); taskBar.Children.Add(pageAction); Grid.SetColumn(cancel, 2); taskBar.Children.Add(cancel);
         DesktopTypography.Mark(cancel, TypeRole.Body, 13); cancel.Padding = new Thickness(16, 8, 16, 8); cancel.CornerRadius = new CornerRadius(6); cancel.Background = Brush(Paint.Button); cancel.BorderBrush = Brush(Paint.ButtonBorder);
-        cancel.Click += (_, _) => { taskCancellation?.Cancel(); taskText.Text = "正在等待安全边界；远端步骤完成后再处理取消。"; cancel.IsEnabled = false; };
+        cancel.Click += (_, _) => { taskCancellation?.Cancel(); taskText.Text = updateTask ? "正在取消应用更新…" : "正在等待安全边界；远端步骤完成后再处理取消。"; cancel.IsEnabled = false; };
         Grid.SetRow(taskBar, 2); shell.Children.Add(taskBar);
         AppWindow.Closing += async (_, e) =>
         {
@@ -84,6 +85,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
             }
         };
         SetAppearance(settings.Text("Appearance", "Dark"));
+        root.Loaded += (_, _) => Program.Trace(arguments, "Root Loaded");
         root.Loaded += async (_, _) => { var scale = root.XamlRoot.RasterizationScale; var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea; AppWindow.Resize(new((int)Math.Min(1280 * scale, area.Width - 32 * scale), (int)Math.Min(850 * scale, area.Height - 32 * scale))); SelectPage("overview"); if (fontFallback) Show("所选字体暂时不可用，已使用内置原版字体。可在设置中重新选择或导入。", InfoBarSeverity.Warning); if (arguments.Contains("--verify-installed-update")) { await InstalledUpdateSmoke(); return; } if (arguments.Contains("--ui-smoke") || arguments.Contains("--verify-runtime")) { await UiSmoke(); return; } if (settings.Flag("AutoCheckUpdates")) await CheckUpdates(true); };
     }
     private static SolidColorBrush Brush(Paint role) => DesktopTheme.Brush(role);
@@ -198,8 +200,10 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private async Task RunBackground(string label, Func<CancellationToken, Task> action)
     {
         if (taskCancellation != null) throw new OperationException("已有任务运行，请等待结束。");
-        taskCancellation = new(); cancel.Visibility = Visibility.Visible; cancel.IsEnabled = true; taskProgress.Visibility = Visibility.Visible; taskText.Text = label; pageHost.IsEnabled = false; pageAction.IsEnabled = false; foreach (var button in navigation.Values) button.IsEnabled = false;
-        try { await action(taskCancellation.Token); }
+        taskCancellation = new(); cancel.Visibility = Visibility.Visible; cancel.IsEnabled = true; taskProgress.Value = 0; taskProgress.IsIndeterminate = true; taskProgress.Visibility = Visibility.Visible; taskText.Text = label; pageHost.IsEnabled = false; pageAction.IsEnabled = false; foreach (var button in navigation.Values) button.IsEnabled = false;
+        try { await action(taskCancellation.Token); if (taskText.Text == label) taskText.Text = "已完成"; }
+        catch (OperationCanceledException) { taskText.Text = "已取消"; throw; }
+        catch { taskText.Text = "任务未完成"; throw; }
         finally { taskCancellation.Dispose(); taskCancellation = null; pageHost.IsEnabled = true; pageAction.IsEnabled = true; foreach (var button in navigation.Values) button.IsEnabled = true; cancel.Visibility = Visibility.Collapsed; taskProgress.Visibility = Visibility.Collapsed; if (closing) { SaveDraft(); Close(); } }
     }
     private static string OutcomeLabel(TaskOutcome outcome) => outcome switch { TaskOutcome.Completed => "已完成", TaskOutcome.CompletedWithWarnings => "已完成，含未验收项", TaskOutcome.Cancelled => "已取消", TaskOutcome.NeedsRecovery => "待恢复", TaskOutcome.Failed => "失败", _ => "上次任务未确认结束" };

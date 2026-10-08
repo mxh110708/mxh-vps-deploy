@@ -47,8 +47,8 @@ namespace Mxh.VpsDeploy.Desktop
                 var old=DesktopFiles.Read(oldPath);
                 var next=DesktopFiles.CheckInstall(root,nextPath);
                 if(next.version!=job.Version || new Version(next.version)<=new Version(old.version)) throw new InvalidDataException();
-                var start=new ProcessStartInfo(setup) {UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=stage};
-                start.Arguments="/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCLOSEAPPLICATIONS /NORESTARTAPPLICATIONS /DIR="+Quote(root);
+                var start=new ProcessStartInfo(setup) {UseShellExecute=false,CreateNoWindow=false,WindowStyle=ProcessWindowStyle.Normal,WorkingDirectory=stage};
+                start.Arguments="/SP- /SILENT /NORESTART /NOCLOSEAPPLICATIONS /NORESTARTAPPLICATIONS /DIR="+Quote(root);
                 started=true;
                 using(var process=Process.Start(start))
                 {

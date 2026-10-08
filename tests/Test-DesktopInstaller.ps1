@@ -1,6 +1,6 @@
 #requires -Version 7.4
 [CmdletBinding()]
-param([string]$ProjectRoot=(Split-Path -Parent $PSScriptRoot),[string]$InitialPackageJson,[string]$Proxy)
+param([string]$ProjectRoot=(Split-Path -Parent $PSScriptRoot),[string]$InitialPackageJson,[string]$Proxy,[string]$EvidenceDirectory)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 if(-not $IsWindows){throw '安装生命周期验证需要 Windows。'}
@@ -8,6 +8,7 @@ $ProjectRoot=[IO.Path]::GetFullPath($ProjectRoot)
 $fixture=Join-Path $ProjectRoot ('.test-output/desktop-installer-'+[guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($fixture)|Out-Null
 $script:desktopPassed=0
+$fixtureFailure=$null
 function Assert-Desktop([bool]$Condition,[string]$Message){if(-not $Condition){throw $Message};$script:desktopPassed++}
 function Invoke-DesktopFixtureProcess {
  param([string]$Executable,[string[]]$Arguments,[switch]$MinimalPath,[int]$Timeout=240000)
@@ -71,17 +72,23 @@ try{
  $checksums=Join-Path $updateFixture 'SHA256SUMS.txt'
  @($setup,$files)|ForEach-Object{(Get-FileHash -LiteralPath $_).Hash.ToLowerInvariant()+'  '+[IO.Path]::GetFileName($_)}|Set-Content -LiteralPath $checksums -Encoding ascii
  $assets=@($setup,$files,$checksums)|ForEach-Object{@{name=[IO.Path]::GetFileName($_);browser_download_url=('https://github.com/mxh110708/mxh-vps-deploy/releases/download/v'+$nextVersion+'/'+[IO.Path]::GetFileName($_));digest=('sha256:'+(Get-FileHash -LiteralPath $_).Hash.ToLowerInvariant());size=(Get-Item -LiteralPath $_).Length;state='uploaded'}}
- @{tag_name=('v'+$nextVersion);draft=$false;prerelease=$false;assets=@($assets)}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $updateFixture 'release.json') -Encoding utf8
+ @{tag_name=('v'+$nextVersion);draft=$false;prerelease=$false;body="## 本次更新`n- 修正检查更新结束后的状态提示。`n- 在更新弹窗显示下载与校验进度。`n- 安装时显示进度窗口，保留私人归档和本地配置。`n`n这是隔离测试的示例更新说明。";assets=@($assets)}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $updateFixture 'release.json') -Encoding utf8
  Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'MXH-VPS-Deploy.exe') @('--verify-installed-update') -MinimalPath) -eq 0) 'actual WinUI check-update and confirmation download and launch update'
  $uiProof=Get-Content -LiteralPath (Join-Path $app '.tmp/ui-update-proof.json') -Raw|ConvertFrom-Json -AsHashtable
  Assert-Desktop ($uiProof.ui_update_started -and $uiProof.confirmation_clicked -and $uiProof.launcher_pid_recorded) 'real update confirmation and parent process handoff verified'
+ Assert-Desktop ($uiProof.release_notes_displayed) 'update dialog displays the release body returned by the GitHub-format metadata'
  Assert-Desktop ($uiProof.negative_checks.Count -eq 8) 'untrusted assets, corrupt downloads, size limits, cleanup and repeated version refused'
+ $statusProof=Get-Content -LiteralPath (Join-Path $app '.tmp/update-status-proof.json') -Raw|ConvertFrom-Json -AsHashtable
+ Assert-Desktop ($statusProof.cases.Count -eq 5) 'automatic/manual checks, failure, decline and cancelled download leave no busy status'
+ Assert-Desktop ($uiProof.progress.Downloading.in_dialog -and $uiProof.progress.Downloading.percent -eq 100 -and $uiProof.progress.Verifying.in_dialog -and $uiProof.progress.Verifying.percent -eq 100 -and $uiProof.progress.Ready.percent -eq 100) 'real transfer and SHA256 verification report visible monotonic progress inside the update dialog'
  $stage=[string]$uiProof.stage;$restartProof=Join-Path $app '.tmp/update-restart-proof.json'
  $watch=[Diagnostics.Stopwatch]::StartNew();while((-not(Test-Path -LiteralPath $restartProof) -or (Test-Path -LiteralPath $stage)) -and $watch.ElapsedMilliseconds -lt 120000){[Threading.Thread]::Sleep(100)}
  Assert-Desktop (Test-Path -LiteralPath $restartProof) 'update automatically restarts the new native EXE'
  $restarted=Get-Content -LiteralPath $restartProof -Raw|ConvertFrom-Json -AsHashtable
  Assert-Desktop ($restarted.winui_loaded -and $restarted.initial_theme -eq 'Light' -and $restarted.initial_font -eq ('Custom:'+$fontDigest+'.ttf') -and -not $restarted.font_fallback) 'restart loads WinUI and retained appearance/custom font'
  Assert-Desktop ((Get-VpsApplicationVersion $app).ToString() -eq $nextVersion) 'app version updated without uninstalling'
+ $installWindowProof=Get-Content -LiteralPath (Join-Path $app '.tmp/qa-install-window.json') -Raw|ConvertFrom-Json -AsHashtable
+ Assert-Desktop ($installWindowProof.version -eq $nextVersion -and $installWindowProof.progress_window_visible -and $installWindowProof.progress_gauge_visible) 'in-place update displays the real installer progress window and gauge'
  Assert-Desktop ((Get-FileHash -LiteralPath (Join-Path $app 'private/instances/record.txt')).Hash -eq $privateHash -and (Get-FileHash -LiteralPath (Join-Path $app 'config/app-defaults.local.json')).Hash -eq $localHash) 'in-place installer update preserves archive and local settings'
  $preferences=Get-Content -LiteralPath (Join-Path $app 'private/desktop-settings.json') -Raw|ConvertFrom-Json -AsHashtable
  Assert-Desktop ((Get-FileHash -LiteralPath $fontPath).Hash.ToLowerInvariant() -eq $fontDigest -and $preferences.Appearance -eq 'Light' -and $preferences.FontId -eq ('Custom:'+$fontDigest+'.ttf') -and -not $preferences.AutoCheckUpdates -and $preferences.UpdateProxy -eq 'http://127.0.0.1:2080') 'in-place update preserves imported font and appearance preferences'
@@ -89,6 +96,13 @@ try{
  $watch=[Diagnostics.Stopwatch]::StartNew();while((Test-Path -LiteralPath $stage) -and $watch.ElapsedMilliseconds -lt 15000){[Threading.Thread]::Sleep(50)}
  Assert-Desktop (-not(Test-Path -LiteralPath $stage)) 'successful installed update removes only its transient stage'
  Assert-Desktop (Test-Path -LiteralPath (Join-Path $app 'private/update-test-completed.txt')) 'tested update helper reaches restart handoff'
+ if($EvidenceDirectory){
+  $evidence=[IO.Path]::GetFullPath($EvidenceDirectory);$evidenceBoundary=[IO.Path]::GetFullPath((Join-Path $ProjectRoot '.tmp')).TrimEnd('\')+'\'
+  if(-not $evidence.StartsWith($evidenceBoundary,[StringComparison]::OrdinalIgnoreCase)){throw 'Evidence must stay in this project temporary directory.'}
+  [IO.Directory]::CreateDirectory($evidence)|Out-Null
+  foreach($name in @('about-application-icon.png','completed-update-status.png','ui-update-notes.png','ui-update-downloading.png','ui-update-verifying.png')){Copy-Item -LiteralPath (Join-Path $updateFixture $name) -Destination (Join-Path $evidence $name)}
+  foreach($name in @('ui-update-proof.json','update-status-proof.json','qa-install-window.json')){Copy-Item -LiteralPath (Join-Path $app ('.tmp/'+$name)) -Destination (Join-Path $evidence $name)}
+ }
  $uninstaller=Join-Path $app 'unins000.exe'
  Assert-Desktop ((Invoke-DesktopFixtureProcess $uninstaller @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')) -eq 0) 'normal uninstall defaults to keeping data'
  Assert-Desktop (-not(Test-Path -LiteralPath (Join-Path $app 'MXH-VPS-Deploy.exe')) -and (Get-FileHash -LiteralPath (Join-Path $app 'private/instances/record.txt')).Hash -eq $privateHash -and (Get-FileHash -LiteralPath (Join-Path $app 'config/app-defaults.local.json')).Hash -eq $localHash) 'keep-data uninstall removes app and keeps archive/settings'
@@ -108,8 +122,21 @@ try{
  Assert-Desktop (-not(Test-Path -LiteralPath $app)) 'explicit complete removal deletes only isolated app directory'
  Assert-Desktop ((Get-FileHash -LiteralPath $outside).Hash -eq $outsideHash) 'external authority is unaffected by complete app removal'
  Write-Host "Windows installer lifecycle passed: $script:desktopPassed assertions"
+}catch{
+ $fixtureFailure=$_
+ Write-Host ('Installer lifecycle failure before cleanup: '+$_.Exception.Message)
+ throw
 }finally{
  $prefix=[IO.Path]::GetFullPath((Join-Path $ProjectRoot '.test-output')).TrimEnd('\')+'\'
  if(-not [IO.Path]::GetFullPath($fixture).StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe installer fixture cleanup.'}
- if(Test-Path -LiteralPath $fixture){Remove-Item -LiteralPath $fixture -Recurse -Force}
+ # An assertion must not remove files from an update still using this fixture.
+ $owned=@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue|Where-Object{$_.ExecutablePath -and $_.ExecutablePath.StartsWith($fixture+'\',[StringComparison]::OrdinalIgnoreCase)})
+ foreach($item in $owned){
+  $process=Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
+  if($process){try{if(-not $process.WaitForExit(30000)){$process.Kill($true);$process.WaitForExit()}}finally{$process.Dispose()}}
+ }
+ if(Test-Path -LiteralPath $fixture){
+  try{Remove-Item -LiteralPath $fixture -Recurse -Force}
+  catch{if(-not $fixtureFailure){throw};Write-Warning 'Failed QA fixture retained; original failure preserved.'}
+ }
 }
