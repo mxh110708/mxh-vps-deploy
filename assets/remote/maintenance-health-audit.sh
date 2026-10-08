@@ -38,15 +38,32 @@ def digest(path):
 def version(command):
     r = run(*command)
     text = r.stdout or r.stderr
+    komari = re.search(r"Komari Monitor\s+v?([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?)", text)
+    if komari: return komari.group(1)
     return text.splitlines()[0].strip() if text and (r.returncode == 0 or "Komari Monitor" in text) else None
 
 def registered_binary(name, supported):
     command = run("systemctl", "show", "--property=ExecStart", "--value", name).stdout
     match = re.search(r"(?:^|\{\s*)path=(.*?)\s*;", command)
-    if match and match.group(1) in supported:
+    if match and pathlib.Path(match.group(1)) in {pathlib.Path(item) for item in supported}:
         path = pathlib.Path(match.group(1))
-        if path.is_file() and os.access(path, os.X_OK): return str(path)
+        if path.is_file() and not path.is_symlink() and path.resolve() == path and os.access(path, os.X_OK): return str(path)
     return None
+
+def monitoring_service(name, binary=None, config=None):
+    result = service(name, binary, config)
+    supported = [binary] if binary else (["/opt/komari/komari", "/var/lib/komari/komari", "/usr/local/bin/komari", "/usr/bin/komari"] if name == "komari.service" else ["/usr/local/bin/cloudflared", "/usr/bin/cloudflared"])
+    actual = registered_binary(name, supported) if result["Installed"] else None
+    layout = actual is not None and (not config or not pathlib.Path(config).is_symlink())
+    if name == "komari.service" and layout:
+        working = run("systemctl", "show", "--property=WorkingDirectory", "--value", name).stdout.strip()
+        root = pathlib.Path(working)
+        layout = working in ("/opt/komari", "/var/lib/komari") and root.resolve() == root
+    if result["Active"] and result["ProcessMatchesBinary"] is False:
+        layout = False
+    result["SupportedLayout"] = layout
+    result["Binary"] = actual
+    return result
 
 def certificate(path):
     result = {"Present": False, "NotAfter": None, "DaysRemaining": None}
@@ -105,9 +122,9 @@ result = {
    "RealityEntry": service("xray.service", "/usr/local/bin/xray", "/usr/local/etc/xray/config.json"),
    "AnyTlsEntry": service("sing-box-anytls.service", "/usr/local/bin/sing-box-anytls", "/etc/sing-box-anytls/config.json"),
    "ShadowsocksLanding": service("sing-box.service", "/usr/local/bin/sing-box", "/etc/sing-box/config.json"),
-   "KomariAgent": service("komari-agent.service", "/usr/local/bin/komari-agent", "/etc/komari-agent/config.json"),
-   "KomariController": service("komari.service", komari_controller_binary),
-   "Cloudflared": service("cloudflared.service", cloudflared_binary)
+   "KomariAgent": monitoring_service("komari-agent.service", "/usr/local/bin/komari-agent", "/etc/komari-agent/config.json"),
+   "KomariController": monitoring_service("komari.service", komari_controller_binary),
+   "Cloudflared": monitoring_service("cloudflared.service", cloudflared_binary)
  },
  "Versions": {
    "Xray": version(["/usr/local/bin/xray","version"]) if pathlib.Path("/usr/local/bin/xray").exists() else None,

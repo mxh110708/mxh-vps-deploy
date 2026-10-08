@@ -45,9 +45,11 @@ public sealed partial class MainWindow
     {
         var rows = MaintenanceTargets.Monitoring(plan, state).Select(target =>
         {
-            var button = Action(target.Scope == "KomariAgent" ? "管理 Agent" : target.Scope == "KomariController" ? "管理主控" : "管理 Tunnel", () => ManageMonitoring(plan, target.Scope));
-            button.IsEnabled = target.Installed;
-            return SettingRow(target.Name, (target.Installed ? "已归档 · " : "未纳管 · ") + target.Description, target.Scope == "Tunnel" ? Symbol.Link : Symbol.View, button);
+            var button = target.RequiresVerification
+                ? Action("核对并纳管", () => Submit(new(OperationKind.HealthAudit, selectedInstance!, new())))
+                : Action(target.Scope == "KomariAgent" ? "管理 Agent" : target.Scope == "KomariController" ? "管理主控" : "管理 Tunnel", () => ManageMonitoring(plan, target.Scope));
+            button.IsEnabled = target.Installed || target.RequiresVerification;
+            return SettingRow(target.Name, target.Status + " · " + target.Description, target.Scope == "Tunnel" ? Symbol.Link : Symbol.View, button);
         }).ToArray();
         return SettingsGroup(rows);
     }

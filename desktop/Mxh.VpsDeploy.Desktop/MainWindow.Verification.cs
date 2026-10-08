@@ -80,6 +80,7 @@ public sealed partial class MainWindow
             if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-desktop")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "desktop-regression-proof.json"), await DesktopRegression(outputDirectory));
             if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-deployment")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "deployment-regression-proof.json"), await DeploymentRegression(outputDirectory));
             if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-maintenance")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "maintenance-regression-proof.json"), await MaintenanceRegression(outputDirectory));
+            if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-storage")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "storage-regression-proof.json"), await StorageRegression(outputDirectory));
             var preferenceVerified = false;
             if (flag == "--ui-smoke") await Compact(outputDirectory);
             if (review)
@@ -98,7 +99,7 @@ public sealed partial class MainWindow
             var timer = DispatcherQueue.CreateTimer(); timer.Interval = TimeSpan.FromMilliseconds(400); timer.Tick += (_, _) => { timer.Stop(); dialog.Hide(); }; timer.Start(); await ShowDialog(dialog);
             ArchiveStore.WriteJson(proofPath, new JsonObject { ["winui_loaded"] = true, ["pages"] = pages, ["engine"] = "dotnet", ["runtime"] = RuntimeInformation.FrameworkDescription, ["runtime_paths_local"] = Path.GetDirectoryName(typeof(object).Assembly.Location)!.Equals(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase), ["powershell_loaded"] = AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name == "System.Management.Automation"), ["wpf_loaded"] = AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name == "PresentationFramework"), ["initial_theme"] = initialTheme, ["themes_reviewed"] = review ? new JsonArray("Dark", "Light") : null, ["appearance_preference_verified"] = preferenceVerified, ["initial_font"] = initialFont, ["font_fallback"] = fontFallback, ["font_preference_verified"] = fontPreferenceVerified, ["fonts_reviewed"] = review ? new JsonArray("Route", "WenKai", "Custom") : null });
         }
-        catch (Exception error) { ArchiveStore.WriteJson(proofPath, new JsonObject { ["winui_loaded"] = false, ["error"] = error.GetType().Name, ["safe_message"] = error is OperationException safe ? safe.Message : null }); Environment.ExitCode = 1; }
+        catch (Exception error) { Program.Trace(launchArguments, "UI fixture stack: " + error.StackTrace); ArchiveStore.WriteJson(proofPath, new JsonObject { ["winui_loaded"] = false, ["error"] = error.GetType().Name, ["safe_message"] = error is OperationException safe ? safe.Message : null }); Environment.ExitCode = 1; }
         finally { scheme = null; Close(); }
     }
     private static double FontWidth(FontFamily family)

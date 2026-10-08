@@ -25,3 +25,16 @@ public sealed class WindowsManagedKeyAccess : IPrivateKeyAccess
         new FileInfo(path).SetAccessControl(access);
     }
 }
+
+public static class WindowsPrivateDirectoryAccess
+{
+    public static void Prepare(string directory)
+    {
+        SafePath.CheckLinks(directory);
+        if (Directory.EnumerateFileSystemEntries(directory).Any()) throw new OperationException("目标目录已有内容，未修改目录权限。");
+        var user = WindowsIdentity.GetCurrent().User ?? throw new OperationException("无法识别当前 Windows 用户。");
+        var access = new DirectorySecurity(); access.SetAccessRuleProtection(true, false);
+        access.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+        new DirectoryInfo(directory).SetAccessControl(access);
+    }
+}

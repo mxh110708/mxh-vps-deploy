@@ -3,7 +3,7 @@ using System.Text.Json.Nodes;
 namespace Mxh.VpsDeploy.Core;
 
 public sealed record ProxyCoreTarget(string Protocol, string Name, string Service, string ArchivedVersion, string TargetVersion, bool Enabled);
-public sealed record MonitoringTarget(string Scope, string Name, string Description, bool Installed);
+public sealed record MonitoringTarget(string Scope, string Name, string Description, bool Installed, bool RequiresVerification = false, string Status = "");
 
 public static class MaintenanceTargets
 {
@@ -16,10 +16,21 @@ public static class MaintenanceTargets
             plan.Flag("ProtocolInventory." + role + ".Enabled", plan.Text("Role") == role))).ToArray();
     public static IReadOnlyList<MonitoringTarget> Monitoring(JsonObject plan, JsonObject state) =>
     [
-        new("KomariAgent", "Komari Agent", "采集当前 VPS 的运行指标，发送给 Komari 主控。", state.Flag("KomariInstalled", plan.Flag("Komari.Enabled"))),
-        new("KomariController", "Komari 主控", "在当前 VPS 保存监控数据、提供网页面板。", state.Flag("KomariController.Installed")),
-        new("Tunnel", "Cloudflare Tunnel", "将当前 VPS 上的主控网页连接到 Cloudflare 访问入口。", state.Flag("Cloudflared.Installed"))
+        Monitor("KomariAgent", "Komari Agent", "采集当前 VPS 的运行指标，发送给 Komari 主控。", state.Flag("KomariInstalled", plan.Flag("Komari.Enabled")), state.ContainsKey("KomariInstalled") || plan.Flag("Komari.Enabled"), "KomariAgent", state),
+        Monitor("KomariController", "Komari 主控", "在当前 VPS 保存监控数据、提供网页面板。", state.Flag("KomariController.Installed"), state.At("KomariController.Installed") != null, "KomariController", state),
+        Monitor("Tunnel", "Cloudflare Tunnel", "将当前 VPS 上的主控网页连接到 Cloudflare 访问入口。", state.Flag("Cloudflared.Installed"), state.At("Cloudflared.Installed") != null, "Cloudflared", state)
     ];
+    private static MonitoringTarget Monitor(string scope, string name, string description, bool installed, bool hasRecord, string key, JsonObject state)
+    {
+        var current = state.At("MonitoringInventory." + key);
+        var history = state.At("DesktopImport." + key + "LastKnown");
+        var supported = current.Flag("SupportedLayout", true);
+        var connectionMatches = current.Flag("ConnectionConfigMatchesArchive", true);
+        var pending = !hasRecord && current == null && history != null && history.Flag("Installed", true);
+        var status = current != null ? !installed ? "核验未安装" : !supported ? "已发现，布局不支持自动管理" : !connectionMatches ? "连接配置与归档不同，请维护者核对" : current.Flag("Active") ? "已核验 · 运行中" : current.Flag("Enabled") ? "已核验 · 已启用，未运行" : "已核验 · 已停用"
+            : installed ? "已归档，当前状态待核验" : pending ? "历史记录待核验" : "未纳管";
+        return new(scope, name, description, installed && supported && connectionMatches, pending, status);
+    }
     public static string TargetVersion(string scope, JsonObject versions) => scope switch
     {
         "KomariAgent" => versions.Text("komari_agent.version"), "KomariController" => versions.Text("komari_controller.version"), _ => ""

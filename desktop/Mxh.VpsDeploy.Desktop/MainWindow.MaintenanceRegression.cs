@@ -57,6 +57,11 @@ public sealed partial class MainWindow
         var unavailable = MonitoringControls(plan, uninstalled);
         page.Children.Clear(); page.Children.Add(unavailable); shell.UpdateLayout();
         Require(!Find<Button>(unavailable).Single(b => b.Content as string == "管理 Agent").IsEnabled, "未安装 Agent 允许升级。");
+        var offlinePlan = plan.DeepClone().AsObject(); offlinePlan.Put("Komari.Enabled", JsonValue.Create(false));
+        var offlineState = new JsonObject { ["DesktopImport"] = new JsonObject { ["KomariAgentLastKnown"] = new JsonObject { ["Installed"] = true }, ["KomariControllerLastKnown"] = new JsonObject { ["Version"] = "1.5.0-fix1" }, ["CloudflaredLastKnown"] = new JsonObject { ["Installed"] = true } } };
+        var pendingMonitoring = MonitoringControls(offlinePlan, offlineState); page.Children.Clear(); page.Children.Add(pendingMonitoring); shell.UpdateLayout();
+        Require(Find<Button>(pendingMonitoring).Count(b => b.Content as string == "核对并纳管" && b.IsEnabled) == 3, "历史监控归档无法发起只读核对。");
+        Require(Find<Button>(pendingMonitoring).All(b => !(b.Content as string ?? "").StartsWith("管理")), "历史监控信息直接开放远端维护。");
         var now = DateTimeOffset.UtcNow;
         store.AppendHistory(new("qa-history-1", OperationKind.HealthAudit, now, now, TaskOutcome.Completed, "health", InstanceRelativePath: instance.RelativePath));
         store.AppendHistory(new("qa-history-2", OperationKind.Komari, now, now, TaskOutcome.Cancelled, "maintenance-transaction-status", InstanceRelativePath: instance.RelativePath, TargetLabel: "Komari Agent · 升级"));

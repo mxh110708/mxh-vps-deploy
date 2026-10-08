@@ -43,6 +43,9 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
     public List<string> Commands { get; } = new(); public int Mutations { get; private set; } public string FailAsset { get; set; } = ""; public string StatusTaskId { get; set; } = ""; public string StatusPhase { get; set; } = "None"; public string ArmedComponents { get; private set; } = "";
     public List<SshEndpoint> Endpoints { get; } = new();
     public bool MonitoringPresent { get; set; } = true;
+    public JsonObject HealthAudit { get; set; } = new() { ["SchemaVersion"] = 2, ["CollectedAt"] = DateTimeOffset.UtcNow, ["ChecksIncomplete"] = new JsonArray(), ["Services"] = new JsonObject { ["KomariAgent"] = HealthService(false), ["KomariController"] = HealthService(false), ["Cloudflared"] = HealthService(false) } };
+    public JsonObject AgentConfiguration { get; set; } = new() { ["endpoint"] = "https://monitor.example.com", ["token"] = "synthetic-agent-token" };
+    public static JsonObject HealthService(bool installed, bool enabled = false, bool active = false, bool supported = true) => new() { ["Installed"] = installed, ["Enabled"] = enabled, ["Active"] = active, ["SupportedLayout"] = supported };
     public Task<IRemoteSession> OpenAsync(SshEndpoint endpoint, IUserInteraction interaction, CancellationToken cancellationToken) { cancellationToken.ThrowIfCancellationRequested(); Endpoints.Add(endpoint); return Task.FromResult<IRemoteSession>(this); }
     public Task<CommandResult> RunAsync(string command, TimeSpan timeout, CancellationToken cancellationToken) => Task.FromResult(new CommandResult(0, ArchiveStore.Digest(Encoding.UTF8.GetBytes("fixture-archive")) + "  file", ""));
     public Task<CommandResult> RunScriptAsync(string payload, TimeSpan timeout, bool mutating, CancellationToken cancellationToken)
@@ -57,6 +60,7 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
             return match.Success ? Encoding.UTF8.GetString(Convert.FromBase64String(match.Groups[1].Value)) : "";
         }
         if (asset == "maintenance-komari.sh") return Task.FromResult(new CommandResult(0, Parameter("ACTION") == "Status" ? string.Join('\n', new[] { "komari-agent.service", "komari.service", "cloudflared.service" }.Select(service => service + "=" + (MonitoringPresent ? "true,true,true" : "false,false,false"))) : "VPSDEPLOY_KOMARI_LIFECYCLE_OK\n", ""));
+        if (asset == "maintenance-health-audit.sh") return Task.FromResult(new CommandResult(0, Marker("HEALTH_AUDIT", HealthAudit.ToJsonString()), ""));
         foreach (var role in DeploymentPlans.Roles[..3]) protocolInventory[role] ??= new JsonObject { ["Installed"] = false, ["Enabled"] = false, ["Active"] = false };
         if (asset is "xray-apply-config.sh" or "anytls-apply-config.sh" or "sing-box-apply-config.sh")
         {
@@ -81,7 +85,7 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
         if (deploymentOutput != null) return Task.FromResult(new CommandResult(0, deploymentOutput, ""));
         var output = asset switch { "audit.sh" => Marker("OS_ID", "debian") + Marker("OS_VERSION", "13") + Marker("ARCH", "x86_64") + Marker("MEMORY_KIB", "1048576") + Marker("EXISTING_SERVICES", "") + Marker("NFT_LINES", "0"), "maintenance-health-audit.sh" => Marker("HEALTH_AUDIT", "{\"SchemaVersion\":1}"), "protocol-migration-arm-rollback.sh" => Marker("BACKUP_DIR", Backup), "network-tuning.sh" => Marker("BACKUP_DIR", "/root/fixture-network"), "maintenance-transaction-commit.sh" => "VPSDEPLOY_MAINTENANCE_COMMITTED\n", "maintenance-transaction-status.sh" => Marker("TRANSACTION_BACKUP", Backup) + Marker("TRANSACTION_PHASE", StatusPhase) + Marker("CONTROL_TASK_ID", StatusTaskId), "protocol-migration-trigger-rollback.sh" => "VPSDEPLOY_MIGRATION_ROLLBACK_OK\n", _ => "" }; return Task.FromResult(new CommandResult(0, output, ""));
     }
-    public Task<byte[]> ReadFileAsync(string absolutePath, CancellationToken cancellationToken) => Task.FromResult(Encoding.UTF8.GetBytes("{}"));
+    public Task<byte[]> ReadFileAsync(string absolutePath, CancellationToken cancellationToken) => Task.FromResult(Encoding.UTF8.GetBytes(absolutePath == "/etc/komari-agent/config.json" ? AgentConfiguration.ToJsonString() : "{}"));
     public Task DownloadAsync(string absolutePath, string destination, CancellationToken cancellationToken) { Directory.CreateDirectory(Path.GetDirectoryName(destination)!); File.WriteAllText(destination, "fixture-archive"); return Task.CompletedTask; }
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }

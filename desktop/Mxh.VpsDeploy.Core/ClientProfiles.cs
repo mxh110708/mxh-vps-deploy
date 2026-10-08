@@ -5,7 +5,10 @@ namespace Mxh.VpsDeploy.Core;
 
 public static class ClientProfiles
 {
-    public sealed record NodePair(string Name, string Role, string Family, JsonObject Clash, JsonObject SingBox, string EgressFamily = "IPv4");
+    public sealed record NodePair(string Name, string Role, string Family, JsonObject Clash, JsonObject SingBox, string EgressFamily = "IPv4", bool IsBackup = false)
+    {
+        public string DisplayName => IsBackup ? Name[..^7] + " · 备用入口" : Name;
+    }
     public static IEnumerable<NodePair> Nodes(JsonObject plan, JsonObject secrets, bool enabledOnly = false)
     {
         foreach (var role in DeploymentPlans.Roles[..3])
@@ -21,7 +24,7 @@ public static class ClientProfiles
                 {
                     var name = plan.Text("NodeName") + (role == "ShadowsocksLanding" ? "." + egress + "-Exit" : "") + (plan.Text("Server.IPv6") == "" ? "" : "-" + family);
                     if (role is "RealityEntry" or "AnyTlsEntry" && DeploymentPlans.Roles[..2].Count(r => plan.Flag("ProtocolInventory." + r + ".Installed", DeploymentPlans.Uses(plan, r))) > 1) name += role == "RealityEntry" ? "-Reality" : "-AnyTLS";
-                    foreach (var port in role == "RealityEntry" && plan.Number("Ports.XrayBackup") > 0 ? new[] { plan.Number("Ports.XrayPrimary"), plan.Number("Ports.XrayBackup") } : new[] { plan.Number(role == "RealityEntry" ? "Ports.XrayPrimary" : role == "AnyTlsEntry" ? "Ports.AnyTlsPrimary" : "Ports.LandingShadowsocks") })
+                    foreach (var port in (role == "RealityEntry" && plan.Number("Ports.XrayBackup") > 0 ? new[] { plan.Number("Ports.XrayPrimary"), plan.Number("Ports.XrayBackup") } : new[] { plan.Number(role == "RealityEntry" ? "Ports.XrayPrimary" : role == "AnyTlsEntry" ? "Ports.AnyTlsPrimary" : "Ports.LandingShadowsocks") }).Distinct())
                     {
                         var nodeName = name + (role == "RealityEntry" && port != plan.Number("Ports.XrayPrimary") ? "-Backup" : "");
                         var clash = new JsonObject { ["name"] = nodeName, ["server"] = address, ["port"] = port, ["udp"] = true };
@@ -43,7 +46,7 @@ public static class ClientProfiles
                             clash["type"] = "ss"; clash["cipher"] = plan.Text("Shadowsocks.Method"); clash["password"] = password;
                             sing["type"] = "shadowsocks"; sing["method"] = plan.Text("Shadowsocks.Method"); sing["password"] = password;
                         }
-                        yield return new(nodeName, role, family, clash, sing, egress);
+                        yield return new(nodeName, role, family, clash, sing, egress, role == "RealityEntry" && port != plan.Number("Ports.XrayPrimary"));
                     }
                 }
             }

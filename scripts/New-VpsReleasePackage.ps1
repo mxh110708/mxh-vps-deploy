@@ -57,6 +57,7 @@ try{
  if($TestBuild){$compile+='/define:DESKTOP_TEST'}
  $targets=@(
   @{Name='app-helpers/SetupGuard.exe';Main='Mxh.VpsDeploy.Desktop.SetupGuard';Sources=@('src/desktop/SetupGuard.cs','src/desktop/DesktopFiles.cs')},
+  @{Name='app-helpers/PrivateData.exe';Main='Mxh.VpsDeploy.Desktop.PrivateData';Sources=@('src/desktop/PrivateData.cs','src/desktop/DesktopFiles.cs')},
   @{Name='app-helpers/InstalledUpdate.exe';Main='Mxh.VpsDeploy.Desktop.InstalledUpdate';Sources=@('src/desktop/InstalledUpdate.cs','src/desktop/DesktopFiles.cs')},
   @{Name='app-helpers/CleanupUpdate.exe';Main='Mxh.VpsDeploy.Desktop.CleanupUpdate';Sources=@('src/desktop/CleanupUpdate.cs','src/desktop/DesktopFiles.cs')}
  )
@@ -67,7 +68,7 @@ try{
   $compilerMessages=@(& $compiler @compileArgs)
   if($LASTEXITCODE -ne 0){$compilerMessages|Write-Host;throw ('桌面原生 EXE 编译失败：'+$target.Name)}
  }
- $critical=@('MXH-VPS-Deploy.exe','MXH-VPS-Deploy.dll','Mxh.VpsDeploy.Core.dll','Microsoft.WinUI.dll','System.Private.CoreLib.dll','runtime/python/python.exe','app-helpers/InstalledUpdate.exe','app-helpers/SetupGuard.exe','app-helpers/CleanupUpdate.exe')
+ $critical=@('MXH-VPS-Deploy.exe','MXH-VPS-Deploy.dll','Mxh.VpsDeploy.Core.dll','Microsoft.WinUI.dll','System.Private.CoreLib.dll','runtime/python/python.exe','app-helpers/InstalledUpdate.exe','app-helpers/SetupGuard.exe','app-helpers/CleanupUpdate.exe','app-helpers/PrivateData.exe')
  @{schema_version=2;engine='dotnet';ui='winui3';test_build=[bool]$TestBuild;files=@($critical|ForEach-Object{@{path=$_;sha256=(Get-FileHash -LiteralPath (Join-Path $bundle $_)).Hash.ToLowerInvariant()}});versions=@{dotnet=(Get-Content -Raw -LiteralPath (Join-Path $bundle 'MXH-VPS-Deploy.runtimeconfig.json')|ConvertFrom-Json -AsHashtable).runtimeOptions.includedFrameworks[0].version;windows_app_sdk='1.8.260804001';ssh_net='2026.0.0';python=$dependencies.Assets.python.version;yaml=$dependencies.Assets.yaml.version}}|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $bundle 'desktop-runtime.json') -Encoding utf8
  $proof=Join-Path $bundle 'runtime-proof.json'
  $start=[Diagnostics.ProcessStartInfo]::new((Join-Path $bundle 'MXH-VPS-Deploy.exe'));$start.UseShellExecute=$false;$start.CreateNoWindow=$true

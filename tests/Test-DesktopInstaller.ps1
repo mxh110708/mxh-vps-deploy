@@ -38,6 +38,12 @@ try{
  Assert-Desktop ($runtimeProof.winui_loaded -and $runtimeProof.runtime_paths_local -and -not $runtimeProof.wpf_loaded -and -not $runtimeProof.powershell_loaded) 'real WinUI 3 and private .NET runtime loaded without PowerShell or WPF'
  Remove-Item -LiteralPath $proof
  if(Test-Path -LiteralPath ($proof+'.startup.txt')){Remove-Item -LiteralPath ($proof+'.startup.txt')}
+ @{synthetic_only=$true}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $app 'qa-ui-review.fixture.json') -Encoding utf8
+ $storageProof=Join-Path $app '.tmp/storage-ui/runtime-proof.json';[IO.Directory]::CreateDirectory((Split-Path -Parent $storageProof))|Out-Null
+ Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'MXH-VPS-Deploy.exe') @('--ui-smoke',$storageProof,'--app-root',$app,'--exercise-storage')) -eq 0) 'native node picker and archive migration UI works'
+ $storageUi=Get-Content -Raw -LiteralPath (Join-Path $app '.tmp/storage-ui/storage-regression-proof.json')|ConvertFrom-Json
+ Assert-Desktop ($storageUi.migration_roundtrip -and $storageUi.backup_opt_in -and $storageUi.select_and_clear_visible -and $storageUi.custom_font_rendered) 'storage and selection behavior is verified by the real WinUI frontend'
+ Remove-Item -LiteralPath (Join-Path $app 'qa-ui-review.fixture.json')
  [IO.Directory]::CreateDirectory((Join-Path $app 'private/instances'))|Out-Null
  [IO.Directory]::CreateDirectory((Join-Path $app '.cache/fixture'))|Out-Null
  'fixture archive'|Set-Content -LiteralPath (Join-Path $app 'private/instances/record.txt')
@@ -103,15 +109,25 @@ try{
   foreach($name in @('about-application-icon.png','completed-update-status.png','ui-update-notes.png','ui-update-downloading.png','ui-update-verifying.png')){Copy-Item -LiteralPath (Join-Path $updateFixture $name) -Destination (Join-Path $evidence $name)}
   foreach($name in @('ui-update-proof.json','update-status-proof.json','qa-install-window.json')){Copy-Item -LiteralPath (Join-Path $app ('.tmp/'+$name)) -Destination (Join-Path $evidence $name)}
  }
+ $custom=Join-Path $fixture '自定义私人归档';$owner=[guid]::NewGuid().ToString('N')
+ $oldPrivate=[IO.Path]::GetFullPath((Join-Path $app 'private'));$custom=[IO.Path]::GetFullPath($custom)
+ if(-not $oldPrivate.StartsWith($fixture+'\',[StringComparison]::OrdinalIgnoreCase) -or -not $custom.StartsWith($fixture+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe archive fixture relocation.'}
+ Move-Item -LiteralPath $oldPrivate -Destination $custom
+ @{SchemaVersion=1;OwnerId=$owner;AppRoot=$app}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $custom '.mxh-private-directory.json') -Encoding utf8
+ @{SchemaVersion=1;OwnerId=$owner;Directory=$custom}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $app 'archive-location.private.json') -Encoding utf8
+ $customProof=Join-Path $app '.tmp/custom-location-proof.json'
+ Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'MXH-VPS-Deploy.exe') @('--verify-runtime',$customProof)) -eq 0) 'native EXE opens the custom private directory'
+ $customRuntime=Get-Content -Raw -LiteralPath $customProof|ConvertFrom-Json
+ Assert-Desktop (-not $customRuntime.font_fallback -and $customRuntime.initial_font -eq ('Custom:'+$fontDigest+'.ttf')) 'custom archive preserves imported font rendering'
  $uninstaller=Join-Path $app 'unins000.exe'
  Assert-Desktop ((Invoke-DesktopFixtureProcess $uninstaller @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')) -eq 0) 'normal uninstall defaults to keeping data'
- Assert-Desktop (-not(Test-Path -LiteralPath (Join-Path $app 'MXH-VPS-Deploy.exe')) -and (Get-FileHash -LiteralPath (Join-Path $app 'private/instances/record.txt')).Hash -eq $privateHash -and (Get-FileHash -LiteralPath (Join-Path $app 'config/app-defaults.local.json')).Hash -eq $localHash) 'keep-data uninstall removes app and keeps archive/settings'
+ Assert-Desktop (-not(Test-Path -LiteralPath (Join-Path $app 'MXH-VPS-Deploy.exe')) -and (Get-FileHash -LiteralPath (Join-Path $custom 'instances/record.txt')).Hash -eq $privateHash -and (Get-FileHash -LiteralPath (Join-Path $app 'config/app-defaults.local.json')).Hash -eq $localHash -and (Test-Path -LiteralPath (Join-Path $app 'archive-location.private.json'))) 'keep-data uninstall preserves custom directory, locator and local settings'
  Assert-Desktop ((Invoke-DesktopFixtureProcess $next.Installer $installArgs) -eq 0) 'reinstall supports retained local data'
- Assert-Desktop ((Get-FileHash -LiteralPath (Join-Path $app 'private/instances/record.txt')).Hash -eq $privateHash) 'reinstall does not replace retained archive'
+ Assert-Desktop ((Get-FileHash -LiteralPath (Join-Path $custom 'instances/record.txt')).Hash -eq $privateHash) 'reinstall does not replace retained custom archive'
  $outsideDirectory=Join-Path $fixture 'outside-data';[IO.Directory]::CreateDirectory($outsideDirectory)|Out-Null
  $outsideRecord=Join-Path $outsideDirectory 'record.txt';'fixture outside data'|Set-Content -LiteralPath $outsideRecord
  $outsideRecordHash=(Get-FileHash -LiteralPath $outsideRecord).Hash
- $junction=Join-Path $app 'private/linked-data'
+ $junction=Join-Path $custom 'linked-data'
  New-Item -ItemType Junction -Path $junction -Target $outsideDirectory|Out-Null
  try{
   Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'unins000.exe') @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/REMOVEDATA=1')) -ne 0) 'complete removal refuses a linked data directory'
@@ -120,6 +136,7 @@ try{
  Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'unins000.exe') @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/REMOVEDATA=1')) -eq 0) 'explicit delete-data uninstall succeeds'
  $watch=[Diagnostics.Stopwatch]::StartNew();while((Test-Path -LiteralPath $app) -and $watch.ElapsedMilliseconds -lt 15000){[Threading.Thread]::Sleep(50)}
  Assert-Desktop (-not(Test-Path -LiteralPath $app)) 'explicit complete removal deletes only isolated app directory'
+ Assert-Desktop (-not(Test-Path -LiteralPath $custom)) 'explicit complete removal also deletes owned custom private directory'
  Assert-Desktop ((Get-FileHash -LiteralPath $outside).Hash -eq $outsideHash) 'external authority is unaffected by complete app removal'
  Write-Host "Windows installer lifecycle passed: $script:desktopPassed assertions"
 }catch{

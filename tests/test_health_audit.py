@@ -16,7 +16,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 class HealthAuditTests(unittest.TestCase):
-    def audit(self, timeout_command=None, known=True):
+    def audit(self, timeout_command=None, known=True, supported_controller=True):
         with tempfile.TemporaryDirectory(prefix='health-audit-',dir=ROOT/'.tmp') as directory:
             root=Path(directory)
             body=(ROOT/'assets/remote/maintenance-health-audit.sh').read_text().split("<<'PY'\n",1)[1].rsplit('\nPY',1)[0]
@@ -36,7 +36,13 @@ class HealthAuditTests(unittest.TestCase):
                 code=0;out=''
                 if args[0]=='systemctl':
                     if args[1]=='show':
-                        out='123' if '--property=MainPID' in args else '{ path='+(root/'opt/komari/komari').as_posix()+' ; argv[]=fixture ; }'
+                        if '--property=MainPID' in args:
+                            out='123'
+                        elif '--property=WorkingDirectory' in args:
+                            out=(root/'opt/komari').as_posix()
+                        else:
+                            binary='usr/local/bin/komari-agent' if args[-1]=='komari-agent.service' else 'opt/komari/komari' if supported_controller else 'custom/komari'
+                            out='{ path='+(root/binary).as_posix()+' ; argv[]=fixture ; }'
                     elif args[1] in ('is-active','is-enabled'):
                         code=0 if args[-1] in ('komari-agent.service','komari.service','mxh-certbot-renew.timer') else 1
                     elif args[1]=='cat':
@@ -63,6 +69,13 @@ class HealthAuditTests(unittest.TestCase):
         self.assertEqual(audit['Versions']['KomariAgent'],'1.5.11')
         self.assertTrue(audit['AgentVersionEvidence']['Identified'])
         self.assertTrue(all(Path(x[0]).name!='komari-agent' for x in calls))
+        self.assertTrue(audit['Services']['KomariAgent']['SupportedLayout'])
+        self.assertTrue(audit['Services']['KomariController']['SupportedLayout'])
+
+    def test_unknown_controller_layout_is_not_promoted(self):
+        audit,_=self.audit(supported_controller=False)
+        self.assertTrue(audit['Services']['KomariController']['Installed'])
+        self.assertFalse(audit['Services']['KomariController']['SupportedLayout'])
 
     def test_unknown_agent_is_not_guessed(self):
         audit,_=self.audit(known=False)
@@ -82,7 +95,7 @@ class HealthAuditTests(unittest.TestCase):
         self.assertTrue(audit['Certificates']['AnyTls']['Present'])
         self.assertGreater(audit['Certificates']['Reality']['DaysRemaining'],50)
         self.assertTrue(audit['Timers']['CertbotRenewActive'])
-        self.assertEqual(audit['Versions']['KomariController'],'Komari Monitor 1.5.1')
+        self.assertEqual(audit['Versions']['KomariController'],'1.5.1')
 
 
 if __name__=='__main__':

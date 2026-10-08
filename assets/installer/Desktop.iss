@@ -59,6 +59,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; Flags: checkedonce
 #include "files.iss"
 Source: "{#BundleRoot}\application-files.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BundleRoot}\app-helpers\SetupGuard.exe"; Flags: dontcopy
+Source: "{#BundleRoot}\app-helpers\PrivateData.exe"; Flags: dontcopy
 Source: "{#BundleRoot}\application-files.json"; DestName: "new-application-files.json"; Flags: dontcopy
 
 [Icons]
@@ -75,6 +76,7 @@ Filename: "{app}\MXH-VPS-Deploy.exe"; Description: "启动 MXH VPS Deploy"; Flag
 [Code]
 var
   DeleteApplicationData: Boolean;
+  PrivateDataHelper: String;
 #if IsTestBuild == "1"
   QaProgressRecorded: Boolean;
 
@@ -140,6 +142,7 @@ var
   LabelText: TNewStaticText;
   Proceed, Cancel: TNewButton;
   AppDirectory: String;
+  HelperResult: Integer;
 begin
   DeleteApplicationData := False;
   Result := True;
@@ -160,7 +163,7 @@ begin
       LabelText := TNewStaticText.Create(Form); LabelText.Parent := Form;
       LabelText.SetBounds(ScaleX(24), ScaleY(132), ScaleX(392), ScaleY(52));
       LabelText.AutoSize := False; LabelText.WordWrap := True;
-      LabelText.Caption := '彻底删除仅作用于本应用安装目录，包含其中的归档、密钥、配置、日志和缓存。';
+      LabelText.Caption := '彻底删除应用安装目录及本应用的私人归档目录，包含归档、密钥、配置、日志和缓存。';
       Proceed := TNewButton.Create(Form); Proceed.Parent := Form;
       Proceed.SetBounds(ScaleX(230), ScaleY(204), ScaleX(88), ScaleY(28));
       Proceed.Caption := '继续卸载'; Proceed.ModalResult := mrOk; Proceed.Default := True;
@@ -177,6 +180,15 @@ begin
        not DataPathSafe(AppDirectory) or not DataTreeSafe(AppDirectory) then begin
       SuppressibleMsgBox('数据目录包含链接或不受支持的内容，未开始卸载。请先核对应用目录。', mbError, MB_OK, IDOK);
       Result := False;
+    end;
+    if Result then begin
+      PrivateDataHelper := ExpandConstant('{tmp}\MXH-PrivateData.exe');
+      if not FileCopy(AddBackslash(AppDirectory) + 'app-helpers\PrivateData.exe', PrivateDataHelper, False) or
+         not Exec(PrivateDataHelper, 'validate ' + AddQuotes(AppDirectory), '', SW_HIDE, ewWaitUntilTerminated, HelperResult) or
+         (HelperResult <> 0) then begin
+        SuppressibleMsgBox('私人归档目录不可用、归属不一致或含链接，未开始卸载。请先核对归档目录。', mbError, MB_OK, IDOK);
+        Result := False;
+      end;
     end;
   end;
 end;
@@ -211,12 +223,16 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  HelperResult: Integer;
 begin
   if CurUninstallStep = usPostUninstall then
   begin
     DeleteFile(ExpandConstant('{app}\installation.json'));
     if DeleteApplicationData then begin
-      if not DataPathSafe(ExpandConstant('{app}')) or not DataTreeSafe(ExpandConstant('{app}')) then
+      if not Exec(PrivateDataHelper, 'remove ' + AddQuotes(ExpandConstant('{app}')), '', SW_HIDE, ewWaitUntilTerminated, HelperResult) or (HelperResult <> 0) then
+        SuppressibleMsgBox('应用已卸载，私人归档未能安全删除，剩余数据保留。请核对数据目录。', mbError, MB_OK, IDOK)
+      else if not DataPathSafe(ExpandConstant('{app}')) or not DataTreeSafe(ExpandConstant('{app}')) then
         SuppressibleMsgBox('应用已卸载，但数据目录发生变化，剩余数据保留。请核对安装目录。', mbError, MB_OK, IDOK)
       else if not DelTree(ExpandConstant('{app}'), True, True, True) then
         SuppressibleMsgBox('应用已卸载，部分数据仍被占用，未能全部删除。请关闭相关程序后核对安装目录。', mbError, MB_OK, IDOK);

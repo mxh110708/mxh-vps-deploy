@@ -74,6 +74,7 @@ namespace Mxh.VpsDeploy.Desktop
                 {
                     string name=Path.GetFileName(entry);
                     if(Directory.Exists(entry) && new[]{"private",".cache",".tmp",".test-output"}.Contains(name,StringComparer.OrdinalIgnoreCase)) continue;
+                    if(File.Exists(entry) && new[]{"archive-location.private.json","archive-location.lock"}.Contains(name,StringComparer.OrdinalIgnoreCase)) continue;
                     if(Directory.Exists(entry) && name.Equals("config",StringComparison.OrdinalIgnoreCase))
                     {
                         foreach(string local in Directory.GetFileSystemEntries(entry)) if(!File.Exists(local) || !local.EndsWith(".local.json",StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException();

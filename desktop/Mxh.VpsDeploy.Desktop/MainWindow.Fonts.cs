@@ -35,7 +35,12 @@ public sealed partial class MainWindow
         // WinUI resolves ms-appx under the executable directory. No system font installation.
         var executableRoot = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
         if (!paths.Root.TrimEnd(Path.DirectorySeparatorChar).Equals(executableRoot, StringComparison.OrdinalIgnoreCase)) throw new OperationException("自定义字体需在应用自己的数据目录中预览。");
-        return "ms-appx:///private/fonts/" + Uri.EscapeDataString(Path.GetFileName(font.FilePath)) + "#" + font.Family;
+        // WinUI uses an app-relative rendering copy; the archive may be on a different disk.
+        var name = Path.GetFileName(font.FilePath); var cached = paths.Resolve(".cache/font-rendering/" + name);
+        var bytes = LocalFonts.Read(font.FilePath);
+        if (!File.Exists(cached)) ArchiveStore.AtomicWrite(cached, bytes);
+        else if (ClientSchemes.SourceFingerprint(cached) != ArchiveStore.Digest(bytes)) throw new OperationException("字体渲染副本发生变化，请核对本地文件。");
+        return "ms-appx:///.cache/font-rendering/" + Uri.EscapeDataString(name) + "#" + font.Family;
     }
     private static void ApplyFont(DependencyObject root)
     {

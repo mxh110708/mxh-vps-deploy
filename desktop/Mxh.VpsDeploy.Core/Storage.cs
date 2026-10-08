@@ -9,10 +9,15 @@ namespace Mxh.VpsDeploy.Core;
 public sealed class AppPaths
 {
     public string Root { get; }
-    public string Private => Resolve("private");
+    public string Private { get; private set; }
     public string Instances => Resolve("private/instances");
-    public AppPaths(string root) { Root = Path.GetFullPath(root); SafePath.CheckLinks(Root); }
-    public string Resolve(string relative) => SafePath.Resolve(Root, relative);
+    public AppPaths(string root) { Root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar); SafePath.CheckLinks(Root); Private = PrivateDirectory.Load(Root); }
+    public string Resolve(string relative)
+    {
+        if (relative == "private") { SafePath.CheckLinks(Private); return Private; }
+        return relative.StartsWith("private/", StringComparison.Ordinal) ? SafePath.Resolve(Private, relative[8..]) : SafePath.Resolve(Root, relative);
+    }
+    internal void SetPrivate(string directory) => Private = directory;
     public string Instance(string relative) => SafePath.Resolve(Instances, relative);
     public static string Segment(string value)
     {

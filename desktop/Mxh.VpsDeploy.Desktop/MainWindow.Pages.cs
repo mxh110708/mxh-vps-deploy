@@ -50,13 +50,15 @@ public sealed partial class MainWindow
             var secretFile = SafePath.Resolve(paths.Instance(instance.RelativePath), "secrets.dotnet.private.json"); if (!File.Exists(secretFile)) continue;
             var secrets = store.ReadSecret(secretFile); all.AddRange(ClientProfiles.Nodes(instance.Plan, secrets).Select(n => (n, instance.Plan, instance.RelativePath))); secrets.Clear();
         }
-        var panel = new StackPanel { Spacing = 8 }; var selections = new List<(CheckBox Check, ClientProfiles.NodePair Node, JsonObject Plan, string Relative)>();
-        foreach (var item in all) { var check = DesktopTypography.Mark(new CheckBox { Content = item.Node.Name }, TypeRole.Body, 14); panel.Children.Add(check); selections.Add((check, item.Node, item.Plan, item.Relative)); }
-        if (all.Count == 0) panel.Children.Add(Text("没有可用的受管节点。"));
-        var dialog = new ContentDialog { XamlRoot = shell.XamlRoot, RequestedTheme = ElementTheme.Dark, Title = "选择节点", Content = new ScrollViewer { Content = panel, MaxHeight = 420 }, PrimaryButtonText = "添加", CloseButtonText = "取消" };
+        var existingNames = scheme!["Nodes"]!.AsArray().Select(n => n!.Text("name")).ToHashSet(StringComparer.Ordinal);
+        var candidates = all.DistinctBy(i => i.Node.Name).Where(i => !existingNames.Contains(i.Node.Name)).ToArray();
+        var picker = new ManagedNodePicker(candidates.Select(i => i.Node));
+        var dialog = OperationDialog("选择节点", picker.Content, "添加");
+        dialog.IsPrimaryButtonEnabled = picker.Selected.Count != 0;
+        picker.SelectionChanged += () => dialog.IsPrimaryButtonEnabled = picker.Selected.Count != 0;
         if (await ShowDialog(dialog) != ContentDialogResult.Primary) return;
         scheme!["Sources"] ??= new JsonObject();
-        foreach (var item in selections.Where(s => s.Check.IsChecked == true))
+        foreach (var item in candidates.Where(s => picker.Selected.Contains(s.Node.Name)))
         {
             var node = new JsonObject { ["name"] = item.Node.Name, ["kind"] = item.Node.Role == "ShadowsocksLanding" ? "landing" : "entry", ["region_group"] = "US-West Entry", ["transit_group"] = item.Plan.Text("Shadowsocks.ClientTransitTag", "US-West Entry"), ["clash"] = item.Node.Clash.DeepClone(), ["sing_box"] = item.Node.SingBox.DeepClone() }; scheme["Nodes"]!.AsArray().Add(node);
             foreach (var name in new[] { "deployment-plan.json", "secrets.dotnet.private.json" }) { var file = SafePath.Resolve(paths.Instance(item.Relative), name); scheme["Sources"]![file] = ClientSchemes.SourceFingerprint(file); }
@@ -160,7 +162,7 @@ public sealed partial class MainWindow
         page.Children.Add(Details("更新连接", Card(Column(proxy, Text("此地址仅供应用下载更新使用。", 12, true)))));
         page.Children.Add(GroupLabel("数据与配置"));
         page.Children.Add(SettingsGroup(
-            SettingRow("私人归档", "实例、配置方案与凭据统一存放在应用目录", Symbol.Folder, Action("打开目录", () => { SafePath.CheckLinks(paths.Private); Directory.CreateDirectory(paths.Private); System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(paths.Private) { UseShellExecute = true }); return Task.CompletedTask; })),
+            PrivateDirectorySetting(),
             SettingRow("卸载数据处理", "卸载时可选择保留归档和本地配置，或彻底删除应用数据", Symbol.Delete, Text("卸载时选择", 12, true))));
         var version = ArchiveStore.ReadJson(paths.Resolve("config/application.json")).Text("version");
         page.Children.Add(GroupLabel("关于"));

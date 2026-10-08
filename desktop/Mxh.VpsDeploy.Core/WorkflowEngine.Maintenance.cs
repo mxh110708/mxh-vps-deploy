@@ -12,8 +12,30 @@ public sealed partial class WorkflowEngine
         var r = await c.Run("maintenance-health-audit.sh", new() { ["AGENT_RELEASES_JSON"] = releases.ToJsonString() }, timeout: 300);
         var audit = JsonNode.Parse(RemoteAssets.Marker(r.Output, "HEALTH_AUDIT"))!.AsObject();
         ArchiveStore.WriteJson(c.File("health-audits/" + c.Id + ".json"), audit);
+        // Copies prevent an incomplete audit or unreadable config from partially promoting an archive.
+        var plan = c.Plan.DeepClone().AsObject(); var state = c.State.DeepClone().AsObject();
+        MonitoringArchives.ApplyHealth(plan, state, audit);
+        if (audit.Flag("Services.KomariAgent.Installed") && audit.Flag("Services.KomariAgent.SupportedLayout"))
+        {
+            await using var session = await c.Session();
+            var bytes = await session.ReadFileAsync("/etc/komari-agent/config.json", c.Cancellation);
+            try
+            {
+                var configuration = JsonNode.Parse(bytes)?.AsObject() ?? throw new OperationException("Agent 配置无法识别，未更新归档。");
+                if (!MonitoringArchives.SupplementAgent(plan, c.Secrets, configuration))
+                {
+                    state.Put("MonitoringInventory.KomariAgent.ConnectionConfigMatchesArchive", JsonValue.Create(false));
+                    c.Warnings = true; c.Report("监控配置漂移", "Agent 连接配置与旧归档不同，已保留原凭据，请维护者核对。");
+                }
+                else state.Put("MonitoringInventory.KomariAgent.ConnectionConfigMatchesArchive", JsonValue.Create(true));
+                configuration.Clear();
+            }
+            finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
+        }
+        c.Plan["Komari"] = plan["Komari"]!.DeepClone();
+        foreach (var field in new[] { "MonitoringInventory", "KomariInstalled", "KomariController", "Cloudflared" }) c.State[field] = state[field]!.DeepClone();
         c.State["LastHealthAudit"] = new JsonObject { ["At"] = DateTimeOffset.UtcNow, ["File"] = "health-audits/" + c.Id + ".json" };
-        c.Save(); c.Report("健康审计完成", "远端证据已归档；任务完成表示读取完成，不代表全部检查健康。");
+        c.Save(); c.Report("健康审计完成", "远端证据及监控组件状态已归档；任务完成表示读取完成，不代表全部检查健康。");
     }
     private async Task Arm(Context c, string[] components)
     {
