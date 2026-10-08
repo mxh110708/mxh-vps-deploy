@@ -37,12 +37,17 @@ internal sealed partial class BoundaryTests
         Check(restored.Mutations == 1 && restored.Commands.SequenceEqual(new[] { "deployment-baseline-status.sh", "deployment-baseline-rollback.sh" }), "recovery replayed deployment or skipped status reconciliation");
         Check(restored.Endpoints.All(e => e.Port == recovering.Number("Server.BootstrapSshPort") && e.KeyPath == null), "rollback or restored access used uninstalled local key");
         Check(InstanceLifecycle.Read(f.Store, relative, recovering).CanContinue && ArchiveStore.ReadJson(stateFile).Text("DeploymentTransaction.Status") == "RolledBack", "verified recovery did not release the draft");
+        var restoredState = ArchiveStore.ReadJson(stateFile);
 
         // Once bootstrap access is verified, keep using that installed management key.
         state.Put("Modules.bootstrap-access.Status", JsonValue.Create("Success")); state["CurrentManagementPort"] = recovering.Number("Ports.SshPrimary"); ArchiveStore.WriteJson(stateFile, state);
         var installed = new FakeRemote(); engine = new(f.Store, installed, new FakeKeys(), new RecoveryUser(false), new FakeValidation());
         await RefusesAsync(() => engine.ExecuteAsync(recover, Guid.NewGuid().ToString("N"), new InlineProgress<TaskProgress>(_ => { }), default), "cancelled established-key recovery completed");
         Check(installed.Endpoints.Single().KeyPath == SafePath.Resolve(directory, "ssh/id_vps_management") && installed.Endpoints.Single().Port == recovering.Number("Ports.SshPrimary"), "verified management access regressed to bootstrap authentication");
+        ArchiveStore.WriteJson(stateFile, restoredState); var next = new FakeRemote();
+        Check(await f.Engine(next).ExecuteAsync(recover with { Kind = OperationKind.Resume }, Guid.NewGuid().ToString("N"), new InlineProgress<TaskProgress>(_ => { }), default) == TaskOutcome.Completed, "restored draft could not start a new deployment");
+        var nextPlan = ArchiveStore.ReadJson(SafePath.Resolve(directory, "deployment-plan.json")); var nextState = ArchiveStore.ReadJson(stateFile);
+        Check(nextPlan.Text("DeploymentTransaction.Id") != recovering.Text("DeploymentTransaction.Id") && nextState.Text("DeploymentTransaction.RemoteBaselineDirectory") == "/root/vps-deploy-transaction-baselines/" + nextPlan.Text("DeploymentTransaction.Id"), "new deployment reused old rollback marker or captured under another identity");
     }
 }
 

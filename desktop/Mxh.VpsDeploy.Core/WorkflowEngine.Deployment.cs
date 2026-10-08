@@ -49,6 +49,12 @@ public sealed partial class WorkflowEngine
     {
         if (c.Request.Kind == OperationKind.Resume && c.State.Text("Engine") != "dotnet-v1") throw new OperationException("旧驱动的未完成计划需由维护者核对转换，不能直接重放。");
         if (c.Request.Kind == OperationKind.Resume && InstanceLifecycle.Describe(c.Plan, c.State, c.Pending).Managed) throw new OperationException("该实例已完成部署或接入，不能作为草稿重放。", code: "DeploymentAlreadyComplete", nextAction: "在实例页选择具体维护操作。");
+        if (c.Request.Kind == OperationKind.Resume && c.State.Text("DeploymentTransaction.Status") == "RolledBack")
+        {
+            // The restored baseline retains its rollback marker. A new attempt needs a new identity.
+            c.Plan.Put("DeploymentTransaction.Id", JsonValue.Create(Guid.NewGuid().ToString("N")));
+            c.State["Modules"] = new JsonObject();
+        }
         if (c.Request.Kind == OperationKind.Resume) c.State.Put("Modules.audit", null);
         c.State["Engine"] = "dotnet-v1"; c.Save();
         async Task Step(string id, Func<Task> action)
