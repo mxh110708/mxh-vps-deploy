@@ -31,6 +31,7 @@ public sealed class TaskHistory(ArchiveStore store)
     }
     public IReadOnlyList<JsonObject> Read()
     {
+        if (!File.Exists(FilePath)) return [];
         using var guard = Lock(); return Load().OfType<JsonObject>().ToArray();
     }
     public void Append(TaskRecord record)

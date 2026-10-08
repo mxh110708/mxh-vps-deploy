@@ -5,6 +5,8 @@ internal sealed partial class BoundaryTests
 {
     private async Task MaintenanceExperience(Fixture f)
     {
+        var unopened = f.Paths.Resolve("unopened-app"); Directory.CreateDirectory(unopened); var unopenedPaths = new AppPaths(unopened);
+        Check(new TaskHistory(new ArchiveStore(unopenedPaths, new TestProtector())).Read().Count == 0 && !Directory.Exists(unopenedPaths.Private), "empty history read created private runtime files");
         var plan = f.Plan("Maintenance-Boundaries"); f.SaveInstance(plan); var relative = f.Relative(plan);
         var state = new JsonObject { ["KomariInstalled"] = false, ["KomariController"] = new JsonObject { ["Installed"] = true }, ["Cloudflared"] = new JsonObject { ["Installed"] = true } };
         plan.Put("Komari.Enabled", JsonValue.Create(true));
