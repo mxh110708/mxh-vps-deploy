@@ -6,6 +6,7 @@ param(
     [string]$PythonRuntimeDirectory
 )
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 $ApplicationDirectory=[IO.Path]::GetFullPath($ApplicationDirectory)
 $FixtureRoot=[IO.Path]::GetFullPath($FixtureRoot)
 $ProjectRoot=[IO.Path]::GetFullPath($ProjectRoot)
@@ -39,6 +40,8 @@ try {
     try { if(-not $clientProcess.WaitForExit(25000) -or $clientProcess.ExitCode -ne 0) { throw 'Native test-command client failed.' } } finally { $clientProcess.Dispose() }
     $nativeResult=Get-Content -Raw -LiteralPath $nativeResponse | ConvertFrom-Json
     Check ($nativeResult.ok -and $nativeResult.result.page -eq 'overview') 'native command client before WinUI startup'
+    $firstRead=@(Read-Ui)
+    Check ($firstRead.Count -eq 1 -and $firstRead[0].page -eq 'overview' -and @($firstRead[0].elements).Count -gt 0) 'strict PowerShell client returns one UI result without async task objects'
     if ($PythonRuntimeDirectory) { [IO.Directory]::CreateDirectory((Join-Path $FixtureRoot 'runtime')) | Out-Null; Copy-Item -LiteralPath $PythonRuntimeDirectory -Destination (Join-Path $FixtureRoot 'runtime/python') -Recurse -Force }
     Click 'deploy'; Set-Text '服务商' 'Example'; Set-Text '实例名称' 'Native Flow'
     $null=Wait-Ui {param($ui) @($ui.elements|Where-Object { $_.name -eq '节点名称' -and $_.value -eq 'Example-Native-Flow' }).Count -eq 1 }
