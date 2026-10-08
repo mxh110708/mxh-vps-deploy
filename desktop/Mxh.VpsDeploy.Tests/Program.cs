@@ -20,6 +20,7 @@ internal sealed partial class BoundaryTests(string repository)
         await MonitoringArchiveExperience(f);
         await PrivateDirectoryExperience();
         await ManagedKeyDeployment(f);
+        await AdditionsExperience(f);
         var sshPython = Environment.GetEnvironmentVariable("MXH_TEST_SSH_PYTHON"); if (!string.IsNullOrEmpty(sshPython)) await LocalSshConfirmation(f, sshPython);
         var python = Environment.GetEnvironmentVariable("MXH_TEST_PYTHON"); if (!string.IsNullOrEmpty(python)) await RealClientWorkbench(f, python);
         Console.WriteLine($"PASS: {assertions} C# boundary and workflow assertions; no production connections.");
@@ -184,7 +185,7 @@ internal sealed partial class BoundaryTests(string repository)
     {
         var scheme = ClientSchemes.New(f.Paths); var node = ClientProfiles.Nodes(f.Plan("Client"), Fixture.RealitySecrets()).First(); scheme["Nodes"]!.AsArray().Add(new JsonObject { ["name"] = node.Name, ["kind"] = "entry", ["region_group"] = "US-West Entry", ["transit_group"] = "US-West Entry", ["clash"] = node.Clash.DeepClone(), ["sing_box"] = node.SingBox.DeepClone() });
         var clash = f.Paths.Resolve("private/fake.candidate.yaml"); var sing = f.Paths.Resolve("private/fake.candidate.json"); File.WriteAllText(clash, "fixture"); File.WriteAllText(sing, "fixture"); scheme["Candidate"] = new JsonObject { ["Clash"] = clash, ["SingBox"] = sing, ["ClashHash"] = ClientSchemes.SourceFingerprint(clash), ["SingBoxHash"] = ClientSchemes.SourceFingerprint(sing), ["ValidationStatus"] = "Passed", ["SpecFingerprint"] = ArchiveStore.Fingerprint(ClientSchemes.Specification(scheme)) };
-        var workbench = new ClientWorkbench(f.Store, new FakeTools(), new FakeAssets(), "unused"); await RefusesAsync(() => workbench.ValidateAsync(scheme, default), "failed core accepted"); Check(scheme.Text("Candidate.ValidationStatus") == "Pending", "failure retained Passed");
+        var workbench = new ClientWorkbench(f.Store, new FakeTools(), new FakeAssets(), "unused"); await RefusesAsync(() => workbench.ValidateAsync(scheme, default), "failed core accepted"); Check(scheme.Text("Candidate.ValidationStatus") == "Failed" && scheme.Text("Candidate.ValidationError") != "" && !scheme.Text("Candidate.ValidationError").Contains("synthetic-credential"), "failure retained Passed or leaked validator output");
     }
     private async Task Credentials(Fixture f)
     {

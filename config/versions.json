@@ -35,6 +35,15 @@
       }
     }
   },
+  "cloudflared": {
+    "version": "2026.10.0",
+    "assets": {
+      "amd64": {
+        "name": "cloudflared-linux-amd64",
+        "sha256": "d33ff2d14475178d2012c2c56beba87389ac5ded27649519f198a7d3134a99db"
+      }
+    }
+  },
   "sing_box": {
     "version": "1.14.2",
     "assets": {

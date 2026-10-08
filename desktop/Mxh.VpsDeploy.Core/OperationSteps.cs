@@ -1,0 +1,46 @@
+using System.Text.Json.Nodes;
+
+namespace Mxh.VpsDeploy.Core;
+
+public static class OperationSteps
+{
+    public static bool HasDeploymentProgress(OperationKind kind) => kind is OperationKind.Deploy or OperationKind.Resume or OperationKind.InstallComponent;
+    public static IReadOnlyList<PlannedTaskStep> Create(OperationRequest request, JsonObject plan)
+    {
+        var steps = new List<PlannedTaskStep>();
+        void Add(string id, string title, string description) => steps.Add(new(id, title, description));
+        if (request.Kind == OperationKind.InstallComponent)
+        {
+            var component = request.Options.Text("Component");
+            Add("installation-preflight", "核对现有实例与端口", "核对管理连接、现有服务和归档；确认本次组件尚未安装、端口未占用。");
+            Add("installation-backup", "建立组件恢复快照", "只备份本次操作范围，并启用限时回滚保护。");
+            if (component == "RealityEntry") Add("target-audit", "审计 Reality 目标", "验证目标的 TLS 与连接质量。");
+            if (component == "AnyTlsEntry") Add("certbot-dns", "申请 AnyTLS 可信证书", "使用 DNS 验证申请证书，并设置续期。");
+            Add("component-install", "安装 " + ComponentInstallations.Label(component), "安装固定版本及本次组件配置。");
+            if (DeploymentPlans.Roles[..3].Contains(component)) Add("installation-firewall", "更新协议放行规则", "受管防火墙仅补充新协议端口，保留已有规则。");
+            Add("installation-validation", "验收新增组件", "检查服务、连接及既有组件是否保留。");
+            Add("installation-archive", "更新同一实例归档", "归档新增组件及验收结果。");
+            Add("installation-commit", "确认完成", "提交组件事务，解除限时回滚保护。");
+            return steps;
+        }
+        if (!HasDeploymentProgress(request.Kind)) return steps;
+        Add("audit", "系统审计", "确认目标系统及新机条件。");
+        Add("management-key", "准备管理密钥", "准备本地密钥和访问权限。");
+        Add("deployment-baseline", "备份部署前基线", "保留受管文件和管理入口的恢复材料。");
+        Add("bootstrap-access", "建立密钥访问", "安装并验证管理公钥。");
+        Add("base-system", "准备系统与管理用户", "安装基础依赖，建立管理账户。");
+        Add("ssh-transition", "验证主、救援 SSH", "确认两个管理入口可登录。");
+        if (DeploymentPlans.Uses(plan, "RealityEntry") && plan.Text("Reality.TargetMode") != "LocalOwnedTls") Add("target-audit", "审计 Reality 目标", "验证目标 TLS 和连接质量。");
+        if (plan.Flag("TrustedTls.Enabled")) Add("certbot-dns", "申请可信证书", "执行 DNS 验证并设置续期。");
+        if (DeploymentPlans.Uses(plan, "RealityEntry") && plan.Text("Reality.TargetMode") == "LocalOwnedTls") Add("local-https-target", "配置本机 HTTPS 目标", "配置 Reality 使用的本机 TLS 目标。");
+        foreach (var role in DeploymentPlans.Roles[..3].Where(role => DeploymentPlans.Uses(plan, role))) Add(plan["Roles"] == null ? "protocol-install" : "protocol-install-" + role, "安装 " + ComponentInstallations.Label(role), "生成协议配置并验证监听。");
+        if (DeploymentPlans.Purposes(plan).Count(role => role != "MonitorOnly") > 1) Add("protocol-selection", "启用所选协议", "按计划选择入口与落地的启用状态。");
+        Add("nftables-transition", "配置受管防火墙", "放行管理入口和所选协议。");
+        if (plan.Flag("Komari.Enabled")) Add("komari-agent", "安装 Komari Agent", "连接到所填主控并启用指标上报。");
+        Add("final-validation", "独立验收", "检查管理入口、服务与客户端真实连接。");
+        Add("ssh-cutover", "完成管理入口切换", "确认关闭初始入口并复核防火墙。");
+        Add("private-archive", "保存私有归档", "归档配置、凭据和验收结果。");
+        Add("deployment-commit", "确认部署完成", "提交部署基线，记录最终结果。");
+        return steps;
+    }
+}

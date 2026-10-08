@@ -81,6 +81,7 @@ public sealed partial class MainWindow
             if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-deployment")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "deployment-regression-proof.json"), await DeploymentRegression(outputDirectory));
             if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-maintenance")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "maintenance-regression-proof.json"), await MaintenanceRegression(outputDirectory));
             if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-storage")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "storage-regression-proof.json"), await StorageRegression(outputDirectory));
+            if (flag == "--ui-smoke" && launchArguments.Contains("--exercise-additions")) ArchiveStore.WriteJson(SafePath.Resolve(outputDirectory, "additions-regression-proof.json"), await AdditionsRegression(outputDirectory));
             var preferenceVerified = false;
             if (flag == "--ui-smoke") await Compact(outputDirectory);
             if (review)

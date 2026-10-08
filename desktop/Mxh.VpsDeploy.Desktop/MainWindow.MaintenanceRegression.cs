@@ -38,16 +38,19 @@ public sealed partial class MainWindow
             Require(core.Options.Text("Scope") == "Protocol" && core.Options.Text("TargetVersion") != "", "核心升级范围或版本不明确。");
             Require(Find<ComboBox>(core.Dialog).All(b => b.Items.Cast<ComboBoxItem>().All(i => !((string)i.Tag).Contains("Komari"))), "代理核心出现监控组件。"); return Task.CompletedTask;
         });
+        var monitorState = state.DeepClone().AsObject(); monitorState["KomariInstalled"] = true;
+        monitorState.Put("KomariController.Installed", JsonValue.Create(true)); monitorState.Put("Cloudflared.Installed", JsonValue.Create(true));
+        monitorState.Remove("MonitoringInventory");
         foreach (var scope in new[] { "KomariAgent", "KomariController", "Tunnel" })
         {
-            var sheet = MonitoringDialog(plan, state, scope);
+            var sheet = MonitoringDialog(plan, monitorState, scope);
             await DialogShot("dialog-monitor-" + scope, sheet.Dialog, () =>
             {
                 Require(sheet.Options.Text("Scope") == scope && !sheet.Options.ContainsKey("Protocol"), "监控操作混入代理协议。");
                 Require(Find<ComboBox>(sheet.Dialog).All(b => b.Header as string != "组件" && b.Header as string != "协议"), "监控对象仍允许混搭。"); return Task.CompletedTask;
             });
         }
-        var restore = MonitoringDialog(plan, state, "KomariController");
+        var restore = MonitoringDialog(plan, monitorState, "KomariController");
         await DialogShot("dialog-controller-restore-empty", restore.Dialog, async () =>
         {
             Find<ComboBox>(restore.Dialog).Single(b => b.Header as string == "操作").SelectedIndex = 2; await Task.Delay(80);
@@ -56,7 +59,7 @@ public sealed partial class MainWindow
         var uninstalled = state.DeepClone().AsObject(); uninstalled["KomariInstalled"] = false;
         var unavailable = MonitoringControls(plan, uninstalled);
         page.Children.Clear(); page.Children.Add(unavailable); shell.UpdateLayout();
-        Require(!Find<Button>(unavailable).Single(b => b.Content as string == "管理 Agent").IsEnabled, "未安装 Agent 允许升级。");
+        Require(Find<Button>(unavailable).Single(b => b.Content as string == "安装 Agent").IsEnabled && !Find<Button>(unavailable).Any(b => b.Content as string == "管理 Agent"), "未安装 Agent 缺少安装入口或允许维护。");
         var offlinePlan = plan.DeepClone().AsObject(); offlinePlan.Put("Komari.Enabled", JsonValue.Create(false));
         var offlineState = new JsonObject { ["DesktopImport"] = new JsonObject { ["KomariAgentLastKnown"] = new JsonObject { ["Installed"] = true }, ["KomariControllerLastKnown"] = new JsonObject { ["Version"] = "1.5.0-fix1" }, ["CloudflaredLastKnown"] = new JsonObject { ["Installed"] = true } } };
         var pendingMonitoring = MonitoringControls(offlinePlan, offlineState); page.Children.Clear(); page.Children.Add(pendingMonitoring); shell.UpdateLayout();
@@ -83,7 +86,7 @@ public sealed partial class MainWindow
         history.Delete(history.ReviewDeletion()); SelectPage("records"); await Shot("records-cleared");
         Require(!Find<Button>(shell).Single(b => b.Content as string == "清空记录").IsEnabled, "空列表仍允许清空。");
         var wheel = await SelectorWheelRegression();
-        return new JsonObject { ["scoped_proxy_targets"] = true, ["monitor_components_separate"] = true, ["uninstalled_agent_disabled"] = true,
+        return new JsonObject { ["scoped_proxy_targets"] = true, ["monitor_components_separate"] = true, ["uninstalled_agent_installable"] = true,
             ["empty_restore_disabled"] = true, ["single_and_all_history_deletion"] = true, ["local_timestamps"] = true, ["dark_and_light"] = true, ["wheel"] = wheel, ["remote_connections"] = 0 };
     }
     private async Task<JsonObject> SelectorWheelRegression()

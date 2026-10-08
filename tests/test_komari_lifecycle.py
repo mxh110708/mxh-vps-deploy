@@ -51,7 +51,10 @@ systemctl(){
       fi
       echo true > "$state_file"
       [[ "$STALE_PID" == true ]] || ln -f "$binary" "$TEST_ROOT/proc/$pid/exe"
-      if [[ "$VPS_PARAM_ACTION" == TunnelRotate ]]; then printf 'cloudflared\0tunnel\0--token\0%s\0' "$VPS_PARAM_TUNNEL_TOKEN" > "$TEST_ROOT/proc/$pid/cmdline"; fi
+      if [[ "$VPS_PARAM_ACTION" == TunnelRotate ]]; then
+        if [[ "$TOKEN_FILE_LAYOUT" == true ]]; then printf 'cloudflared\0tunnel\0--token-file\0%s\0' "$TEST_NATIVE_ROOT/etc/cloudflared/mxh-token" > "$TEST_ROOT/proc/$pid/cmdline"
+        else printf 'cloudflared\0tunnel\0--token\0%s\0' "$VPS_PARAM_TUNNEL_TOKEN" > "$TEST_ROOT/proc/$pid/cmdline"; fi
+      fi
       if [[ "$*" == *komari.service* ]] && grep -Fq 'new-upgrade' "$binary"; then
         echo migrated > "$TEST_ROOT/opt/komari/data/komari.db"
         echo new-metrics > "$TEST_ROOT/opt/komari/data/metrics.db"
@@ -108,7 +111,7 @@ class KomariLifecycleTests(unittest.TestCase):
                  extra_db_arguments='', version_code='200', version_body=None, binary_location='opt/komari/komari', stale_pid=False,
                  bad_checksum=False, corrupt_install=False, service_start_fails=False, unsafe_archive=False, service_stop_still_active=False,
                  tunnel=False, include_tunnel=False, incomplete_tunnel=False, tunnel_active=True, tunnel_enabled=True,
-                 tunnel_start_fails=False, project_backup=False, final_active=True):
+                 tunnel_start_fails=False, project_backup=False, final_active=True, token_file=False):
         with tempfile.TemporaryDirectory(prefix='komari-lifecycle-', dir=ROOT / '.tmp') as folder:
             root = Path(folder)
             script = (ROOT / 'assets/remote/maintenance-komari.sh').read_text(encoding='utf-8')
@@ -129,6 +132,12 @@ class KomariLifecycleTests(unittest.TestCase):
             if tunnel:
                 tunnel_binary.write_text('archived-tunnel-binary'); tunnel_binary.chmod(0o755)
                 tunnel_unit.write_text('archived-tunnel-unit')
+            managed_token = root / 'etc/cloudflared/mxh-token'
+            if token_file:
+                managed_token.parent.mkdir(parents=True)
+                managed_token.write_text('fixture-old-token')
+                tunnel_unit.write_text('Type=notify\nUser=cloudflared\nExecStart=' + shell_path(tunnel_binary) + ' tunnel --metrics 127.0.0.1:20241 run --token-file ' + shell_path(managed_token) + '\n')
+            original_unit = tunnel_unit.read_bytes() if tunnel_unit.exists() else None
             token_config = root / 'etc/komari-agent/config.json'
             token_config.write_text('{"token":"fixture-token","disable_web_ssh":true}')
             before_token = token_config.read_bytes()
@@ -168,6 +177,7 @@ class KomariLifecycleTests(unittest.TestCase):
                 CORRUPT_INSTALL=str(corrupt_install).lower(), SERVICE_START_FAILS=str(service_start_fails).lower(),
                 SERVICE_STOP_STILL_ACTIVE=str(service_stop_still_active).lower(),
                 TUNNEL_ENABLED=str(tunnel_enabled).lower(), TUNNEL_START_FAILS=str(tunnel_start_fails).lower(),
+                TOKEN_FILE_LAYOUT=str(token_file).lower(),
                 VPS_PARAM_FINAL_ACTIVE=str(final_active).lower(), VPS_PARAM_INCLUDE_TUNNEL='false',
                 VPS_PARAM_TUNNEL_TOKEN='fixture-rotated-token',PATH=shell_path(root/'usr/local/bin')+os.pathsep+os.environ['PATH'],
                 VPS_PARAM_ASSET_NAME='komari-agent-linux-amd64' if action == 'AgentUpgrade' else 'komari-linux-amd64',
@@ -199,6 +209,8 @@ class KomariLifecycleTests(unittest.TestCase):
             result.tunnel_active = (root / 'tunnel-active').read_text().strip() == 'true'
             result.tunnel_binary = tunnel_binary.read_text() if tunnel_binary.exists() else None
             result.tunnel_unit = tunnel_unit.read_text() if tunnel_unit.exists() else None
+            result.unit_preserved = original_unit is not None and original_unit == tunnel_unit.read_bytes()
+            result.managed_token = managed_token.read_text() if managed_token.exists() else None
             result.quarantined_metrics = len(list((root / 'root/vps-deploy-backups').glob('komari-failed-upgrade-*/**/metrics.db')))
             result.restore_quarantine_metrics=len(list((root/'root/vps-deploy-backups').glob('komari-controller-restore-*/previous-data-*/**/metrics.db')))
             return result, calls, current, (root / 'opt/komari/data/metrics.db').exists(), before_token == token_config.read_bytes()
@@ -298,6 +310,15 @@ class KomariLifecycleTests(unittest.TestCase):
         result,_,_,_,_=self.run_case('TunnelRotate',service_start_fails=True)
         self.assertNotEqual(result.returncode,0)
         self.assertNotIn('VPSDEPLOY_KOMARI_LIFECYCLE_OK',result.stdout)
+
+    def test_new_tunnel_token_file_rotation_preserves_service_and_keeps_token_out_of_unit(self):
+        result,calls,_,_,_=self.run_case('TunnelRotate', token_file=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(result.unit_preserved)
+        self.assertEqual(result.managed_token,'fixture-rotated-token')
+        self.assertNotIn('fixture-rotated-token',result.tunnel_unit)
+        self.assertIn('--token-file',result.tunnel_unit)
+        self.assertIn('restart cloudflared.service',calls)
 
     def test_normal_controller_is_verified(self):
         result, _, _, _, _ = self.run_case('ControllerUpgrade')

@@ -21,6 +21,16 @@ public static class SafeFailures
     }
     public static OperationException Remote(CommandResult result, string description)
     {
+        var installation = RemoteAssets.Marker(result.Output, "INSTALLATION_CHECK", false);
+        if (installation != "")
+        {
+            try
+            {
+                var check = System.Text.Json.Nodes.JsonNode.Parse(installation);
+                if (!check.Flag("Allowed") && check.Text("Code") is "ComponentExists" or "PortBusy") return new(check.Text("Code") == "ComponentExists" ? "远端已有该组件或残留文件，未覆盖安装。请先核对并纳管。" : "新组件端口被占用，未覆盖其他服务。请选择独立端口。", code: check.Text("Code"));
+            }
+            catch (JsonException) { }
+        }
         var reason = result.ExitCode == 127 || result.Error.Contains("command not found", StringComparison.OrdinalIgnoreCase) ? "远端缺少所需命令。" :
             result.Error.Contains("Permission denied", StringComparison.OrdinalIgnoreCase) ? "远端执行权限不足。" :
             result.Error.Contains("No space left on device", StringComparison.OrdinalIgnoreCase) ? "远端磁盘空间不足。" :

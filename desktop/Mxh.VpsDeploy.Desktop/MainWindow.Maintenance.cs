@@ -45,10 +45,11 @@ public sealed partial class MainWindow
     {
         var rows = MaintenanceTargets.Monitoring(plan, state).Select(target =>
         {
-            var button = target.RequiresVerification
+            var needsCheck = target.RequiresVerification || !target.Installed && state.Flag("MonitoringInventory." + (target.Scope == "Tunnel" ? "Cloudflared" : target.Scope) + ".Installed");
+            var button = needsCheck
                 ? Action("核对并纳管", () => Submit(new(OperationKind.HealthAudit, selectedInstance!, new())))
-                : Action(target.Scope == "KomariAgent" ? "管理 Agent" : target.Scope == "KomariController" ? "管理主控" : "管理 Tunnel", () => ManageMonitoring(plan, target.Scope));
-            button.IsEnabled = target.Installed || target.RequiresVerification;
+                : target.Installed ? Action(target.Scope == "KomariAgent" ? "管理 Agent" : target.Scope == "KomariController" ? "管理主控" : "管理 Tunnel", () => ManageMonitoring(plan, target.Scope))
+                : Action(target.Scope == "KomariAgent" ? "安装 Agent" : target.Scope == "KomariController" ? "安装主控" : "安装 Tunnel", () => InstallationDialog(plan, target.Scope));
             return SettingRow(target.Name, target.Status + " · " + target.Description, target.Scope == "Tunnel" ? Symbol.Link : Symbol.View, button);
         }).ToArray();
         return SettingsGroup(rows);

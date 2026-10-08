@@ -66,6 +66,7 @@ public static class OperationPolicy
     public static void Validate(OperationRequest request)
     {
         if (!Enum.IsDefined(request.Kind)) throw new OperationException("未知任务类型。");
+        if (request.Kind == OperationKind.InstallComponent) ComponentInstallations.ValidateOptions(request.Options);
         var names = request.InstanceRelativePath.Split('/');
         if (names.Length != 3 || names[2] != "MXH-VPS-Deploy" || names[0] != AppPaths.Segment(names[0]) || names[1] != AppPaths.Segment(names[1])) throw new OperationException("实例归档路径无效。");
         if (request.Kind == OperationKind.ProtocolState && request.Options.Text("Action") is not ("Enable" or "Disable" or "Switch" or "Uninstall")) throw new OperationException("未知协议操作。");
@@ -83,6 +84,7 @@ public static class OperationPolicy
     }
     public static string TargetLabel(OperationRequest request) => request.Kind switch
     {
+        OperationKind.InstallComponent => "追加安装 · " + ComponentInstallations.Label(request.Options.Text("Component")),
         OperationKind.Upgrade => request.Options.Text("Protocol") switch { "RealityEntry" => "Xray · Reality 入口", "AnyTlsEntry" => "sing-box · AnyTLS / ECH 入口", "ShadowsocksLanding" => "sing-box · Shadowsocks 落地", _ => "代理核心" },
         OperationKind.Komari => (request.Options.Text("Scope") switch { "KomariAgent" => "Komari Agent", "KomariController" => "Komari 主控", _ => "Cloudflare Tunnel" }) + " · " + (request.Options.Text("Action") switch { "Upgrade" => "升级", "Remove" => "卸载", "Backup" => "一致性备份", "Restore" => "恢复备份", _ => "Token 轮换" }),
         _ => ""
@@ -93,6 +95,7 @@ public static class OperationPolicy
         OperationKind.ResumeImport => "继续接入草稿：重新只读识别现有配置，完成应用内归档。",
         OperationKind.Deploy => "新机部署：先审计系统与已有服务，建立备份后配置双 SSH 入口和所选用途；最后独立验收。网络调优由部署后另行手动发起。",
         OperationKind.HealthAudit => "只读健康与漂移检查；不重启或修改服务。",
+        OperationKind.InstallComponent => "在现有实例上追加安装 " + ComponentInstallations.Label(request.Options.Text("Component")) + "。先核对未安装状态和端口，备份本次组件后安装并验收，更新同一归档；已有协议、SSH 和网络参数保留。",
         OperationKind.TuneNetwork => "只修改部署器自己的网络参数文件，不重放协议、SSH 或防火墙。\n套餐标称带宽：" + request.Options.Number("BandwidthMbps") + " Mbps\n参考 RTT：" + (request.Options.Number("ReferenceRttMs") == 0 ? "不启用自适应估算" : request.Options.Number("ReferenceRttMs") + " ms") + "。",
         OperationKind.Recover => "先核对未完成事务的真实状态，再按明确范围恢复。",
         OperationKind.Upgrade => "升级对象：" + TargetLabel(request) + "\n目标版本：" + request.Options.Text("TargetVersion") + "\n先核对状态并备份，再更新程序、重启所选服务并独立验收；失败按协议范围恢复。协议备份覆盖本机受管代理协议，恢复时须一并审阅。",

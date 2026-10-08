@@ -60,10 +60,12 @@ for role in ("RealityEntry", "AnyTlsEntry", "ShadowsocksLanding"):
         raise SystemExit(f"Partial managed protocol installation detected: {role}")
     if (item["Enabled"] or item["Active"]) and not item["Installed"]:
         raise SystemExit(f"Service state exists without a complete installation: {role}")
-if inventory["RealityEntry"]["Enabled"] and inventory["AnyTlsEntry"]["Enabled"]:
-    raise SystemExit("Reality and AnyTLS cannot both be enabled")
-if inventory["RealityEntry"]["Active"] and inventory["AnyTlsEntry"]["Active"]:
-    raise SystemExit("Reality and AnyTLS cannot both be active")
+if (inventory['RealityEntry']['Enabled'] and inventory['AnyTlsEntry']['Enabled']) or (inventory['RealityEntry']['Active'] and inventory['AnyTlsEntry']['Active']):
+    with open('/usr/local/etc/xray/config.json', encoding='utf-8') as f: reality = json.load(f)
+    with open('/etc/sing-box-anytls/config.json', encoding='utf-8') as f: anytls = json.load(f)
+    a = {int(i['port']) for i in reality.get('inbounds', [])}
+    b = {int(i['listen_port']) for i in anytls.get('inbounds', [])}
+    if not a or not b or a & b: raise SystemExit('Reality and AnyTLS listener ports conflict')
 PY
 
 printf 'VPSDEPLOY_PROTOCOL_INVENTORY_B64=%s\n' "$(printf '%s' "$inventory" | base64 | tr -d '\n')"

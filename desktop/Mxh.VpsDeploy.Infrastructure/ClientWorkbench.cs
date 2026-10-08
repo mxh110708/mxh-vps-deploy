@@ -71,24 +71,34 @@ public sealed class ClientWorkbench(ArchiveStore store, IExternalToolRunner tool
     public async Task ValidateAsync(JsonObject scheme, CancellationToken cancellationToken)
     {
         var candidate = scheme["Candidate"]?.AsObject() ?? throw new OperationException("请先生成候选。");
-        candidate["ValidationStatus"] = "Pending"; candidate["Targets"] = new JsonObject(); Save(scheme); VerifyCandidate(scheme, candidate);
-        foreach (var format in ClientSchemes.Formats(scheme))
+        candidate["ValidationStatus"] = "Pending"; candidate.Remove("ValidationError"); candidate["Targets"] = new JsonObject(); Save(scheme);
+        try
         {
-            var core = format == "Clash" ? "mihomo" : "sing-box"; var executable = assets.ResolveCore(core);
-            await ProtocolValidation.VerifyVersion(assets, tools, core, executable, cancellationToken);
-            if (format == "Clash")
+            VerifyCandidate(scheme, candidate);
+            foreach (var format in ClientSchemes.Formats(scheme))
             {
-                var data = SafePath.Resolve(Path.GetDirectoryName(candidate.Text(format))!, "validation-data-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(data);
-                try
+                var core = format == "Clash" ? "mihomo" : "sing-box"; var executable = assets.ResolveCore(core);
+                await ProtocolValidation.VerifyVersion(assets, tools, core, executable, cancellationToken);
+                if (format == "Clash")
                 {
-                    if (Directory.Exists(assets.DataDirectory)) foreach (var file in Directory.EnumerateFiles(assets.DataDirectory)) { SafePath.CheckLinks(file); File.Copy(file, SafePath.Resolve(data, Path.GetFileName(file))); }
-                    (await tools.RunAsync(executable, ["-t", "-d", data, "-f", candidate.Text(format)], null, TimeSpan.FromSeconds(40), cancellationToken)).RequireSuccess("Mihomo 校验失败。");
+                    var data = SafePath.Resolve(Path.GetDirectoryName(candidate.Text(format))!, "validation-data-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(data);
+                    try
+                    {
+                        if (Directory.Exists(assets.DataDirectory)) foreach (var file in Directory.EnumerateFiles(assets.DataDirectory)) { SafePath.CheckLinks(file); File.Copy(file, SafePath.Resolve(data, Path.GetFileName(file))); }
+                        (await tools.RunAsync(executable, ["-t", "-d", data, "-f", candidate.Text(format)], null, TimeSpan.FromSeconds(40), cancellationToken)).RequireSuccess("Mihomo 校验失败。");
+                    }
+                    finally { SafePath.CheckTree(data); Directory.Delete(data, true); }
                 }
-                finally { SafePath.CheckTree(data); Directory.Delete(data, true); }
+                else (await tools.RunAsync(executable, ["check", "-c", candidate.Text(format)], null, TimeSpan.FromSeconds(40), cancellationToken)).RequireSuccess("sing-box 核心校验失败。");
             }
-            else (await tools.RunAsync(executable, ["check", "-c", candidate.Text(format)], null, TimeSpan.FromSeconds(40), cancellationToken)).RequireSuccess("sing-box 核心校验失败。");
+            VerifyCandidate(scheme, candidate); candidate["ValidationStatus"] = "Passed"; Save(scheme);
         }
-        VerifyCandidate(scheme, candidate); candidate["ValidationStatus"] = "Passed"; Save(scheme);
+        catch (Exception error)
+        {
+            candidate["ValidationStatus"] = error is OperationCanceledException ? "Pending" : "Failed";
+            candidate["ValidationError"] = error is OperationCanceledException ? "校验已取消，请重新校验。" : SafeFailures.Describe(error).Message;
+            Save(scheme); throw;
+        }
     }
     public void PreparePublish(JsonObject scheme, string clash, string sing)
     {

@@ -39,6 +39,10 @@ internal sealed class SelectedAssets(IValidationAssets inner, string allowed) : 
 internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
 {
     private readonly JsonObject protocolInventory = new();
+    public void SeedProtocols(JsonObject plan) { foreach (var role in DeploymentPlans.Roles[..3]) protocolInventory[role] = new JsonObject { ["Installed"] = ComponentInstallations.ProtocolInstalled(plan, role), ["Enabled"] = plan.Flag("ProtocolInventory." + role + ".Enabled", DeploymentPlans.InitiallyEnabled(plan, role)), ["Active"] = plan.Flag("ProtocolInventory." + role + ".Enabled", DeploymentPlans.InitiallyEnabled(plan, role)) }; }
+    public string InstallationCheckCode { get; set; } = "";
+    public string PostInstallationCheckCode { get; set; } = "";
+    public Action<string>? ObserveAsset { get; set; }
     public const string Backup = "/root/vps-deploy-backups/20000101-000000/protocol-lifecycle";
     public List<string> Commands { get; } = new(); public int Mutations { get; private set; } public string FailAsset { get; set; } = ""; public string StatusTaskId { get; set; } = ""; public string StatusPhase { get; set; } = "None"; public string ArmedComponents { get; private set; } = "";
     public List<SshEndpoint> Endpoints { get; } = new();
@@ -53,6 +57,7 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
         var asset = payload.Split('\n')[0].Replace("# MXH asset: ", ""); if (!asset.EndsWith(".sh")) return Task.FromResult(new CommandResult(0, "VPSDEPLOY_SSH_OK\n", "")); Commands.Add(asset); if (mutating) Mutations++;
         if (asset == "protocol-migration-arm-rollback.sh") { var match = System.Text.RegularExpressions.Regex.Match(payload, "export VPS_PARAM_COMPONENTS=.+?'([A-Za-z0-9+/=]+)' "); ArmedComponents = Encoding.UTF8.GetString(Convert.FromBase64String(match.Groups[1].Value)); }
         if (asset == FailAsset) throw new IOException("synthetic connection lost");
+        ObserveAsset?.Invoke(asset);
         static string Marker(string name, string value) => "VPSDEPLOY_" + name + "_B64=" + Convert.ToBase64String(Encoding.UTF8.GetBytes(value)) + "\n";
         string Parameter(string name)
         {
@@ -61,12 +66,23 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
         }
         if (asset == "maintenance-komari.sh") return Task.FromResult(new CommandResult(0, Parameter("ACTION") == "Status" ? string.Join('\n', new[] { "komari-agent.service", "komari.service", "cloudflared.service" }.Select(service => service + "=" + (MonitoringPresent ? "true,true,true" : "false,false,false"))) : "VPSDEPLOY_KOMARI_LIFECYCLE_OK\n", ""));
         if (asset == "maintenance-health-audit.sh") return Task.FromResult(new CommandResult(0, Marker("HEALTH_AUDIT", HealthAudit.ToJsonString()), ""));
+        if (asset == "component-install-preflight.sh")
+        {
+            var code = Parameter("VERIFY_ONLY") == "true" ? PostInstallationCheckCode : InstallationCheckCode;
+            return Task.FromResult(new CommandResult(0, Marker("INSTALLATION_CHECK", new JsonObject { ["Allowed"] = code == "", ["Code"] = code, ["Services"] = new JsonObject(), ["NftablesSha256"] = new string('a', 64) }.ToJsonString()), ""));
+        }
+        if (asset is "komari-agent.sh" or "monitoring-component-install.sh")
+        {
+            var name = asset == "komari-agent.sh" ? "KomariAgent" : Parameter("COMPONENT") == "Tunnel" ? "Cloudflared" : "KomariController";
+            HealthAudit.Put("Services." + name, HealthService(true, true, true));
+            if (name == "KomariAgent") AgentConfiguration = new JsonObject { ["endpoint"] = Parameter("ENDPOINT"), ["token"] = Parameter("TOKEN") };
+        }
         foreach (var role in DeploymentPlans.Roles[..3]) protocolInventory[role] ??= new JsonObject { ["Installed"] = false, ["Enabled"] = false, ["Active"] = false };
         if (asset is "xray-apply-config.sh" or "anytls-apply-config.sh" or "sing-box-apply-config.sh")
         {
             var role = asset == "xray-apply-config.sh" ? "RealityEntry" : asset == "anytls-apply-config.sh" ? "AnyTlsEntry" : "ShadowsocksLanding";
             protocolInventory[role] = new JsonObject { ["Installed"] = true, ["Enabled"] = true, ["Active"] = true };
-            if (role == "AnyTlsEntry") { protocolInventory["RealityEntry"]!["Enabled"] = false; protocolInventory["RealityEntry"]!["Active"] = false; }
+            if (role == "AnyTlsEntry" && Parameter("KEEP_OTHER_PROTOCOLS") != "true") { protocolInventory["RealityEntry"]!["Enabled"] = false; protocolInventory["RealityEntry"]!["Active"] = false; }
         }
         if (asset == "protocol-lifecycle-apply-state.sh") foreach (var (role, name) in new[] { ("RealityEntry", "REALITY_ENABLED"), ("AnyTlsEntry", "ANYTLS_ENABLED"), ("ShadowsocksLanding", "SHADOWSOCKS_ENABLED") }) { protocolInventory[role]!["Enabled"] = Parameter(name) == "true"; protocolInventory[role]!["Active"] = Parameter(name) == "true"; }
         var deploymentOutput = asset switch
@@ -78,6 +94,7 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
             "xray-generate-credentials.sh" => Marker("XRAY_SECRET", Fixture.RealitySecrets()["Xray"]!.ToJsonString()),
             "anytls-generate-ech.sh" => Marker("ECH_KEYS", "synthetic-ech-key") + Marker("ECH_CONFIG", "synthetic-ech-config"),
             "certbot-dns-setup.sh" => "VPSDEPLOY_CERTBOT_DNS_OK\n", "local-https-target.sh" => "VPSDEPLOY_LOCAL_HTTPS_OK\n",
+            "component-firewall-add.sh" => "VPSDEPLOY_COMPONENT_FIREWALL_OK\n", "monitoring-component-install.sh" => "VPSDEPLOY_MONITORING_INSTALLED\n",
             "protocol-lifecycle-apply-state.sh" => "VPSDEPLOY_PROTOCOL_STATE_APPLIED\n",
             "protocol-lifecycle-status.sh" => "VPSDEPLOY_PROTOCOL_STATUS_OK\n" + Marker("PROTOCOL_INVENTORY", protocolInventory.ToJsonString()),
             "final-validate.sh" => "VPSDEPLOY_FINAL_OK\n" + Marker("TIME_SYNC", "yes"),

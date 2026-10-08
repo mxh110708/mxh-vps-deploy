@@ -17,7 +17,14 @@ for value in \
   "$VPS_PARAM_SHADOWSOCKS_INSTALLED" "$VPS_PARAM_SHADOWSOCKS_ENABLED"; do
   [[ "$value" == 'true' || "$value" == 'false' ]] || exit 1
 done
-[[ "$VPS_PARAM_REALITY_ENABLED" != 'true' || "$VPS_PARAM_ANYTLS_ENABLED" != 'true' ]] || exit 1
+if [[ "$VPS_PARAM_REALITY_ENABLED" == true && "$VPS_PARAM_ANYTLS_ENABLED" == true ]]; then
+  python3 <<'PY'
+import json
+with open('/usr/local/etc/xray/config.json', encoding='utf-8') as f: a = {int(i['port']) for i in json.load(f).get('inbounds', [])}
+with open('/etc/sing-box-anytls/config.json', encoding='utf-8') as f: b = {int(i['listen_port']) for i in json.load(f).get('inbounds', [])}
+if not a or not b or a & b: raise SystemExit('Reality and AnyTLS listener ports conflict')
+PY
+fi
 
 systemctl is-active --quiet ssh.service
 sshd -t
@@ -56,13 +63,14 @@ verify_protocol ShadowsocksLanding sing-box.service /usr/local/bin/sing-box /etc
   "$VPS_PARAM_SHADOWSOCKS_INSTALLED" "$VPS_PARAM_SHADOWSOCKS_ENABLED"
 
 if [[ "$VPS_PARAM_REALITY_ENABLED" == 'true' ]]; then
-  grep -Fq xray <<< "$(ss -H -lntp 'sport = :443')"
-  if [[ -n "${VPS_PARAM_XRAY_BACKUP_PORT:-}" ]]; then
-    grep -Fq xray <<< "$(ss -H -lntp "sport = :${VPS_PARAM_XRAY_BACKUP_PORT}")"
-  fi
+  ports="$(python3 -c 'import json; print(" ".join(str(int(i["port"])) for i in json.load(open("/usr/local/etc/xray/config.json")).get("inbounds",[])))')"
+  [[ -n "$ports" ]]
+  for port in $ports; do grep -Fq xray <<< "$(ss -H -lntp "sport = :${port}")"; done
 fi
 if [[ "$VPS_PARAM_ANYTLS_ENABLED" == 'true' ]]; then
-  grep -Fq sing-box-anytl <<< "$(ss -H -lntp 'sport = :443')"
+  ports="$(python3 -c 'import json; print(" ".join(str(int(i["listen_port"])) for i in json.load(open("/etc/sing-box-anytls/config.json")).get("inbounds",[])))')"
+  [[ -n "$ports" ]]
+  for port in $ports; do grep -Fq sing-box-anytl <<< "$(ss -H -lntp "sport = :${port}")"; done
 fi
 if [[ "$VPS_PARAM_SHADOWSOCKS_ENABLED" == 'true' ]]; then
   [[ -n "${VPS_PARAM_SHADOWSOCKS_PORT:-}" ]]

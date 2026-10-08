@@ -113,15 +113,16 @@ public sealed partial class MainWindow
     private void DesignerNodes()
     {
         var nodes = scheme!["Nodes"]!.AsArray();
-        page.Children.Add(Trailing(SectionHeading("添加连接节点", Symbol.Link, "受管节点直接读取归档；其他节点可手动填写。"), Row(Action("添加受管节点", AddManagedNodes), Action("手动添加", () => EditNode(null)))));
+        page.Children.Add(Trailing(SectionHeading("添加连接节点", Symbol.Link, "拖动左侧手柄调整顺序；也可使用上下按钮。保存方案和导出的配置沿用此顺序。"), Row(Action("添加受管节点", AddManagedNodes), Action("手动添加", () => EditNode(null)))));
         if (nodes.Count == 0) { page.Children.Add(Card(Column(Text("还没有节点", 18), Text("先添加至少一个入口节点。使用落地时，再添加落地节点并选择它连接的入口组。", 14, true)))); return; }
         var rows = new List<UIElement>();
+        nodeDragSession = Guid.NewGuid().ToString("N");
         for (var i = 0; i < nodes.Count; i++)
         {
             var index = i; var node = nodes[i]!;
-            var up = Action("↑", () => { if (index > 0) { var copy = nodes[index]!.DeepClone(); nodes.RemoveAt(index); nodes.Insert(index - 1, copy); DirtyScheme(); } return Task.CompletedTask; }); AutomationProperties.SetName(up, "上移节点"); up.IsEnabled = i > 0;
-            var down = Action("↓", () => { if (index < nodes.Count - 1) { var copy = nodes[index]!.DeepClone(); nodes.RemoveAt(index); nodes.Insert(index + 1, copy); DirtyScheme(); } return Task.CompletedTask; }); AutomationProperties.SetName(down, "下移节点"); down.IsEnabled = i < nodes.Count - 1;
-            rows.Add(SettingRow(node.Text("name"), node.Text("kind") == "landing" ? "落地 · 连接 " + node.Text("transit_group") : "入口 · " + node.Text("region_group"), Symbol.Link, Row(up, down, Action("编辑", () => EditNode(index)), Action("移除", () => { nodes.RemoveAt(index); DirtyScheme(); return Task.CompletedTask; }))));
+            var up = Action("↑", () => { if (index > 0 && ClientSchemes.MoveNode(scheme!, index, index - 1)) Navigate("clients"); return Task.CompletedTask; }); AutomationProperties.SetName(up, "上移节点"); up.IsEnabled = i > 0;
+            var down = Action("↓", () => { if (index < nodes.Count - 1 && ClientSchemes.MoveNode(scheme!, index, index + 2)) Navigate("clients"); return Task.CompletedTask; }); AutomationProperties.SetName(down, "下移节点"); down.IsEnabled = i < nodes.Count - 1;
+            rows.Add(ReorderableNodeRow(scheme!, nodes, index, Row(up, down, Action("编辑", () => EditNode(index)), Action("移除", () => { nodes.RemoveAt(index); DirtyScheme(); return Task.CompletedTask; }))));
         }
         page.Children.Add(SettingsGroup(rows.ToArray()));
     }
@@ -158,12 +159,21 @@ public sealed partial class MainWindow
     {
         var selected = scheme!; var validated = selected.Text("Candidate.ValidationStatus") == "Passed"; var targets = selected["Targets"]!.AsObject();
         if (!HasOutput(selected)) { page.Children.Add(Text("请先在目标页点亮需要生成的配置。", 14, true)); return; }
-        page.Children.Add(Card(SectionHeading("生成与校验", Symbol.Document, ClientSchemes.OutputLabel(selected) + " · " + selected["Nodes"]!.AsArray().Count + " 个节点 · " + (validated ? "已通过核心校验" : selected["Candidate"] == null ? "尚未生成" : "待校验"))));
+        page.Children.Add(Card(SectionHeading("生成与校验", Symbol.Document, ClientSchemes.OutputLabel(selected) + " · " + selected["Nodes"]!.AsArray().Count + " 个节点 · " + (validated ? "已通过核心校验" : selected["Candidate"] == null ? "尚未生成" : selected.Text("Candidate.ValidationStatus") == "Failed" ? "校验未通过" : "待校验"))));
+        page.Children.Add(Text("操作顺序：生成配置 → 校验配置 → 通过后审阅并导出。", 16));
         var generate = Action("生成配置", async () => { try { await RunBackground("正在生成配置", async token => await workbench.BuildAsync(selected, token)); RememberScheme(); } finally { Navigate("clients"); } Show("配置已生成，方案已保存。", InfoBarSeverity.Success); }, selected["Candidate"] == null); generate.IsEnabled = selected["Nodes"]!.AsArray().Count > 0;
         var validate = Action("校验配置", async () => { try { await RunBackground("正在校验配置", async token => await workbench.ValidateAsync(selected, token)); RememberScheme(); } finally { Navigate("clients"); } Show("所选客户端的核心校验通过。", InfoBarSeverity.Success); }, selected["Candidate"] != null && !validated); validate.IsEnabled = selected["Candidate"] != null;
         page.Children.Add(Row(generate, validate)); page.Children.Add(GroupLabel("导出位置"));
-        foreach (var format in ClientSchemes.Formats(selected)) page.Children.Add(Card(FileField(format == "Clash" ? "Clash YAML 文件" : "sing-box JSON 文件", targets, format, true)));
+        var hint = Text(ClientSchemes.ExportHint(selected), 14); hint.Tag = "ExportPrerequisiteHint";
+        var export = Action("审阅并导出", PublishClients, true); export.IsEnabled = ClientSchemes.CanExport(selected);
+        foreach (var format in ClientSchemes.Formats(selected))
+        {
+            var fileField = (Grid)FileField(format == "Clash" ? "Clash YAML 文件" : "sing-box JSON 文件", targets, format, true);
+            ((TextBox)fileField.Children[0]).TextChanged += (_, _) => { hint.Text = ClientSchemes.ExportHint(selected); export.IsEnabled = ClientSchemes.CanExport(selected); };
+            page.Children.Add(Card(fileField));
+        }
+        page.Children.Add(Card(hint));
         page.Children.Add(Text("可新建配置文件，或选择已有的独立权威文件。替换前审阅并保留恢复副本，导出后由你自行导入客户端。", 14, true));
-        pageAction.Content = Action("审阅并导出", PublishClients, true); ((Button)pageAction.Content).IsEnabled = validated;
+        pageAction.Content = export;
     }
 }

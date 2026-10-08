@@ -60,9 +60,9 @@ public sealed partial class WorkflowEngine
         async Task Step(string id, Func<Task> action)
         {
             c.Cancellation.ThrowIfCancellationRequested();
-            if (c.State.Text("Modules." + id + ".Status") == "Success") return;
+            if (c.State.Text("Modules." + id + ".Status") == "Success") { await c.TrackStep(id, () => Task.CompletedTask, true); return; }
             c.State.Put("Modules." + id, new JsonObject { ["Status"] = "Running", ["StartedAt"] = DateTimeOffset.UtcNow }); c.Save();
-            try { await action(); c.State.Put("Modules." + id, new JsonObject { ["Status"] = "Success", ["FinishedAt"] = DateTimeOffset.UtcNow }); c.Save(); }
+            try { await c.TrackStep(id, async () => { await action(); c.State.Put("Modules." + id, new JsonObject { ["Status"] = "Success", ["FinishedAt"] = DateTimeOffset.UtcNow }); c.Save(); }); }
             catch (Exception error)
             {
                 var safe = error is OperationCanceledException ? null : SafeFailures.Describe(error);
@@ -80,8 +80,8 @@ public sealed partial class WorkflowEngine
             if (audit.Text("ExistingServices") != "" || audit.Number("NftRuleLines") != 0) throw new OperationException("检测到已有服务或防火墙，新机流程已停止，未覆盖。");
             c.State["Audit"] = audit; ArchiveStore.WriteJson(c.File("initial-audit.json"), audit);
         });
-        c.Report("management-key", "正在准备本地管理密钥及访问权限。");
-        var managementKey = keys.Prepare(c.File("ssh"), c.Plan.Text("Server.BootstrapKeyPath"), c.KeyPassphrase);
+        var managementKey = "";
+        await c.TrackStep("management-key", () => { managementKey = keys.Prepare(c.File("ssh"), c.Plan.Text("Server.BootstrapKeyPath"), c.KeyPassphrase); return Task.CompletedTask; });
         await Step("deployment-baseline", async () =>
         {
             if (!Regex.IsMatch(c.Plan.Text("DeploymentTransaction.Id"), "^[a-f0-9]{32}$")) throw new OperationException("部署事务身份无效。");
@@ -207,11 +207,12 @@ public sealed partial class WorkflowEngine
     }
     private async Task RefreshInventory(Context c)
     {
+        var previousEntry = c.Plan.Text("ActiveEntry");
         var result = await c.Run("protocol-lifecycle-status.sh", marker: "PROTOCOL_STATUS_OK");
         var inventory = JsonNode.Parse(RemoteAssets.Marker(result.Output, "PROTOCOL_INVENTORY"))!.AsObject();
         c.Plan["ProtocolInventory"] = inventory; c.State["ProtocolInventory"] = inventory.DeepClone();
-        c.Plan["Role"] = DeploymentPlans.Roles[..3].FirstOrDefault(role => inventory.Flag(role + ".Enabled")) ?? "MonitorOnly";
+        c.Plan["Role"] = DeploymentPlans.Roles[..2].Contains(previousEntry) && inventory.Flag(previousEntry + ".Enabled") ? previousEntry : DeploymentPlans.Roles[..3].FirstOrDefault(role => inventory.Flag(role + ".Enabled")) ?? "MonitorOnly";
         c.Plan["Roles"] = new JsonArray(DeploymentPlans.Roles[..3].Where(role => inventory.Flag(role + ".Installed")).DefaultIfEmpty("MonitorOnly").Select(role => (JsonNode?)JsonValue.Create(role)).ToArray());
-        c.Plan["ActiveEntry"] = DeploymentPlans.Roles[..2].FirstOrDefault(role => inventory.Flag(role + ".Enabled")) ?? "";
+        c.Plan["ActiveEntry"] = DeploymentPlans.Roles[..2].Contains(previousEntry) && inventory.Flag(previousEntry + ".Enabled") ? previousEntry : DeploymentPlans.Roles[..2].FirstOrDefault(role => inventory.Flag(role + ".Enabled")) ?? "";
     }
 }

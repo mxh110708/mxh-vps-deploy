@@ -361,7 +361,21 @@ case "$VPS_PARAM_ACTION" in
     : "${VPS_PARAM_TUNNEL_TOKEN:?}"
     [[ "$VPS_PARAM_TUNNEL_TOKEN" != *[[:space:]]* ]]
     cloudflared_bin="$(command -v cloudflared)"; [[ -x "$cloudflared_bin" ]]
-    cat > /etc/systemd/system/cloudflared.service <<EOF
+    unit=/etc/systemd/system/cloudflared.service
+    token_file=''
+    if [[ -f "$unit" ]] && grep -Fq -- '--token-file' "$unit"; then
+      grep -Fq -- '--token-file /etc/cloudflared/mxh-token' "$unit"
+      grep -Fxq 'Type=notify' "$unit"
+      token_file=/etc/cloudflared/mxh-token
+      [[ ! -L /etc/cloudflared && -f "$token_file" && ! -L "$token_file" && ! -L "$unit" ]]
+      temporary="$(mktemp)"
+      trap 'rm -f "$temporary"' EXIT
+      printf '%s' "$VPS_PARAM_TUNNEL_TOKEN" > "$temporary"
+      if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
+      install -o root -g cloudflared -m 0640 "$temporary" "$token_file"
+      rm -f "$temporary"; trap - EXIT
+    else
+      cat > "$unit" <<EOF
 [Unit]
 Description=Cloudflare Tunnel for Komari
 Wants=network-online.target
@@ -378,19 +392,25 @@ ProtectHome=true
 [Install]
 WantedBy=multi-user.target
 EOF
-    chmod 0600 /etc/systemd/system/cloudflared.service
+      chmod 0600 "$unit"
+    fi
     systemctl daemon-reload; systemctl enable cloudflared.service >/dev/null
     systemctl restart cloudflared.service
     systemctl is-active --quiet cloudflared.service
     pid="$(systemctl show --property=MainPID --value cloudflared.service)"
     [[ "$pid" =~ ^[1-9][0-9]*$ && "/proc/${pid}/exe" -ef "$cloudflared_bin" ]]
-    python3 - "/proc/${pid}/cmdline" <<'PY'
+    python3 - "/proc/${pid}/cmdline" "$token_file" <<'PY'
 import os, pathlib, sys
 arguments=pathlib.Path(sys.argv[1]).read_bytes().split(b"\0")
 expected=os.environ["VPS_PARAM_TUNNEL_TOKEN"].encode()
-if not any(arguments[index] == b"--token" and arguments[index+1] == expected for index in range(len(arguments)-1)):
-    raise SystemExit("Running Cloudflared process does not use the requested token")
+if sys.argv[2]:
+    if pathlib.Path(sys.argv[2]).read_bytes() != expected or not any(arguments[index] == b"--token-file" and arguments[index+1] == sys.argv[2].encode() for index in range(len(arguments)-1)):
+        raise SystemExit("Running Cloudflared process does not use the managed token file")
+else:
+    if not any(arguments[index] == b"--token" and arguments[index+1] == expected for index in range(len(arguments)-1)):
+        raise SystemExit("Running Cloudflared process does not use the requested token")
 PY
+    if [[ -n "$token_file" ]]; then curl --fail --silent --show-error --connect-timeout 5 --max-time 20 http://127.0.0.1:20241/ready >/dev/null; fi
     ;;
   ControllerUninstall)
     systemctl disable --now cloudflared.service komari.service >/dev/null 2>&1 || true

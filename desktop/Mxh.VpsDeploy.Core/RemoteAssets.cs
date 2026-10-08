@@ -21,6 +21,11 @@ public sealed class RemoteAssets(AppPaths paths)
             text.Append("export VPS_PARAM_").Append(name).Append("=\"$(printf '%s' '").Append(encoded).Append("' | base64 -d)\"\n");
         }
         if (parameters.ContainsKey("EXPECTED_TRANSACTION")) text.Append(Read("maintenance-mutation-guard.sh")).Append("\nvps_begin_mutation || exit 1\n");
+        if (parameters.TryGetValue("INSTALL_COMPONENT", out var component))
+        {
+            text.Append("export VPS_PARAM_COMPONENT='").Append(component is "RealityEntry" or "AnyTlsEntry" or "ShadowsocksLanding" or "KomariAgent" or "KomariController" or "Tunnel" ? component : throw new OperationException("安装组件名称无效。")).Append("'\nexport VPS_PARAM_REQUIRE_ABSENT=true\n").Append(Read("component-install-preflight.sh")).Append('\n');
+            if (parameters.ContainsKey("EXPECTED_TRANSACTION")) text.Append("vps_transaction_check || exit 1\n");
+        }
         return text.Append(Read(asset)).Append('\n').ToString();
     }
     public static string Marker(string text, string name, bool required = true)

@@ -10,10 +10,16 @@ case "$restart_role" in ''|RealityEntry|AnyTlsEntry|ShadowsocksLanding) ;; *) ex
 for value in "$VPS_PARAM_REALITY_ENABLED" "$VPS_PARAM_ANYTLS_ENABLED" "$VPS_PARAM_SHADOWSOCKS_ENABLED"; do
   [[ "$value" == 'true' || "$value" == 'false' ]] || exit 1
 done
-[[ "$VPS_PARAM_REALITY_ENABLED" != 'true' || "$VPS_PARAM_ANYTLS_ENABLED" != 'true' ]] || {
-  echo 'Reality and AnyTLS share TCP 443 and cannot both be enabled.' >&2
-  exit 1
-}
+if [[ "$VPS_PARAM_REALITY_ENABLED" == true && "$VPS_PARAM_ANYTLS_ENABLED" == true ]]; then
+  python3 <<'PY'
+import json
+with open('/usr/local/etc/xray/config.json', encoding='utf-8') as f: reality = json.load(f)
+with open('/etc/sing-box-anytls/config.json', encoding='utf-8') as f: anytls = json.load(f)
+a = {int(i['port']) for i in reality.get('inbounds', [])}
+b = {int(i['listen_port']) for i in anytls.get('inbounds', [])}
+if not a or not b or a & b: raise SystemExit('Reality and AnyTLS listener ports conflict')
+PY
+fi
 
 assert_installed() {
   local role="$1"
@@ -52,11 +58,9 @@ if [[ "$VPS_PARAM_SHADOWSOCKS_ENABLED" == 'false' ]]; then
 fi
 
 if [[ "$VPS_PARAM_REALITY_ENABLED" == 'true' ]]; then
-  systemctl disable --now sing-box-anytls.service >/dev/null 2>&1 || true
   systemctl enable --now xray.service >/dev/null
 fi
 if [[ "$VPS_PARAM_ANYTLS_ENABLED" == 'true' ]]; then
-  systemctl disable --now xray.service >/dev/null 2>&1 || true
   systemctl enable --now sing-box-anytls.service >/dev/null
 fi
 if [[ "$VPS_PARAM_SHADOWSOCKS_ENABLED" == 'true' ]]; then

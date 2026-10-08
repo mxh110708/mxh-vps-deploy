@@ -73,7 +73,7 @@ public static class DeploymentPlans
         if (Uses(plan, "ShadowsocksLanding") && plan.Flag("Shadowsocks.SecondaryIpv6Enabled") && (!IPAddress.TryParse(plan.Text("Shadowsocks.SecondaryIpv6Address"), out var source6) || source6.AddressFamily != AddressFamily.InterNetworkV6)) throw new OperationException("IPv6 专用用户需要明确的 IPv6 源地址。");
         if (plan.Flag("Komari.Enabled") && (!Uri.TryCreate(plan.Text("Komari.Endpoint"), UriKind.Absolute, out var endpoint) || endpoint.Scheme is not ("http" or "https"))) throw new OperationException("Komari 地址需要完整的 HTTP/HTTPS URL。");
     }
-    private static void Domain(string value)
+    internal static void Domain(string value)
     {
         if (value.Length is < 1 or > 253 || !value.Contains('.') || IPAddress.TryParse(value, out _) || value.Split('.').Any(label => !Regex.IsMatch(label, @"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$"))) throw new OperationException("请填写有效域名。");
     }

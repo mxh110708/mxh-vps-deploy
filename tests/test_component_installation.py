@@ -1,0 +1,136 @@
+"""Installation boundaries and protocol coexistence in isolated fixtures; no VPS."""
+import argparse
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+BASH = None
+
+def shell_path(path):
+    value = Path(path).as_posix()
+    return '/' + value[0].lower() + value[2:] if os.name == 'nt' and value[1:2] == ':' else value
+
+class InstallationTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory(prefix='component-install-', dir=ROOT / '.tmp')
+        self.root = Path(self.folder.name)
+        self.env = dict(os.environ, VPS_PARAM_COMPONENT='ShadowsocksLanding', VPS_PARAM_PORTS='45001')
+
+    def tearDown(self):
+        self.folder.cleanup()
+
+    def write(self, relative, data):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data, encoding='utf-8')
+        path.chmod(0o755)
+        return path
+
+    def preflight(self):
+        source = (ROOT / 'assets/remote/component-install-preflight.sh').read_text().split("python3 <<'PY'\n", 1)[1].split('\nPY', 1)[0]
+        source = re.sub(r'(?<![\w/])/(?:usr/local|usr/bin|etc|var/lib|opt|root|nonexistent)(?=/|[\'"\s])', lambda m: self.root.as_posix() + m[0], source)
+        preamble = '''import subprocess, os, pathlib
+def fixture_run(*args, **kwargs):
+    command = args[0]
+    if command[0] == 'ss': return subprocess.CompletedProcess(command, 0, 'occupied' if os.environ.get('BUSY_PORT') else '', '')
+    unit = command[-1]
+    exists = pathlib.Path(os.environ['FIXTURE_ROOT'], 'etc/systemd/system', unit).is_file()
+    return subprocess.CompletedProcess(command, 0 if exists else 1, '', '')
+subprocess.run = fixture_run
+'''
+        result = subprocess.run([sys.executable, '-c', preamble + source], env=dict(self.env, FIXTURE_ROOT=str(self.root)), capture_output=True, text=True, timeout=20)
+        marker = next(line.split('=', 1)[1] for line in result.stdout.splitlines() if line.startswith('VPSDEPLOY_INSTALLATION_CHECK_B64='))
+        return json.loads(base64.b64decode(marker)), result.returncode
+
+    def test_absent_component_and_free_port_allowed_without_mutation(self):
+        self.write('usr/local/bin/xray', 'existing-binary')
+        self.write('etc/systemd/system/xray.service', 'existing-unit')
+        self.write('usr/local/etc/xray/config.json', 'existing-config')
+        before = {p.relative_to(self.root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in self.root.rglob('*') if p.is_file()}
+        result, code = self.preflight()
+        self.assertEqual(code, 0)
+        self.assertTrue(result['Allowed'])
+        self.assertEqual(before, {p.relative_to(self.root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in self.root.rglob('*') if p.is_file()})
+
+    def test_partial_files_and_busy_tcp_or_udp_port_rejected(self):
+        path = self.write('etc/sing-box/unmanaged.txt', 'keep')
+        result, _ = self.preflight(); self.assertEqual(result['Code'], 'ComponentExists')
+        self.assertEqual(path.read_text(), 'keep')
+        path.unlink(); path.parent.rmdir(); self.env['BUSY_PORT'] = '45001'
+        result, _ = self.preflight(); self.assertEqual(result['Code'], 'PortBusy')
+        self.env['VPS_PARAM_REQUIRE_ABSENT'] = 'true'
+        _, code = self.preflight(); self.assertNotEqual(code, 0)
+
+    def test_preservation_gate_detects_existing_config_change(self):
+        old = self.write('usr/local/etc/xray/config.json', 'old-reality')
+        result, _ = self.preflight()
+        self.env.update(VPS_PARAM_VERIFY_ONLY='true', VPS_PARAM_BEFORE_JSON=json.dumps(result))
+        self.write('usr/local/bin/sing-box', 'new-binary')
+        self.write('etc/systemd/system/sing-box.service', 'new-unit')
+        result, _ = self.preflight(); self.assertTrue(result['Allowed'])
+        old.write_text('changed-existing')
+        result, _ = self.preflight(); self.assertFalse(result['Allowed']); self.assertEqual(result['Code'], 'ExistingComponentChanged')
+
+    def test_symlinked_parent_is_not_overwritten(self):
+        if os.name == 'nt': self.skipTest('Windows symlink privilege; Linux CI covers this case')
+        actual = self.root / 'outside'; actual.mkdir()
+        (self.root / 'etc').mkdir(); (self.root / 'etc/sing-box').symlink_to(actual, target_is_directory=True)
+        result, _ = self.preflight(); self.assertFalse(result['Allowed'])
+        self.assertEqual(list(actual.iterdir()), [])
+
+    def coexistence(self, port):
+        self.write('usr/local/bin/xray', '#!/usr/bin/env bash\nexit 0\n')
+        self.write('usr/local/bin/sing-box-anytls', '#!/usr/bin/env bash\nexit 0\n')
+        self.write('usr/local/etc/xray/config.json', json.dumps({'inbounds': [{'port': 443}]}))
+        self.write('etc/sing-box-anytls/config.json', json.dumps({'inbounds': [{'listen_port': port}]}))
+        for service in ('xray.service', 'sing-box-anytls.service'):
+            self.write('etc/systemd/system/' + service, 'fixture')
+        self.write('active-xray.service', 'true')
+        source = (ROOT / 'assets/remote/protocol-lifecycle-apply-state.sh').read_text()
+        source = re.sub(r'(?<![\w/])/(?:usr/local|etc)(?=/|[\'"\s])', lambda m: shell_path(self.root) + m[0], source)
+        source = re.sub(r"(<<'PY'\n)(.*?)(\nPY)", lambda m: m[1] + m[2].replace(shell_path(self.root), self.root.as_posix()) + m[3], source, flags=re.S)
+        preamble = '''python3(){ "$TEST_PYTHON" "$@"; }
+systemctl(){
+  echo "$*" >> "$TEST_ROOT/calls"
+  local unit="${@: -1}"
+  case "$1" in
+    cat) [[ -f "$TEST_ROOT/etc/systemd/system/$unit" ]];;
+    is-active|is-enabled) [[ -f "$TEST_ROOT/active-$unit" ]];;
+    enable|start) touch "$TEST_ROOT/active-$unit";;
+    disable|stop) rm -f "$TEST_ROOT/active-$unit"; return 0;;
+    *) return 0;;
+  esac
+}
+'''
+        env = dict(self.env, TEST_ROOT=shell_path(self.root), TEST_PYTHON=shell_path(sys.executable), VPS_PARAM_REALITY_ENABLED='true', VPS_PARAM_ANYTLS_ENABLED='true', VPS_PARAM_SHADOWSOCKS_ENABLED='false')
+        return subprocess.run([BASH, '--noprofile', '--norc', '-s'], input=preamble + source, text=True, capture_output=True, env=env, timeout=20)
+
+    def test_distinct_ports_coexist_without_stopping_existing_reality(self):
+        if not BASH: self.skipTest('Bash unavailable')
+        result = self.coexistence(8443)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / 'calls').read_text()
+        self.assertNotIn('disable --now xray.service', calls)
+        self.assertTrue((self.root / 'active-xray.service').is_file())
+        self.assertTrue((self.root / 'active-sing-box-anytls.service').is_file())
+
+    def test_shared_ports_rejected_before_any_service_mutation(self):
+        if not BASH: self.skipTest('Bash unavailable')
+        result = self.coexistence(443)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'calls').exists())
+        self.assertTrue((self.root / 'active-xray.service').is_file())
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(); parser.add_argument('--bash'); options, remaining = parser.parse_known_args()
+    BASH = options.bash or ('/bin/bash' if os.name != 'nt' else None)
+    (ROOT / '.tmp').mkdir(exist_ok=True)
+    unittest.main(argv=[sys.argv[0], *remaining], verbosity=2)

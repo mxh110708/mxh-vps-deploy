@@ -176,6 +176,29 @@ class ScopedRollbackTests(unittest.TestCase):
         self.assertEqual((self.root/'etc/sing-box/config.json').read_text(),'new-protocol')
         self.assertFalse((self.backup/'rollback-executed').exists())
 
+    def test_new_anytls_rollback_does_not_touch_existing_protocol_or_monitor(self):
+        self.arm('AnyTlsEntry')
+        for relative in ('usr/local/bin/sing-box-anytls', 'etc/sing-box-anytls/config.json', 'etc/systemd/system/sing-box-anytls.service'):
+            path=self.root/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('new-anytls')
+        (self.root/'calls').write_text('')
+        self.restore()
+        self.assertFalse((self.root/'etc/sing-box-anytls').exists())
+        self.assertEqual((self.root/'etc/sing-box/config.json').read_text(),'old-protocol')
+        self.assertEqual((self.root/'opt/komari/data/komari.db').read_text(),'old-monitor')
+        calls=(self.root/'calls').read_text()
+        self.assertNotIn('sing-box.service',calls)
+        self.assertNotIn('komari.service',calls)
+
+    def test_new_tunnel_rollback_removes_private_token_only_in_tunnel_scope(self):
+        self.arm('Cloudflared')
+        for relative in ('usr/local/bin/cloudflared', 'etc/systemd/system/cloudflared.service', 'etc/cloudflared/mxh-token'):
+            path=self.root/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('synthetic-tunnel')
+        (self.root/'calls').write_text('')
+        self.restore()
+        self.assertFalse((self.root/'etc/cloudflared').exists())
+        self.assertEqual((self.root/'opt/komari/data/komari.db').read_text(),'old-monitor')
+        self.assertNotIn('komari.service',(self.root/'calls').read_text())
+
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--bash',required=True)

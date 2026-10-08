@@ -2,7 +2,7 @@ using System.Text.Json.Nodes;
 
 namespace Mxh.VpsDeploy.Core;
 
-public enum OperationKind { ConnectExisting, Deploy, Resume, HealthAudit, TuneNetwork, ProtocolState, RotateCredentials, Upgrade, Restore, Recover, Komari, Decommission, ResumeImport }
+public enum OperationKind { ConnectExisting, Deploy, Resume, HealthAudit, TuneNetwork, ProtocolState, RotateCredentials, Upgrade, Restore, Recover, Komari, Decommission, ResumeImport, InstallComponent }
 public enum TaskOutcome { Running, Completed, CompletedWithWarnings, Cancelled, Failed, NeedsRecovery }
 public enum ComponentScope { Protocol, Network, Firewall, Ssh, KomariAgent, KomariController, Tunnel, ManagedInstance }
 public sealed record HostIdentity(string Host, int Port, string Algorithm, string Sha256Fingerprint, bool Changed);
@@ -49,7 +49,10 @@ public sealed record OperationRequest(OperationKind Kind, string InstanceRelativ
     public OperationRequest Snapshot() => this with { Options = (JsonObject)Options.DeepClone() };
 }
 public sealed record ReviewedOperation(OperationRequest Request, string Fingerprint, string PlanFingerprint, string Summary);
-public sealed record TaskProgress(string TaskId, string Stage, int Completed, int Total, string Message);
+public enum TaskStepState { Waiting, Running, Completed, Skipped, Failed, Cancelled }
+public sealed record PlannedTaskStep(string Id, string Title, string Description);
+public sealed record TaskProgress(string TaskId, string Stage, int Completed, int Total, string Message,
+    string? StepId = null, TaskStepState? StepState = null, IReadOnlyList<PlannedTaskStep>? Steps = null);
 public sealed record TaskRecord(string Id, OperationKind Kind, DateTimeOffset StartedAt, DateTimeOffset? FinishedAt, TaskOutcome Outcome, string Stage, string? SafeError = null, string? ErrorCode = null, string? NextAction = null, string? InstanceRelativePath = null, string? TargetLabel = null);
 public sealed class OperationException(string safeMessage, bool needsRecovery = false, string? code = null, string? nextAction = null) : Exception(safeMessage)
 {

@@ -15,7 +15,9 @@ preserve_ssh_auth="${VPS_PARAM_PRESERVE_SSH_AUTH:-false}"
 for value in "$VPS_PARAM_REALITY_ENABLED" "$VPS_PARAM_ANYTLS_ENABLED" "$VPS_PARAM_SHADOWSOCKS_ENABLED"; do
   [[ "$value" == 'true' || "$value" == 'false' ]] || exit 1
 done
-[[ "$VPS_PARAM_REALITY_ENABLED" != 'true' || "$VPS_PARAM_ANYTLS_ENABLED" != 'true' ]] || exit 1
+if [[ "$VPS_PARAM_REALITY_ENABLED" == true && "$VPS_PARAM_ANYTLS_ENABLED" == true ]]; then
+  [[ "$VPS_PARAM_XRAY_PRIMARY" != "$VPS_PARAM_ANYTLS_PORT" && "${VPS_PARAM_XRAY_BACKUP:-}" != "$VPS_PARAM_ANYTLS_PORT" ]] || exit 1
+fi
 
 sshd -t
 effective="$(sshd -T)"
@@ -78,7 +80,7 @@ assert isinstance(scheme, list) and len(scheme) >= 3
 PY
   systemctl is-enabled --quiet sing-box-anytls.service
   systemctl is-active --quiet sing-box-anytls.service
-  ! systemctl is-active --quiet xray.service
+  [[ "$VPS_PARAM_REALITY_ENABLED" == true ]] || ! systemctl is-active --quiet xray.service
   ss -H -lntp "sport = :${VPS_PARAM_ANYTLS_PORT}" | grep -F sing-box-anytl >/dev/null
   openssl x509 -in /etc/mxh-tls/anytls/fullchain.pem -noout -checkhost "$VPS_PARAM_ANYTLS_SERVER_NAME" >/dev/null
   [[ "$(stat -c '%a' /etc/sing-box-anytls/config.json)" == '640' ]]

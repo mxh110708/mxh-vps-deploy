@@ -20,6 +20,10 @@ trap report_failure ERR
 anytls_enabled="${VPS_PARAM_ANYTLS_ENABLED:-false}"
 reality_enabled="${VPS_PARAM_REALITY_ENABLED:-false}"
 propagation_seconds="${VPS_PARAM_PROPAGATION_SECONDS:-30}"
+preserve_credentials="${VPS_PARAM_PRESERVE_EXISTING_CREDENTIALS:-false}"
+[[ "$preserve_credentials" == true || "$preserve_credentials" == false ]]
+credentials_path=/etc/letsencrypt/cloudflare.ini
+if [[ "$preserve_credentials" == true ]]; then credentials_path=/etc/letsencrypt/mxh-anytls-cloudflare.ini; fi
 
 [[ "$anytls_enabled" == 'true' || "$reality_enabled" == 'true' ]] || {
   echo 'No trusted TLS certificate was requested.' >&2
@@ -116,14 +120,17 @@ grep -Fq 'dns-cloudflare' <<< "$certbot_plugins"
 # The distribution timer does not run our explicit deploy hook. Keep a single
 # renewal owner so a renewed certificate is always copied and the service is
 # reloaded in the same transaction.
+if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
 systemctl disable --now certbot.timer >/dev/null 2>&1 || true
 
 phase='cloudflare-credentials-install'
 install -d -o root -g root -m 0700 /etc/letsencrypt
 credentials_tmp="$work/cloudflare.ini"
 printf 'dns_cloudflare_api_token = %s\n' "$VPS_PARAM_CLOUDFLARE_TOKEN" > "$credentials_tmp"
-install -o root -g root -m 0600 "$credentials_tmp" /etc/letsencrypt/cloudflare.ini
+if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
+install -o root -g root -m 0600 "$credentials_tmp" "$credentials_path"
 
+if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
 install -d -o root -g root -m 0755 /usr/local/libexec
 cat > /usr/local/libexec/mxh-certbot-deploy <<'HOOK'
 #!/usr/bin/env bash
@@ -208,14 +215,16 @@ issue_certificate() {
   [[ "${#domain_args[@]}" -gt 0 ]] || { echo 'Certificate domain list is empty.' >&2; exit 1; }
 
   phase='certificate-issuance'
+  if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
   certbot certonly \
     --non-interactive --agree-tos --email "$VPS_PARAM_EMAIL" \
-    --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+    --dns-cloudflare --dns-cloudflare-credentials "$credentials_path" \
     --dns-cloudflare-propagation-seconds "$propagation_seconds" \
     --key-type ecdsa --elliptic-curve secp256r1 \
     --cert-name "$cert_name" --keep-until-expiring \
     "${domain_args[@]}" >/dev/null
   phase='certificate-deploy-hook'
+  if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
   RENEWED_LINEAGE="/etc/letsencrypt/live/$cert_name" \
     RENEWED_DOMAINS="$domains_csv" /usr/local/libexec/mxh-certbot-deploy
   phase='certificate-renewal-dry-run'
@@ -234,12 +243,13 @@ if [[ "$reality_enabled" == 'true' ]]; then
 fi
 
 phase='renewal-timer-validation'
+if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
 systemctl daemon-reload
 systemctl enable --now mxh-certbot-renew.timer >/dev/null
 systemctl is-enabled --quiet mxh-certbot-renew.timer
 systemctl is-active --quiet mxh-certbot-renew.timer
 ! systemctl is-active --quiet certbot.timer
-[[ "$(stat -c '%a' /etc/letsencrypt/cloudflare.ini)" == '600' ]]
+[[ "$(stat -c '%a' "$credentials_path")" == '600' ]]
 
 certbot_version="$(certbot --version 2>&1 | awk '{print $2}')"
 printf 'VPSDEPLOY_CERTBOT_VERSION_B64=%s\n' "$(printf '%s' "$certbot_version" | base64 | tr -d '\n')"

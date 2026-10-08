@@ -6,6 +6,16 @@ set -euo pipefail
 : "${VPS_PARAM_ECH_CONFIG_PEM:?}"
 : "${VPS_PARAM_PORT:?}"
 : "${VPS_PARAM_SERVER_NAME:?}"
+keep_other="${VPS_PARAM_KEEP_OTHER_PROTOCOLS:-false}"
+[[ "$keep_other" == true || "$keep_other" == false ]]
+if [[ "$keep_other" == true && -f /usr/local/etc/xray/config.json ]]; then
+  python3 - "$VPS_PARAM_PORT" <<'PY'
+import json, sys
+with open('/usr/local/etc/xray/config.json', encoding='utf-8') as f: config = json.load(f)
+if any(int(inbound.get('port', 0)) == int(sys.argv[1]) for inbound in config.get('inbounds', [])):
+    raise SystemExit('New AnyTLS port conflicts with an existing Xray listener')
+PY
+fi
 
 config='/etc/sing-box-anytls/config.json'
 stamp="$(date -u +%Y%m%d-%H%M%S)"
@@ -27,10 +37,10 @@ cleanup() {
   if [[ "$status" -ne 0 && "$rollback_needed" == 'yes' ]]; then
     set +e
     systemctl disable --now sing-box-anytls.service >/dev/null 2>&1
-    if [[ "$xray_was_enabled" == 'yes' ]]; then
+    if [[ "$keep_other" == false && "$xray_was_enabled" == 'yes' ]]; then
       systemctl enable xray.service >/dev/null 2>&1
     fi
-    if [[ "$xray_was_active" == 'yes' ]]; then
+    if [[ "$keep_other" == false && "$xray_was_active" == 'yes' ]]; then
       systemctl start xray.service >/dev/null 2>&1
     fi
   fi
@@ -57,15 +67,15 @@ openssl x509 -in /etc/mxh-tls/anytls/fullchain.pem -noout -checkhost "$VPS_PARAM
 if systemctl is-active --quiet xray.service; then xray_was_active='yes'; fi
 if systemctl is-enabled --quiet xray.service 2>/dev/null; then xray_was_enabled='yes'; fi
 rollback_needed='yes'
-if [[ "$xray_was_active" == 'yes' ]]; then systemctl stop xray.service; fi
-if [[ "$xray_was_enabled" == 'yes' ]]; then systemctl disable xray.service >/dev/null; fi
+if [[ "$keep_other" == false && "$xray_was_active" == 'yes' ]]; then systemctl stop xray.service; fi
+if [[ "$keep_other" == false && "$xray_was_enabled" == 'yes' ]]; then systemctl disable xray.service >/dev/null; fi
 
 systemctl enable sing-box-anytls.service >/dev/null
 systemctl restart sing-box-anytls.service
 systemctl is-active --quiet sing-box-anytls.service
 sleep 1
 ss -H -lntp "sport = :${VPS_PARAM_PORT}" | grep -F sing-box-anytl >/dev/null
-if systemctl is-active --quiet xray.service; then
+if [[ "$keep_other" == false ]] && systemctl is-active --quiet xray.service; then
   echo 'xray and sing-box-anytls must not be active at the same time.' >&2
   exit 1
 fi

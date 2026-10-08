@@ -67,6 +67,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
         body.Children.Add(new Border { Background = Brush(Paint.Sidebar), BorderBrush = Brush(Paint.SidebarBorder), BorderThickness = new Thickness(0, 0, 1, 0), Child = sidebar });
         pageHost.Content = page;
         var content = new ScrollViewer { Content = new StackPanel { Spacing = 22, Margin = new Thickness(36, 24, 36, 28), Children = { new StackPanel { Spacing = 7, Children = { heading, caption } }, notice, pageHost } }, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled }; Grid.SetColumn(content, 1); body.Children.Add(content);
+        mainScroll = content;
         Grid.SetRow(body, 1); shell.Children.Add(body);
         var taskBar = new Grid { Padding = new Thickness(20, 9, 20, 9), Background = Brush(Paint.Footer), ColumnSpacing = 16 };
         taskBar.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) }); taskBar.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); taskBar.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
@@ -123,6 +124,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private void Show(string message, InfoBarSeverity severity = InfoBarSeverity.Informational) { notice.Message = message; notice.Severity = severity; notice.IsOpen = true; }
     private void Navigate(string id)
     {
+        ClearExecution();
         currentPage = id; page.Children.Clear(); disclosures.Clear(); pageAction.Content = null; notice.IsOpen = false; heading.Text = id switch { "overview" => "概述", "instances" => "实例", "deploy" => "部署", "clients" => "配置设计", "network" => "网络调优", "records" => "任务记录", _ => "设置" }; caption.Text = id switch { "overview" => "集中管理你的 VPS 与连接配置。", "instances" => "选择实例，查看归档并进行维护。", "deploy" => "组合选择用途，审阅计划，然后执行。", "clients" => "选择目标，设计连接，校验后导出配置。", "network" => "部署完成后，按需要单独审阅并调整网络参数。", "records" => "查看任务结果和需要处理的恢复记录。", _ => "应用更新、外观设置与私人数据。" };
         try { switch (id) { case "overview": Overview(); break; case "instances": Instances(); break; case "deploy": Deployment(); break; case "clients": Clients(); break; case "network": NetworkPage(); break; case "records": Records(); break; default: Settings(); break; } } catch (Exception error) { Show(error is OperationException safe ? safe.Message : "本地记录暂时无法读取，请核对数据目录。", InfoBarSeverity.Error); }
         if (Content is DependencyObject root) ApplyFont(root);
@@ -172,6 +174,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
             details.Children.Add(SettingsGroup(
                 SettingRow("健康检查", "读取服务、监听与管理入口的当前状态", Symbol.Sync, Action("检查", () => Submit(new(OperationKind.HealthAudit, selectedInstance, new())))),
                 SettingRow("代理协议", "管理已安装协议的启用、停用、切换与卸载", Symbol.Setting, Action("协议管理", () => OperationSheet(OperationKind.ProtocolState, plan))),
+                SettingRow("追加代理协议", "在此实例安装尚未安装的协议，保留已有服务", Symbol.Add, Action("添加协议", () => ChooseInstallation(plan))),
                 SettingRow("代理核心", "升级此 VPS 上的 Xray 或 sing-box；审阅时显示对象与版本", Symbol.Download, Action("升级核心", () => OperationSheet(OperationKind.Upgrade, plan))),
                 SettingRow("协议凭据", "轮换正在运行的协议凭据", Symbol.Permissions, Action("凭据轮换", () => OperationSheet(OperationKind.RotateCredentials, plan)))));
             details.Children.Add(GroupLabel("监控与访问")); details.Children.Add(MonitoringControls(plan, InstanceState(relative)));
@@ -214,11 +217,23 @@ public sealed partial class MainWindow : Window, IUserInteraction
         var review = coordinator.Review(request);
         if (!await ReviewOperation(review)) return;
         activeOperation = request;
-        try { await RunBackground("准备任务", async token => { var progress = new Progress<TaskProgress>(p => taskText.Text = StageLabel(p.Stage) + " · " + p.Message); var record = await Task.Run(() => coordinator.ExecuteAsync(review, request, progress, token)); taskText.Text = OutcomeLabel(record.Outcome) + " · " + StageLabel(record.Stage); Show(TaskMessage(record), record.Outcome is TaskOutcome.Failed or TaskOutcome.NeedsRecovery ? InfoBarSeverity.Error : record.Outcome == TaskOutcome.Completed ? InfoBarSeverity.Success : InfoBarSeverity.Warning); }); }
+        if (OperationSteps.HasDeploymentProgress(request.Kind)) ShowExecution(request);
+        try { await RunBackground("准备任务", async token => { var progress = new Progress<TaskProgress>(ExecutionProgress); var record = await Task.Run(() => coordinator.ExecuteAsync(review, request, progress, token)); taskText.Text = OutcomeLabel(record.Outcome) + " · " + StageLabel(record.Stage); if (ShowingExecution) FinishExecution(record); Show(TaskMessage(record), record.Outcome is TaskOutcome.Failed or TaskOutcome.NeedsRecovery ? InfoBarSeverity.Error : record.Outcome == TaskOutcome.Completed ? InfoBarSeverity.Success : InfoBarSeverity.Warning); }); }
+        catch (Exception error)
+        {
+            if (ShowingExecution && executionResult == null)
+            {
+                var safe = error is OperationCanceledException ? null : SafeFailures.Describe(error);
+                FinishExecution(new TaskRecord("ui-" + Guid.NewGuid().ToString("N"), request.Kind, executionStarted, DateTimeOffset.UtcNow,
+                    error is OperationCanceledException ? TaskOutcome.Cancelled : TaskOutcome.Failed, "preflight", safe?.Message, safe?.Code, safe?.NextAction, request.InstanceRelativePath));
+            }
+            throw;
+        }
         finally { activeOperation = null; RefreshTaskResultPage(); }
     }
     private void RefreshTaskResultPage()
     {
+        if (ShowingExecution) return;
         if (currentPage is not ("instances" or "records" or "overview")) return;
         var shown = notice.IsOpen; var message = notice.Message; var severity = notice.Severity;
         SelectPage(currentPage); if (shown) Show(message, severity);
@@ -226,13 +241,13 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private async Task RunBackground(string label, Func<CancellationToken, Task> action)
     {
         if (taskCancellation != null) throw new OperationException("已有任务运行，请等待结束。");
-        taskCancellation = new(); cancel.Visibility = Visibility.Visible; cancel.IsEnabled = true; taskProgress.Value = 0; taskProgress.IsIndeterminate = true; taskProgress.Visibility = Visibility.Visible; taskText.Text = label; pageHost.IsEnabled = false; pageAction.IsEnabled = false; foreach (var button in navigation.Values) button.IsEnabled = false;
+        taskCancellation = new(); cancel.Visibility = Visibility.Visible; cancel.IsEnabled = true; taskProgress.Value = 0; taskProgress.IsIndeterminate = true; taskProgress.Visibility = Visibility.Visible; taskText.Text = label; pageHost.IsEnabled = ShowingExecution && executionResult == null; pageAction.IsEnabled = false; foreach (var button in navigation.Values) button.IsEnabled = false;
         try { await action(taskCancellation.Token); if (taskText.Text == label) taskText.Text = "已完成"; }
         catch (OperationCanceledException) { taskText.Text = "已取消"; throw; }
         catch { taskText.Text = "任务未完成"; throw; }
         finally { taskCancellation.Dispose(); taskCancellation = null; pageHost.IsEnabled = true; pageAction.IsEnabled = true; foreach (var button in navigation.Values) button.IsEnabled = true; cancel.Visibility = Visibility.Collapsed; taskProgress.Visibility = Visibility.Collapsed; if (closing) { SaveDraft(); Close(); } }
     }
-    private static string OutcomeLabel(TaskOutcome outcome) => outcome switch { TaskOutcome.Completed => "已完成", TaskOutcome.CompletedWithWarnings => "已完成，含未验收项", TaskOutcome.Cancelled => "已取消", TaskOutcome.NeedsRecovery => "待恢复", TaskOutcome.Failed => "失败", _ => "上次任务未确认结束" };
+    private static string OutcomeLabel(TaskOutcome outcome) => outcome switch { TaskOutcome.Completed => "已完成", TaskOutcome.CompletedWithWarnings => "已完成，含提示", TaskOutcome.Cancelled => "已取消", TaskOutcome.NeedsRecovery => "待恢复", TaskOutcome.Failed => "失败", _ => "上次任务未确认结束" };
     private void SaveDraft() => SaveScheme();
     public Task<bool> ConfirmHostAsync(HostIdentity identity, CancellationToken cancellationToken) => ConfirmHostIdentity(identity, cancellationToken);
     public async Task<bool> ConfirmAsync(UserDecision decision, CancellationToken cancellationToken) => await OnUi(async () =>

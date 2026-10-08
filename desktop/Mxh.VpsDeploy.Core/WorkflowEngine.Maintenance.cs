@@ -108,6 +108,27 @@ public sealed partial class WorkflowEngine
         if (components.Contains("KomariAgent")) { Restore(c.Plan, oldPlan, "Komari"); Restore(c.Secrets, oldSecrets, "KomariAgent"); Restore(c.State, oldState, "KomariInstalled"); }
         if (components.Contains("KomariController")) Restore(c.State, oldState, "KomariController");
         if (components.Contains("Cloudflared")) { Restore(c.State, oldState, "Cloudflared"); Restore(c.Secrets, oldSecrets, "Cloudflared"); }
+        foreach (var role in DeploymentPlans.Roles[..3].Where(components.Contains))
+        {
+            var section = role == "RealityEntry" ? "Reality" : role == "AnyTlsEntry" ? "AnyTls" : "Shadowsocks";
+            Restore(c.Plan, oldPlan, section); Restore(c.Secrets, oldSecrets, role == "RealityEntry" ? "Xray" : section);
+            foreach (var key in new[] { "Role", "Roles", "ActiveEntry" }) Restore(c.Plan, oldPlan, key);
+            foreach (var port in role == "RealityEntry" ? new[] { "XrayPrimary", "XrayBackup" } : role == "AnyTlsEntry" ? new[] { "AnyTlsPrimary" } : new[] { "LandingShadowsocks" }) c.Plan.Put("Ports." + port, oldPlan.At("Ports." + port)?.DeepClone());
+            Restore(c.Plan, oldPlan, "ProtocolInventory"); Restore(c.State, oldState, "ProtocolInventory");
+            Restore(c.State, oldState, "ProtocolValidation"); validation.Export(c.Plan, c.Secrets, c.File("client-exports"));
+        }
+        if (components.Contains("TrustedTls")) Restore(c.Plan, oldPlan, "TrustedTls");
+        foreach (var name in new[] { "KomariAgent", "KomariController", "Cloudflared" }.Where(components.Contains))
+        {
+            if (c.State["MonitoringInventory"] is JsonObject inventory)
+            {
+                if (oldState["MonitoringInventory"] is JsonObject oldInventory && oldInventory.ContainsKey(name)) inventory[name] = oldInventory[name]?.DeepClone();
+                else inventory.Remove(name);
+            }
+        }
+        if (components.Contains("KomariController")) { Restore(c.Plan, oldPlan, "KomariController"); Restore(c.Secrets, oldSecrets, "KomariController"); }
+        if (components.Contains("Cloudflared")) Restore(c.Plan, oldPlan, "Cloudflared");
+        if (c.Pending?.Text("Kind") == OperationKind.InstallComponent.ToString()) Restore(c.State, oldState, "LastComponentInstallation");
     }
     private async Task Recover(Context c)
     {
@@ -187,7 +208,7 @@ public sealed partial class WorkflowEngine
         {
             if (!DeploymentPlans.Roles[..3].Contains(role) || !c.Plan.Flag("ProtocolInventory." + role + ".Installed", c.Plan.Text("Role") == role)) throw new OperationException("请选择已安装的受管协议。");
             if (c.Request.Kind is OperationKind.RotateCredentials or OperationKind.Upgrade && !Enabled(c.Plan, role)) throw new OperationException("此项操作需要启用对应协议后独立验收。");
-            if (c.Request.Kind == OperationKind.ProtocolState && options.Text("Action") == "Enable" && role is "RealityEntry" or "AnyTlsEntry" && Enabled(c.Plan, role == "RealityEntry" ? "AnyTlsEntry" : "RealityEntry")) throw new OperationException("共用端口的入口需要使用切换操作。");
+            if (c.Request.Kind == OperationKind.ProtocolState && options.Text("Action") == "Enable" && role is "RealityEntry" or "AnyTlsEntry" && Enabled(c.Plan, role == "RealityEntry" ? "AnyTlsEntry" : "RealityEntry") && ComponentInstallations.EntryPortsConflict(c.Plan)) throw new OperationException("共用端口的入口需要使用切换操作。");
         }
         if (c.Request.Kind == OperationKind.TuneNetwork && options.Number("ReferenceRttMs") is < 0 or > 2000) throw new OperationException("参考 RTT 无效。");
         if (c.Request.Kind == OperationKind.Restore && options.Text("RestoreMode") is not ("ConfigOnly" or "Full")) throw new OperationException("恢复范围无效。");
@@ -198,12 +219,17 @@ public sealed partial class WorkflowEngine
         await using var session = await c.Session(); var result = await session.RunAsync("sha256sum -- '" + file + "'", TimeSpan.FromSeconds(120), c.Cancellation); result.RequireSuccess("远端归档摘要无法读取。");
         if (result.Output.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.ToLowerInvariant() != expected) throw new OperationException("本地与远端归档摘要不一致，已停止。");
     }
-    private async Task InstallProtocol(Context c, string role, bool upgrade)
+    private async Task InstallProtocol(Context c, string role, bool upgrade, JsonObject? pinnedVersions = null)
     {
-        var version = Versions;
+        var version = pinnedVersions ?? Versions;
+        Dictionary<string, string> InstallationGuard(Dictionary<string, string> parameters)
+        {
+            if (c.Request.Kind == OperationKind.InstallComponent) { parameters["INSTALL_COMPONENT"] = role; parameters["PORTS"] = string.Join(',', ComponentInstallations.ListeningPorts(c.Plan, role)); if (role == "AnyTlsEntry") parameters["CERTIFICATE_PREPARED"] = "true"; }
+            return parameters;
+        }
         if (role == "RealityEntry")
         {
-            await c.Run("xray-install.sh", new() { ["VERSION"] = version.Text("xray.version"), ["INSTALLER_URL"] = version.Text("xray.installer_url"), ["INSTALLER_SHA256"] = version.Text("xray.installer_sha256") }, true, 1200);
+            await c.Run("xray-install.sh", InstallationGuard(new() { ["VERSION"] = version.Text("xray.version"), ["INSTALLER_URL"] = version.Text("xray.installer_url"), ["INSTALLER_SHA256"] = version.Text("xray.installer_sha256") }), true, 1200);
             c.Plan.Put("Reality.XrayVersion", JsonValue.Create(version.Text("xray.version")));
             if (upgrade) return;
             if (c.Secrets.At("Xray") == null) c.Secrets["Xray"] = JsonNode.Parse(RemoteAssets.Marker((await c.Run("xray-generate-credentials.sh")).Output, "XRAY_SECRET"));
@@ -212,7 +238,7 @@ public sealed partial class WorkflowEngine
         }
         else if (role is "AnyTlsEntry" or "ShadowsocksLanding")
         {
-            await c.Run(role == "AnyTlsEntry" ? "sing-box-anytls-install.sh" : "sing-box-install.sh", new() { ["VERSION"] = version.Text("sing_box.version"), ["ASSET_NAME"] = version.Text("sing_box.assets.amd64.name"), ["SHA256"] = version.Text("sing_box.assets.amd64.sha256"), ["NEED_BIND_INTERFACE"] = Bool(c.Plan.Text("Shadowsocks.SecondaryBindInterface") != "") }, true, 1200);
+            await c.Run(role == "AnyTlsEntry" ? "sing-box-anytls-install.sh" : "sing-box-install.sh", InstallationGuard(new() { ["VERSION"] = version.Text("sing_box.version"), ["ASSET_NAME"] = version.Text("sing_box.assets.amd64.name"), ["SHA256"] = version.Text("sing_box.assets.amd64.sha256"), ["NEED_BIND_INTERFACE"] = Bool(c.Plan.Text("Shadowsocks.SecondaryBindInterface") != "") }), true, 1200);
             c.Plan.Put((role == "AnyTlsEntry" ? "AnyTls" : "Shadowsocks") + ".SingBoxVersion", JsonValue.Create(version.Text("sing_box.version")));
             if (upgrade) return;
             if (role == "AnyTlsEntry")
@@ -224,7 +250,7 @@ public sealed partial class WorkflowEngine
                     c.Secrets.Put("AnyTls.EchServerKeyPem", JsonValue.Create(RemoteAssets.Marker(ech.Output, "ECH_KEYS")));
                     c.Secrets.Put("AnyTls.EchClientConfigPem", JsonValue.Create(RemoteAssets.Marker(ech.Output, "ECH_CONFIG")));
                 }
-                c.Save(); await c.Run("anytls-apply-config.sh", new() { ["CONFIG_JSON"] = ServerConfigurations.AnyTls(c.Plan, c.Secrets).ToJsonString(), ["ECH_KEYS_PEM"] = c.Secrets.Text("AnyTls.EchServerKeyPem"), ["ECH_CONFIG_PEM"] = c.Secrets.Text("AnyTls.EchClientConfigPem"), ["PORT"] = c.Plan.Text("Ports.AnyTlsPrimary"), ["SERVER_NAME"] = c.Plan.Text("AnyTls.ServerName") }, true);
+                c.Save(); await c.Run("anytls-apply-config.sh", new() { ["CONFIG_JSON"] = ServerConfigurations.AnyTls(c.Plan, c.Secrets).ToJsonString(), ["ECH_KEYS_PEM"] = c.Secrets.Text("AnyTls.EchServerKeyPem"), ["ECH_CONFIG_PEM"] = c.Secrets.Text("AnyTls.EchClientConfigPem"), ["PORT"] = c.Plan.Text("Ports.AnyTlsPrimary"), ["SERVER_NAME"] = c.Plan.Text("AnyTls.ServerName"), ["KEEP_OTHER_PROTOCOLS"] = Bool(c.Request.Kind == OperationKind.InstallComponent) }, true);
             }
             else
             {
@@ -247,7 +273,7 @@ public sealed partial class WorkflowEngine
         }
         c.Plan.Put("ProtocolInventory." + role + ".Enabled", JsonValue.Create(action is "Enable" or "Switch"));
         if (action == "Switch" && role is "RealityEntry" or "AnyTlsEntry") c.Plan.Put("ProtocolInventory." + (role == "RealityEntry" ? "AnyTlsEntry" : "RealityEntry") + ".Enabled", JsonValue.Create(false));
-        if (Enabled(c.Plan, "RealityEntry") && Enabled(c.Plan, "AnyTlsEntry")) throw new OperationException("Reality 与 AnyTLS 共用监听端口，请使用明确切换操作。");
+        if (Enabled(c.Plan, "RealityEntry") && Enabled(c.Plan, "AnyTlsEntry") && ComponentInstallations.EntryPortsConflict(c.Plan)) throw new OperationException("Reality 与 AnyTLS 共用监听端口，请使用明确切换操作。");
         await ApplyProtocolState(c); await RefreshInventory(c); await Firewall(c, true); await ServerGate(c); await ValidateProtocols(c); await ArchiveConfigs(c); validation.Export(c.Plan, c.Secrets, c.File("client-exports"));
     }
     private async Task ApplyProtocolState(Context c, string restart = "")

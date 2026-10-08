@@ -39,6 +39,7 @@ public sealed partial class MainWindow
     private async Task<bool> ReviewOperation(ReviewedOperation review)
     {
         var request = review.Request;
+        if (request.Kind == OperationKind.InstallComponent) return await ShowDialog(OperationDialog("审阅追加安装计划", InstallationReview(request), "开始安装")) == ContentDialogResult.Primary;
         if (request.Kind is OperationKind.Deploy or OperationKind.ConnectExisting or OperationKind.Resume or OperationKind.ResumeImport)
         {
             var plan = request.Options["Plan"] as JsonObject ?? ArchiveStore.ReadJson(SafePath.Resolve(paths.Instance(request.InstanceRelativePath), "deployment-plan.json"));

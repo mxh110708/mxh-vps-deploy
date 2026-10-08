@@ -32,6 +32,7 @@ public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFac
         context.Save();
         try
         {
+            context.StartSteps();
             switch (request.Kind)
             {
                 case OperationKind.ConnectExisting: await Import(context); break;
@@ -42,6 +43,7 @@ public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFac
                 case OperationKind.Resume: await Deploy(context); break;
                 case OperationKind.HealthAudit: await Health(context); break;
                 case OperationKind.Recover: await Recover(context); break;
+                case OperationKind.InstallComponent: await InstallComponent(context); break;
                 default: await Maintain(context); break;
             }
             var outcome = context.Warnings ? TaskOutcome.CompletedWithWarnings : TaskOutcome.Completed;
@@ -54,7 +56,11 @@ public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFac
                 try { await Rollback(context); }
                 catch { var uncertain = new OperationException("操作结果或回滚未确认，备份已保留。", true, "RollbackUnconfirmed", "先核对该实例的未完成事务，不能自动重复写入。"); context.Finish(TaskOutcome.NeedsRecovery, uncertain); throw uncertain; }
             }
-            if (context.Pending?.Text("Phase") == "Committed" && context.Pending.Text("TaskId") == context.Id) { context.Finish(TaskOutcome.CompletedWithWarnings); return TaskOutcome.CompletedWithWarnings; }
+            if (context.Pending?.Text("Phase") == "Committed" && context.Pending.Text("TaskId") == context.Id)
+            {
+                if (request.Kind == OperationKind.InstallComponent) context.ReconciledCompletion("installation-commit", "远端提交已按事务身份核对。原确认未收到，安装已完成，无需重复执行。");
+                context.Finish(TaskOutcome.CompletedWithWarnings); return TaskOutcome.CompletedWithWarnings;
+            }
             if (context.State.Text("DeploymentTransaction.Status") is "Arming" or "Armed" or "LocalPrepared")
             {
                 var safe = SafeFailures.Describe(failure);
@@ -85,8 +91,33 @@ public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFac
         private string? passphrase;
         public string? KeyPassphrase { get => passphrase; set => passphrase = value; }
         private int stage;
+        private string? activeStep;
+        private int completedSteps;
+        private IReadOnlyList<PlannedTaskStep> plannedSteps = [];
         public string File(string relative) => SafePath.Resolve(Directory, relative);
-        public void Report(string stageName, string message) { CurrentStage = stageName; progress.Report(new(Id, stageName, ++stage, 0, message)); }
+        public void StartSteps() { plannedSteps = OperationSteps.Create(Request, Plan); if (plannedSteps.Count > 0) progress.Report(new(Id, "准备", 0, plannedSteps.Count, "正在准备执行计划。", Steps: plannedSteps)); }
+        public void Report(string stageName, string message) { CurrentStage = stageName; progress.Report(new(Id, stageName, plannedSteps.Count == 0 ? ++stage : completedSteps, plannedSteps.Count, message, activeStep)); }
+        public async Task TrackStep(string id, Func<Task> action, bool alreadyCompleted = false)
+        {
+            activeStep = id; CurrentStage = id;
+            progress.Report(new(Id, id, completedSteps, plannedSteps.Count, alreadyCompleted ? "此步骤已在本次保留的部署事务中完成。" : "正在执行。", id, TaskStepState.Running));
+            try
+            {
+                Cancellation.ThrowIfCancellationRequested(); if (!alreadyCompleted) await action();
+                progress.Report(new(Id, id, ++completedSteps, plannedSteps.Count, alreadyCompleted ? "已完成，沿用保留结果。" : "已完成。", id, TaskStepState.Completed));
+            }
+            catch (Exception error)
+            {
+                var message = error is OperationCanceledException ? "已请求取消，正在核对恢复边界。" : SafeFailures.Describe(error).Message;
+                progress.Report(new(Id, id, completedSteps, plannedSteps.Count, message, id, error is OperationCanceledException ? TaskStepState.Cancelled : TaskStepState.Failed)); throw;
+            }
+            finally { activeStep = null; }
+        }
+        public void ReconciledCompletion(string id, string message)
+        {
+            CurrentStage = id;
+            progress.Report(new(Id, id, ++completedSteps, plannedSteps.Count, message, id, TaskStepState.Completed));
+        }
         public bool HasPending() => InstanceLifecycle.HasPending(State, Pending);
         public void Finish(TaskOutcome outcome, OperationException? error = null)
         {

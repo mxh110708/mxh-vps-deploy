@@ -16,7 +16,7 @@ public sealed partial class MainWindow
         void SuggestName() { nodeName.Text = deploymentNaming.Update(deploymentForm.Text("Provider"), deploymentForm.Text("Instance"), nodeName.Text); }
         provider.TextChanged += (_, _) => SuggestName(); instance.TextChanged += (_, _) => SuggestName();
         nodeName.LostFocus += (_, _) => { if (nodeName.Text.Trim() == "") SuggestName(); };
-        page.Children.Add(Row(Action("部署新 VPS", () => { deploymentForm["Existing"] = false; Navigate("deploy"); return Task.CompletedTask; }, !existing), Action("接入已有 VPS", () => { deploymentForm["Existing"] = true; Navigate("deploy"); return Task.CompletedTask; }, existing)));
+        page.Children.Add(Row(Action("部署新 VPS", () => { deploymentForm["Existing"] = false; Navigate("deploy"); return Task.CompletedTask; }, !existing), Action("接入已有 VPS", () => { deploymentForm["Existing"] = true; Navigate("deploy"); return Task.CompletedTask; }, existing), Action("已有实例追加安装", ChooseExistingInstallation)));
         page.Children.Add(Card(Column(SectionHeading("连接信息", Symbol.World, existing ? "读取已有配置，并建立本地受管归档。" : "填写实例信息，执行时再输入连接凭据。"),
             Fields(provider, instance, nodeName, Field("当前 root SSH 端口", deploymentForm, "SshPort", "22", true), Field("IPv4", deploymentForm, "IPv4"), Field("IPv6（可选）", deploymentForm, "IPv6")), Text("节点名根据服务商和实例生成；修改后保留你的命名。SSH 端口填写现在已能登录的端口。", 14, true), FileField("SSH 私钥（可选，留空使用密码）", deploymentForm, "KeyPath"))));
         if (!existing)

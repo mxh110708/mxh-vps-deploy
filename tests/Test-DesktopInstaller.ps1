@@ -40,9 +40,11 @@ try{
  if(Test-Path -LiteralPath ($proof+'.startup.txt')){Remove-Item -LiteralPath ($proof+'.startup.txt')}
  @{synthetic_only=$true}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $app 'qa-ui-review.fixture.json') -Encoding utf8
  $storageProof=Join-Path $app '.tmp/storage-ui/runtime-proof.json';[IO.Directory]::CreateDirectory((Split-Path -Parent $storageProof))|Out-Null
- Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'MXH-VPS-Deploy.exe') @('--ui-smoke',$storageProof,'--app-root',$app,'--exercise-storage')) -eq 0) 'native node picker and archive migration UI works'
+ Assert-Desktop ((Invoke-DesktopFixtureProcess (Join-Path $app 'MXH-VPS-Deploy.exe') @('--ui-smoke',$storageProof,'--app-root',$app,'--exercise-storage','--exercise-additions')) -eq 0) 'native node picker, archive migration and deployment additions UI works'
  $storageUi=Get-Content -Raw -LiteralPath (Join-Path $app '.tmp/storage-ui/storage-regression-proof.json')|ConvertFrom-Json
  Assert-Desktop ($storageUi.migration_roundtrip -and $storageUi.backup_opt_in -and $storageUi.select_and_clear_visible -and $storageUi.custom_font_rendered) 'storage and selection behavior is verified by the real WinUI frontend'
+ $additionsUi=Get-Content -Raw -LiteralPath (Join-Path $app '.tmp/storage-ui/additions-regression-proof.json')|ConvertFrom-Json
+ Assert-Desktop ($additionsUi.inline_execution -and $additionsUi.explicit_completion_and_failure -and $additionsUi.drag_handles_and_scheme_order -and $additionsUi.generation_validation_export_guidance -and $additionsUi.separate_component_installation -and $additionsUi.remote_connections -eq 0) 'new deployment and configuration behavior is verified by the real WinUI frontend'
  Remove-Item -LiteralPath (Join-Path $app 'qa-ui-review.fixture.json')
  [IO.Directory]::CreateDirectory((Join-Path $app 'private/instances'))|Out-Null
  [IO.Directory]::CreateDirectory((Join-Path $app '.cache/fixture'))|Out-Null

@@ -4,6 +4,23 @@ namespace Mxh.VpsDeploy.Core;
 
 public static class ClientSchemes
 {
+    public static bool MoveNode(JsonObject scheme, int sourceIndex, int insertionIndex)
+    {
+        var nodes = scheme["Nodes"]?.AsArray() ?? throw new OperationException("方案缺少节点列表。");
+        if (sourceIndex < 0 || sourceIndex >= nodes.Count || insertionIndex < 0 || insertionIndex > nodes.Count) throw new OperationException("节点排序位置无效。");
+        var target = insertionIndex > sourceIndex ? insertionIndex - 1 : insertionIndex;
+        if (sourceIndex == target) return false;
+        var node = nodes[sourceIndex]!; nodes.RemoveAt(sourceIndex); nodes.Insert(target, node); scheme.Remove("Candidate"); return true;
+    }
+    public static string ExportHint(JsonObject scheme)
+    {
+        if (scheme["Nodes"] is not JsonArray nodes || nodes.Count == 0) return "先添加节点，再生成配置 → 校验配置 → 审阅并导出。";
+        if (scheme["Candidate"] == null) return "下一步：点击“生成配置”，再点击“校验配置”；通过校验后才能审阅并导出。";
+        if (scheme.Text("Candidate.ValidationStatus") != "Passed") return scheme.Text("Candidate.ValidationStatus") == "Failed" ? "校验未通过：" + scheme.Text("Candidate.ValidationError", "请查看失败原因，修正后重新生成并校验。") : "下一步：点击“校验配置”；所有所选目标通过校验后才能审阅并导出。";
+        if (Formats(scheme).Any(format => scheme.Text("Targets." + format) == "")) return "校验已通过。请填写每个所选目标的导出位置，然后审阅并导出。";
+        return "所选目标已通过校验，导出位置已填写，可以审阅并导出。修改节点或连接后需要重新生成并校验。";
+    }
+    public static bool CanExport(JsonObject scheme) => scheme.Text("Candidate.ValidationStatus") == "Passed" && Formats(scheme).All(format => scheme.Text("Targets." + format) != "");
     public static JsonObject New(AppPaths paths) => new()
     {
         ["Id"] = Guid.NewGuid().ToString("N"), ["Name"] = "新方案", ["OutputClients"] = "Both", ["Nodes"] = new JsonArray(), ["SourceMode"] = "GenericTemplate",

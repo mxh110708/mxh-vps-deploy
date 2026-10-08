@@ -1745,6 +1745,8 @@ if($bash -and $pythonCommandForClient){
     if($LASTEXITCODE -ne 0){throw 'Remote transaction guard tests failed.'}
     & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_scoped_rollback.py') --bash $bash
     if($LASTEXITCODE -ne 0){throw 'Scoped rollback behavior tests failed.'}
+    & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_component_installation.py') --bash $bash
+    Assert-True ($LASTEXITCODE -eq 0) 'component installation and protocol coexistence boundaries'
     & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_import_contracts.py') --bash $bash
     if($LASTEXITCODE -ne 0){throw 'Import/SSH policy behavior tests failed.'}
     & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_komari_lifecycle.py') --bash $bash

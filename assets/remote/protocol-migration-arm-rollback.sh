@@ -33,7 +33,7 @@ components="${VPS_PARAM_COMPONENTS:-Protocols,Network,Firewall}"
 IFS=',' read -r -a component_list <<<"$components"
 ((${#component_list[@]} > 0))
 for component in "${component_list[@]}"; do
-  case "$component" in Protocols|Network|Firewall|KomariAgent|KomariController|Cloudflared) ;; *) echo 'Unsupported transaction component.' >&2; exit 1 ;; esac
+  case "$component" in Protocols|RealityEntry|AnyTlsEntry|ShadowsocksLanding|TrustedTls|Network|Firewall|KomariAgent|KomariController|Cloudflared) ;; *) echo 'Unsupported transaction component.' >&2; exit 1 ;; esac
 done
 scope_has(){ [[ ",$components," == *",$1,"* ]]; }
 printf '%s\n' "$components" > "$backup_dir/components"
@@ -79,6 +79,10 @@ aux_snapshot() {
 aux_snapshot KomariAgent komari-agent.service
 aux_snapshot KomariController komari.service
 aux_snapshot Cloudflared cloudflared.service
+if scope_has TrustedTls; then
+  aux_snapshot TrustedTlsRenew mxh-certbot-renew.timer
+  aux_snapshot DistributionCertbotRenew certbot.timer
+fi
 
 quiesce_controller="${VPS_PARAM_QUIESCE_KOMARI_CONTROLLER:-false}"
 [[ "$quiesce_controller" == true || "$quiesce_controller" == false ]]
@@ -103,9 +107,13 @@ if scope_has Protocols; then candidate_paths+=(
   usr/local/bin/sing-box-anytls etc/systemd/system/sing-box-anytls.service etc/sing-box-anytls var/lib/sing-box-anytls
   usr/local/bin/sing-box etc/systemd/system/sing-box.service etc/systemd/system/sing-box.service.d etc/sing-box var/lib/sing-box
 ); fi
+if scope_has RealityEntry; then candidate_paths+=(usr/local/bin/xray usr/local/etc/xray usr/local/share/xray etc/systemd/system/xray.service etc/systemd/system/xray@.service etc/systemd/system/xray.service.d); fi
+if scope_has AnyTlsEntry; then candidate_paths+=(usr/local/bin/sing-box-anytls etc/systemd/system/sing-box-anytls.service etc/sing-box-anytls var/lib/sing-box-anytls); fi
+if scope_has ShadowsocksLanding; then candidate_paths+=(usr/local/bin/sing-box etc/systemd/system/sing-box.service etc/systemd/system/sing-box.service.d etc/sing-box var/lib/sing-box); fi
+if scope_has TrustedTls; then candidate_paths+=(etc/letsencrypt etc/mxh-tls etc/systemd/system/mxh-certbot-renew.timer etc/systemd/system/mxh-certbot-renew.service usr/local/libexec/mxh-certbot-deploy etc/letsencrypt/mxh-anytls-cloudflare.ini etc/letsencrypt/archive/mxh-anytls etc/letsencrypt/live/mxh-anytls etc/letsencrypt/renewal/mxh-anytls.conf etc/mxh-tls/anytls); fi
 if scope_has KomariAgent; then candidate_paths+=(usr/local/bin/komari-agent etc/komari-agent etc/systemd/system/komari-agent.service var/lib/komari-agent); fi
 if scope_has KomariController; then candidate_paths+=(usr/local/bin/komari usr/bin/komari opt/komari var/lib/komari etc/systemd/system/komari.service); fi
-if scope_has Cloudflared; then candidate_paths+=(usr/local/bin/cloudflared usr/bin/cloudflared etc/systemd/system/cloudflared.service); fi
+if scope_has Cloudflared; then candidate_paths+=(usr/local/bin/cloudflared usr/bin/cloudflared etc/systemd/system/cloudflared.service etc/cloudflared); fi
 existing_paths=()
 for relative in "${candidate_paths[@]}"; do
   if [[ -e "/$relative" || -L "/$relative" ]]; then existing_paths+=("$relative"); fi
@@ -153,8 +161,10 @@ cleanup_role() {
     RealityEntry)
       rm -f /usr/local/bin/xray /etc/systemd/system/xray.service /etc/systemd/system/xray@.service
       rm -rf /usr/local/etc/xray /usr/local/share/xray /etc/systemd/system/xray.service.d
-      rm -f /etc/nginx/sites-enabled/mxh-reality-target /etc/nginx/sites-available/mxh-reality-target
-      rm -rf /var/www/mxh-reality-target
+      if scope_has Protocols; then
+        rm -f /etc/nginx/sites-enabled/mxh-reality-target /etc/nginx/sites-available/mxh-reality-target
+        rm -rf /var/www/mxh-reality-target
+      fi
       ;;
     AnyTlsEntry)
       rm -f /usr/local/bin/sing-box-anytls /etc/systemd/system/sing-box-anytls.service
@@ -167,14 +177,18 @@ cleanup_role() {
   esac
 }
 
-if scope_has Protocols; then
-for service in xray.service sing-box-anytls.service sing-box.service; do
+for role in RealityEntry AnyTlsEntry ShadowsocksLanding; do
+  if ! scope_has Protocols && ! scope_has "$role"; then continue; fi
+  case "$role" in RealityEntry) service=xray.service ;; AnyTlsEntry) service=sing-box-anytls.service ;; ShadowsocksLanding) service=sing-box.service ;; esac
   systemctl disable --now "$service" >/dev/null 2>&1 || true
   if systemctl is-active --quiet "$service"; then echo 'Protocol service did not stop; rollback refused.' >&2; exit 1; fi
-done
-for role in RealityEntry AnyTlsEntry ShadowsocksLanding; do
   if [[ "$(cat "$backup_dir/${role}.installed")" == 'false' ]]; then cleanup_role "$role"; fi
 done
+if scope_has TrustedTls; then
+  systemctl stop mxh-certbot-renew.timer mxh-certbot-renew.service >/dev/null 2>&1 || true
+  for relative in etc/systemd/system/mxh-certbot-renew.timer etc/systemd/system/mxh-certbot-renew.service usr/local/libexec/mxh-certbot-deploy etc/letsencrypt/mxh-anytls-cloudflare.ini etc/letsencrypt/archive/mxh-anytls etc/letsencrypt/live/mxh-anytls etc/letsencrypt/renewal/mxh-anytls.conf etc/mxh-tls/anytls; do
+    if ! grep -Fxq "$relative" "$backup_dir/existing-paths"; then rm -rf -- "/${relative:?}"; fi
+  done
 fi
 if scope_has KomariAgent; then
   systemctl stop komari-agent.service >/dev/null 2>&1 || true
@@ -240,6 +254,15 @@ if scope_has Protocols; then
   restore_service AnyTlsEntry sing-box-anytls.service
   restore_service ShadowsocksLanding sing-box.service
 fi
+if ! scope_has Protocols; then
+  if scope_has RealityEntry; then restore_service RealityEntry xray.service; fi
+  if scope_has AnyTlsEntry; then restore_service AnyTlsEntry sing-box-anytls.service; fi
+  if scope_has ShadowsocksLanding; then restore_service ShadowsocksLanding sing-box.service; fi
+fi
+if scope_has TrustedTls; then
+  restore_service TrustedTlsRenew mxh-certbot-renew.timer
+  restore_service DistributionCertbotRenew certbot.timer
+fi
 if scope_has Protocols && command -v nginx >/dev/null 2>&1; then
   nginx_enabled="$(cat "$backup_dir/NginxRealityTarget.enabled")"
   nginx_active="$(cat "$backup_dir/NginxRealityTarget.active")"
@@ -260,7 +283,7 @@ restore_aux() {
     case "$name" in
       KomariAgent) paths=(usr/local/bin/komari-agent etc/systemd/system/komari-agent.service etc/komari-agent var/lib/komari-agent) ;;
       KomariController) paths=(usr/local/bin/komari usr/bin/komari etc/systemd/system/komari.service opt/komari var/lib/komari) ;;
-      Cloudflared) paths=(usr/local/bin/cloudflared usr/bin/cloudflared etc/systemd/system/cloudflared.service) ;;
+      Cloudflared) paths=(usr/local/bin/cloudflared usr/bin/cloudflared etc/systemd/system/cloudflared.service etc/cloudflared) ;;
     esac
     for relative in "${paths[@]}"; do
       if [[ -f "$backup_dir/existing-paths" ]] && grep -Fxq "$relative" "$backup_dir/existing-paths"; then continue; fi
