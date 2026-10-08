@@ -73,6 +73,7 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
         }
         if (asset is "komari-agent.sh" or "monitoring-component-install.sh")
         {
+            if (asset == "komari-agent.sh" && Parameter("NODE_NAME") == "") return Task.FromResult(new CommandResult(1, "", "VPS_PARAM_NODE_NAME: required parameter"));
             var name = asset == "komari-agent.sh" ? "KomariAgent" : Parameter("COMPONENT") == "Tunnel" ? "Cloudflared" : "KomariController";
             HealthAudit.Put("Services." + name, HealthService(true, true, true));
             if (name == "KomariAgent") AgentConfiguration = new JsonObject { ["endpoint"] = Parameter("ENDPOINT"), ["token"] = Parameter("TOKEN") };

@@ -51,9 +51,12 @@ public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFac
         }
         catch (Exception failure)
         {
+            var interruptedStage = context.CurrentStage;
+            var recovered = false;
             if (context.Pending != null && context.Pending.Text("Phase") is not ("Committed" or "RolledBack"))
             {
-                try { await Rollback(context); }
+                context.Pending["InterruptedStage"] = interruptedStage;
+                try { await Rollback(context); recovered = context.Pending.Text("Phase") == "RolledBack"; }
                 catch { var uncertain = new OperationException("操作结果或回滚未确认，备份已保留。", true, "RollbackUnconfirmed", "先核对该实例的未完成事务，不能自动重复写入。"); context.Finish(TaskOutcome.NeedsRecovery, uncertain); throw uncertain; }
             }
             if (context.Pending?.Text("Phase") == "Committed" && context.Pending.Text("TaskId") == context.Id)
@@ -61,6 +64,7 @@ public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFac
                 if (request.Kind == OperationKind.InstallComponent) context.ReconciledCompletion("installation-commit", "远端提交已按事务身份核对。原确认未收到，安装已完成，无需重复执行。");
                 context.Finish(TaskOutcome.CompletedWithWarnings); return TaskOutcome.CompletedWithWarnings;
             }
+            if (recovered) context.Report(interruptedStage, failure is OperationCanceledException ? "已取消，本次组件范围已恢复。" : "本次组件范围已恢复，记录保留原失败步骤。");
             if (context.State.Text("DeploymentTransaction.Status") is "Arming" or "Armed" or "LocalPrepared")
             {
                 var safe = SafeFailures.Describe(failure);

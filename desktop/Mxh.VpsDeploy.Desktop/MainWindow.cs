@@ -40,11 +40,12 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private string currentPage = "overview";
     private readonly string[] launchArguments;
 
-    public MainWindow(AppPaths paths, string[] arguments)
+    public MainWindow(AppPaths paths, string[] arguments, BackgroundTestSession? session = null)
     {
-        this.paths = paths; launchArguments = arguments; store = new(paths, new WindowsSecretProtector());
+        this.paths = paths; launchArguments = arguments; testSession = session; store = new(paths, new WindowsSecretProtector());
         var assets = new ValidationAssets(paths, "windows-amd64"); var tools = new ExternalToolRunner();
-        coordinator = new(store, new WorkflowEngine(store, new SshSessionFactory(store), new ManagedKeys(new WindowsManagedKeyAccess()), this, new ProtocolValidation(assets, tools)));
+        IRemoteSessionFactory remote = new SshSessionFactory(store); if (session != null) remote = session.Restrict(remote);
+        coordinator = new(store, new WorkflowEngine(store, remote, new ManagedKeys(new WindowsManagedKeyAccess()), this, new ProtocolValidation(assets, tools)));
         workbench = new(store, tools, assets, paths.Resolve("runtime/python/python.exe"));
         var preference = paths.Resolve("private/desktop-settings.json"); settings = File.Exists(preference) ? ArchiveStore.ReadJson(preference) : new JsonObject { ["AutoCheckUpdates"] = false, ["UpdateProxy"] = "http://127.0.0.1:2080" };
         fonts = new(paths);
@@ -87,7 +88,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
         };
         SetAppearance(settings.Text("Appearance", "Dark"));
         root.Loaded += (_, _) => Program.Trace(arguments, "Root Loaded");
-        root.Loaded += async (_, _) => { var scale = root.XamlRoot.RasterizationScale; var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea; AppWindow.Resize(new((int)Math.Min(1280 * scale, area.Width - 32 * scale), (int)Math.Min(850 * scale, area.Height - 32 * scale))); SelectPage("overview"); if (fontFallback) Show("所选字体暂时不可用，已使用内置原版字体。可在设置中重新选择或导入。", InfoBarSeverity.Warning); if (arguments.Contains("--verify-installed-update")) { await InstalledUpdateSmoke(); return; } if (arguments.Contains("--ui-smoke") || arguments.Contains("--verify-runtime")) { await UiSmoke(); return; } if (settings.Flag("AutoCheckUpdates")) await CheckUpdates(true); };
+        root.Loaded += async (_, _) => { var scale = root.XamlRoot.RasterizationScale; var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea; AppWindow.Resize(new((int)Math.Min(1280 * scale, area.Width - 32 * scale), (int)Math.Min(850 * scale, area.Height - 32 * scale))); SelectPage("overview"); if (fontFallback) Show("所选字体暂时不可用，已使用内置原版字体。可在设置中重新选择或导入。", InfoBarSeverity.Warning); if (testSession != null) { StartTestSession(); return; } if (arguments.Contains("--verify-installed-update")) { await InstalledUpdateSmoke(); return; } if (arguments.Contains("--ui-smoke") || arguments.Contains("--verify-runtime")) { await UiSmoke(); return; } if (settings.Flag("AutoCheckUpdates")) await CheckUpdates(true); };
     }
     private static SolidColorBrush Brush(Paint role) => DesktopTheme.Brush(role);
     private static TextBlock Text(string value, int size = 14, bool muted = false) => DesktopTypography.Mark(new TextBlock { Text = value, FontFamily = InterfaceFont, TextWrapping = TextWrapping.Wrap, Foreground = Brush(muted ? Paint.Muted : Paint.Text) }, size >= 30 ? TypeRole.Metric : size >= 16 ? TypeRole.Title : muted ? TypeRole.Note : TypeRole.Body, size);
@@ -202,6 +203,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
     }
     private async Task<string?> PickFile(bool save, string extension)
     {
+        if (backgroundTest) throw new OperationException("后台测试不打开系统选择器；请通过表单填入测试工作区中的路径。");
         var handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
         if (save)
         {

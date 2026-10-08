@@ -27,7 +27,7 @@ public sealed partial class MainWindow
         return style;
     }
 
-    private static async Task<ContentDialogResult> ShowDialog(ContentDialog dialog)
+    private async Task<ContentDialogResult> ShowDialog(ContentDialog dialog)
     {
         dialog.RequestedTheme = DesktopTheme.IsLight ? ElementTheme.Light : ElementTheme.Dark;
         dialog.FontFamily = InterfaceFont; dialog.Background = Brush(Paint.Surface); dialog.Foreground = Brush(Paint.Text); dialog.CornerRadius = new CornerRadius(12);
@@ -37,7 +37,9 @@ public sealed partial class MainWindow
         ApplyFont(dialog);
         // An explicit button click or keyboard focus is required to submit an operation.
         dialog.DefaultButton = ContentDialogButton.None;
-        return await dialog.ShowAsync();
+        activeTestDialog = dialog;
+        try { return await dialog.ShowAsync(); }
+        finally { if (activeTestDialog == dialog) activeTestDialog = null; }
     }
 
     private static Grid SectionHeading(string title, Symbol icon, string? description = null)

@@ -1,0 +1,104 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string]$ApplicationDirectory,
+    [Parameter(Mandatory)][string]$FixtureRoot,
+    [Parameter(Mandatory)][string]$ProjectRoot,
+    [string]$PythonRuntimeDirectory
+)
+$ErrorActionPreference = 'Stop'
+$ApplicationDirectory=[IO.Path]::GetFullPath($ApplicationDirectory)
+$FixtureRoot=[IO.Path]::GetFullPath($FixtureRoot)
+$ProjectRoot=[IO.Path]::GetFullPath($ProjectRoot)
+$invoke = Join-Path $ProjectRoot 'scripts/Invoke-VpsBackgroundTest.ps1'
+$started = & (Join-Path $ProjectRoot 'scripts/Start-VpsBackgroundTest.ps1') -ApplicationDirectory $ApplicationDirectory -FixtureRoot $FixtureRoot -PublicAssetRoot $ProjectRoot -SyntheticFixture
+$session = $started.SessionManifest; $cases = [Collections.Generic.List[object]]::new()
+function Send([string]$command,[hashtable]$arguments=@{}) { & $invoke -SessionManifest $session -Command $command -Arguments $arguments }
+function Read-Ui { Send 'ui.read' }
+function Control([string]$name,[string]$kind='') {
+    $matches = @((Read-Ui).elements | Where-Object { $_.name -eq $name -and (-not $kind -or $_.kind -eq $kind) })
+    if ($matches.Count -ne 1) { throw "No unique native control: $name ($kind)." }; $matches[0]
+}
+function Click([string]$name) { Send 'ui.invoke' @{id=(Control $name 'Button').id} | Out-Null }
+function Set-Text([string]$name,[string]$value) { Send 'ui.set' @{id=(Control $name 'TextBox').id;value=$value} | Out-Null }
+function Choose([string]$name,[string]$value) { Send 'ui.choose' @{name=$name;value=$value} | Out-Null }
+function Toggle([string]$name,[bool]$value) { Send 'ui.toggle' @{name=$name;value=$value} | Out-Null }
+function Wait-Ui([scriptblock]$condition,[int]$seconds=15) {
+    $until=[DateTimeOffset]::UtcNow.AddSeconds($seconds)
+    do { $ui=Read-Ui; if (& $condition $ui) { return $ui }; Start-Sleep -Milliseconds 100 } while ([DateTimeOffset]::UtcNow -lt $until)
+    throw 'Native UI did not reach the expected state.'
+}
+function Check([bool]$success,[string]$name) { if(-not $success){throw $name};$cases.Add(@{name=$name;state='passed';layer='native_ui'}) }
+try {
+    $nativeRequest=Join-Path $FixtureRoot 'test-artifacts/native-client-request.json'
+    $nativeResponse=Join-Path $FixtureRoot 'test-artifacts/native-client-response.json'
+    @{command='ui.read';arguments=@{}} | ConvertTo-Json | Set-Content -LiteralPath $nativeRequest -Encoding utf8
+    $clientStart=[Diagnostics.ProcessStartInfo]::new((Join-Path $ApplicationDirectory 'MXH-VPS-Deploy.exe'))
+    $clientStart.UseShellExecute=$false; $clientStart.CreateNoWindow=$true; $clientStart.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+    foreach($argument in @('--test-command',$session,$nativeRequest,$nativeResponse)) { $clientStart.ArgumentList.Add($argument) }
+    $clientProcess=[Diagnostics.Process]::Start($clientStart)
+    try { if(-not $clientProcess.WaitForExit(25000) -or $clientProcess.ExitCode -ne 0) { throw 'Native test-command client failed.' } } finally { $clientProcess.Dispose() }
+    $nativeResult=Get-Content -Raw -LiteralPath $nativeResponse | ConvertFrom-Json
+    Check ($nativeResult.ok -and $nativeResult.result.page -eq 'overview') 'native command client before WinUI startup'
+    if ($PythonRuntimeDirectory) { [IO.Directory]::CreateDirectory((Join-Path $FixtureRoot 'runtime')) | Out-Null; Copy-Item -LiteralPath $PythonRuntimeDirectory -Destination (Join-Path $FixtureRoot 'runtime/python') -Recurse -Force }
+    Click 'deploy'; Set-Text '服务商' 'Example'; Set-Text '实例名称' 'Native Flow'
+    $null=Wait-Ui {param($ui) @($ui.elements|Where-Object { $_.name -eq '节点名称' -and $_.value -eq 'Example-Native-Flow' }).Count -eq 1 }
+    Check $true 'generated node name through TextChanged'
+    Set-Text '节点名称' 'personal-name'; Set-Text '服务商' 'Another'
+    Check ((Control '节点名称' 'TextBox').value -eq 'personal-name') 'custom name survives provider change'
+    Click '审阅计划'; $ui=Read-Ui
+    Check (-not $ui.busy -and -not $ui.dialog -and $ui.notice) 'invalid deployment stops before connection'
+    Toggle 'Komari 监控 Agent' $true
+    Check ((Control 'Komari 主控地址' 'TextBox').enabled) 'monitor field appears after purpose selection'
+    Toggle 'Komari 监控 Agent' $false
+    Check (@((Read-Ui).elements|Where-Object name -eq 'Komari 主控地址').Count -eq 0) 'monitor field hides when disabled'
+    Click 'clients'; Click '创建方案'; $null=Wait-Ui {param($ui) $ui.dialog -eq '创建配置方案'}
+    Toggle 'sing-box 生成目标' $false; Toggle 'Clash 生成目标' $false
+    Check (-not (Control '开始设计' 'Button').enabled) 'no output disables primary button'
+    try { Click '开始设计'; throw 'Disabled primary executed.' } catch { Check ($_.Exception.Message -match '不可用') 'disabled native invoke refused' }
+    Toggle 'sing-box 生成目标' $true; Toggle 'Clash 生成目标' $true; Set-Text '方案名称' 'background-native'
+    Send 'ui.capture' @{name='create-scheme.png'} | Out-Null
+    Click '开始设计'; $null=Wait-Ui {param($ui) -not $ui.dialog -and @($ui.elements|Where-Object name -eq '手动添加').Count -eq 1}
+    Click '手动添加'; $null=Wait-Ui {param($ui) $ui.dialog -eq '添加节点'}
+    Choose '协议' 'ShadowsocksLanding'; Set-Text '节点名称' 'synthetic-exit'; Set-Text '服务器地址' '192.0.2.12'; Set-Text 'Shadowsocks 方法' 'aes-128-gcm'
+    $secret='synthetic-private-value'; [IO.File]::WriteAllText((Join-Path $FixtureRoot 'test-secrets/ss.txt'),$secret)
+    Send 'ui.secret' @{name='密码 / SS2022 组合密钥';reference='ss.txt'} | Out-Null
+    $ui=Read-Ui
+    Check (($ui|ConvertTo-Json -Depth 20) -notmatch $secret -and (Control '密码 / SS2022 组合密钥' 'PasswordBox').filled) 'password set through private reference and redacted from snapshot'
+    Click '保存'; $null=Wait-Ui {param($ui) -not $ui.dialog -and @($ui.elements|Where-Object name -eq 'synthetic-exit').Count -eq 1}
+    Click '手动添加'; $null=Wait-Ui {param($ui) $ui.dialog -eq '添加节点'}
+    Set-Text '节点名称' 'synthetic-entry'; Set-Text '服务器地址' '192.0.2.13'; Set-Text 'SNI' 'example.com'
+    Set-Text 'Reality 公钥' ([Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).Replace('+','-').Replace('/','_').TrimEnd('='))
+    Set-Text 'short-id' 'a1b2c3d4'
+    [IO.File]::WriteAllText((Join-Path $FixtureRoot 'test-secrets/uuid.txt'),[guid]::NewGuid().ToString())
+    Send 'ui.secret' @{name='UUID';reference='uuid.txt'} | Out-Null
+    Click '保存'; $null=Wait-Ui {param($ui) -not $ui.dialog -and @($ui.elements|Where-Object name -eq 'synthetic-entry').Count -eq 1}
+    Click '4 · 生成与导出'; $ui=Read-Ui
+    Check (-not (Control '审阅并导出' 'Button').enabled -and ($ui.elements.name -join ' ') -match '生成') 'export prerequisites visible and enforced'
+    $export=Join-Path $FixtureRoot 'test-artifacts'
+    Set-Text 'Clash YAML 文件' (Join-Path $export 'test.yaml'); Set-Text 'sing-box JSON 文件' (Join-Path $export 'test.json')
+    if ($PythonRuntimeDirectory) {
+        Click '生成配置'; $null=Wait-Ui {param($ui) -not $ui.busy -and @($ui.elements|Where-Object { $_.name -eq '校验配置' -and $_.enabled }).Count -eq 1} 60
+        Click '校验配置'; $null=Wait-Ui {param($ui) -not $ui.busy -and @($ui.elements|Where-Object { $_.name -eq '审阅并导出' -and $_.enabled }).Count -eq 1} 60
+        Click '审阅并导出'; $null=Wait-Ui {param($ui) [bool]$ui.dialog}; Send 'ui.capture' @{name='export-review.png'} | Out-Null
+        $primary=@((Read-Ui).elements|Where-Object { $_.kind -eq 'Button' -and $_.name -notin @('取消','返回') })
+        Check ($primary.Count -eq 1) 'export has one explicit confirmation'
+        Send 'ui.invoke' @{id=$primary[0].id} | Out-Null; $null=Wait-Ui {param($ui) -not $ui.busy -and -not $ui.dialog} 60
+        Check ((Test-Path -LiteralPath (Join-Path $export 'test.yaml')) -and (Test-Path -LiteralPath (Join-Path $export 'test.json'))) 'two real core-validated configs exported through normal UI'
+    } else { $cases.Add(@{name='real core generation validation export';state='skipped';reason='No bundled Python runtime supplied.'}) }
+    Click '保存方案'; Click '退出编辑'; $null=Wait-Ui {param($ui) -not $ui.dialog}
+    Send 'suite.run' | Out-Null
+    $until=[DateTimeOffset]::UtcNow.AddSeconds(75)
+    do { $suite=Send 'suite.status'; if($suite.state -ne 'running'){break};Start-Sleep -Milliseconds 200 } while([DateTimeOffset]::UtcNow -lt $until)
+    Check ($suite.state -eq 'passed') 'deployment maintenance additions native regression suites'
+    $ui=Read-Ui
+    Check ($ui.window.window_activations -eq 0 -and $ui.window.foreground_samples -eq 0 -and $ui.window.offscreen -and -not $ui.window.shown_in_switchers) 'test instance never activated or appeared in switcher'
+    $audit=Get-Content -Raw -LiteralPath (Join-Path $export 'commands.jsonl')
+    Check ($audit -notmatch $secret -and $audit -notmatch '"token"') 'command audit omits input values and credentials'
+    $cases.Add(@{name='physical drag wheel system picker UAC';state='unverified';reason='No computer input or OS dialogs used.'})
+    @{schema_version=1;state='passed';cases=$cases;window=$ui.window;production_connections=0} | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $export 'native-flow.json') -Encoding utf8
+    'PASS: native UI command flow, dialogs, independent storage, no foreground activation.'
+} catch {
+    try { Send 'ui.capture' @{name='failure.png'} | Out-Null } catch { }
+    @{schema_version=1;state='failed';safe_error=$_.Exception.Message;cases=$cases} | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $FixtureRoot 'test-artifacts/native-flow.json') -Encoding utf8
+    throw
+} finally { try { Send 'session.stop' | Out-Null } catch { } }

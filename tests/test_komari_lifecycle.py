@@ -125,7 +125,7 @@ class KomariLifecycleTests(unittest.TestCase):
             (root / 'opt/komari/data/komari.db').write_text('old-db')
             (root / 'opt/komari/data/plugin/fixture').write_text('old-plugin')
             old_binary = root / ('usr/local/bin/komari-agent' if action == 'AgentUpgrade' else 'usr/local/bin/cloudflared' if action=='TunnelRotate' else binary_location)
-            old_binary.write_text('#!/usr/bin/env bash\necho "Komari Monitor 1.4.3"\n')
+            old_binary.write_text('#!/usr/bin/env bash\necho "Komari Monitor 1.4.3"\n[[ "$1" == --help ]] || exit 1\n')
             old_binary.chmod(0o755)
             tunnel_binary = root / 'usr/local/bin/cloudflared'
             tunnel_unit = root / 'etc/systemd/system/cloudflared.service'
@@ -142,7 +142,7 @@ class KomariLifecycleTests(unittest.TestCase):
             token_config.write_text('{"token":"fixture-token","disable_web_ssh":true}')
             before_token = token_config.read_bytes()
             version = '1.5.11' if action == 'AgentUpgrade' else '1.5.1'
-            new_text = '#!/usr/bin/env bash\n# new-upgrade\necho "Komari Monitor ' + ('0.0.0' if bad_version else version) + '"\n'
+            new_text = '#!/usr/bin/env bash\n# new-upgrade\necho "Komari Monitor ' + ('0.0.0' if bad_version else version) + '"\n[[ "$1" == --help ]] || exit 1\n'
             if action == 'AgentUpgrade':
                 # The real Agent has no --version interface. Any direct invocation
                 # of this fixture is a preflight bug, not a successful version check.

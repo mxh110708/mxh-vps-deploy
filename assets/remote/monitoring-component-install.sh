@@ -26,7 +26,15 @@ curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --ma
   "https://github.com/${repository}/releases/download/${VPS_PARAM_VERSION}/${VPS_PARAM_ASSET_NAME}" -o "$work/binary"
 printf '%s  %s\n' "$VPS_PARAM_SHA256" "$work/binary" | sha256sum -c - >/dev/null
 chmod 0755 "$work/binary"
-"$work/binary" --version 2>&1 | grep -F "$VPS_PARAM_VERSION" >/dev/null
+if [[ "$VPS_PARAM_COMPONENT" == KomariController ]]; then
+  # Komari 1.5 prints its version banner before parsing flags and has no
+  # --version flag. --help exits successfully without starting a server.
+  version_output="$("$work/binary" --help 2>&1)"
+  grep -Fq "Komari Monitor ${VPS_PARAM_VERSION}" <<<"$version_output"
+else
+  version_output="$("$work/binary" --version 2>&1)"
+  grep -Fq "$VPS_PARAM_VERSION" <<<"$version_output"
+fi
 if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
 [[ ! -e "$binary" && ! -L "$binary" ]]
 install -o root -g root -m 0755 "$work/binary" "$binary"

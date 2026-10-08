@@ -59,7 +59,7 @@ public sealed partial class WorkflowEngine
                 var token = await user.SecretAsync("Komari Agent Token（从主控中创建节点后取得）", c.Cancellation) ?? throw new OperationCanceledException();
                 if (token == "" || token.Any(char.IsWhiteSpace)) throw new OperationException("Agent Token 不能为空或含空白。");
                 var v = versions;
-                await c.Run("komari-agent.sh", new() { ["ENDPOINT"] = c.Plan.Text("Komari.Endpoint"), ["TOKEN"] = token, ["VERSION"] = v.Text("komari_agent.version"), ["ASSET_NAME"] = v.Text("komari_agent.assets.amd64.name"), ["SHA256"] = v.Text("komari_agent.assets.amd64.sha256"), ["INSTALL_COMPONENT"] = component }, true, 1200);
+                await c.Run("komari-agent.sh", new() { ["ENDPOINT"] = c.Plan.Text("Komari.Endpoint"), ["TOKEN"] = token, ["NODE_NAME"] = c.Plan.Text("NodeName"), ["VERSION"] = v.Text("komari_agent.version"), ["ASSET_NAME"] = v.Text("komari_agent.assets.amd64.name"), ["SHA256"] = v.Text("komari_agent.assets.amd64.sha256"), ["INSTALL_COMPONENT"] = component }, true, 1200);
                 c.Secrets["KomariAgent"] = new JsonObject { ["Token"] = token, ["Endpoint"] = c.Plan.Text("Komari.Endpoint") }; c.State["KomariInstalled"] = true;
             }
             else

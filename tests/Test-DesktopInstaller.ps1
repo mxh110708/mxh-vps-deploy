@@ -46,6 +46,9 @@ try{
  $additionsUi=Get-Content -Raw -LiteralPath (Join-Path $app '.tmp/storage-ui/additions-regression-proof.json')|ConvertFrom-Json
  Assert-Desktop ($additionsUi.inline_execution -and $additionsUi.explicit_completion_and_failure -and $additionsUi.drag_handles_and_scheme_order -and $additionsUi.generation_validation_export_guidance -and $additionsUi.separate_component_installation -and $additionsUi.remote_connections -eq 0) 'new deployment and configuration behavior is verified by the real WinUI frontend'
  Remove-Item -LiteralPath (Join-Path $app 'qa-ui-review.fixture.json')
+ & (Join-Path $ProjectRoot 'tests/Test-BackgroundNative.ps1') -ApplicationDirectory $app -FixtureRoot (Join-Path $fixture 'background-native') -ProjectRoot $ProjectRoot -PythonRuntimeDirectory (Join-Path $app 'runtime/python')
+ $backgroundProof=Get-Content -Raw -LiteralPath (Join-Path $fixture 'background-native/test-artifacts/native-flow.json')|ConvertFrom-Json
+ Assert-Desktop ($backgroundProof.state -eq 'passed' -and $backgroundProof.window.window_activations -eq 0 -and $backgroundProof.window.foreground_samples -eq 0) 'background interface executes real controls and dialogs without taking foreground focus'
  [IO.Directory]::CreateDirectory((Join-Path $app 'private/instances'))|Out-Null
  [IO.Directory]::CreateDirectory((Join-Path $app '.cache/fixture'))|Out-Null
  'fixture archive'|Set-Content -LiteralPath (Join-Path $app 'private/instances/record.txt')

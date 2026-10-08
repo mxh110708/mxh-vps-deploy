@@ -109,7 +109,7 @@ verify_controller() {
   local binary code pending body pid
   binary="$(find_controller_binary)"
   [[ "${VPS_PARAM_VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-  grep -Fq "Komari Monitor ${VPS_PARAM_VERSION}" <<<"$("$binary" --version 2>&1 || true)"
+  grep -Fq "Komari Monitor ${VPS_PARAM_VERSION}" <<<"$("$binary" --help 2>&1)"
   pending=deferred
   if systemctl is-active --quiet komari.service; then
     for _ in {1..30}; do grep -Fq '127.0.0.1:25774' <<< "$(ss -H -lnt 'sport = :25774' 2>/dev/null)" && break; sleep 1; done
@@ -290,7 +290,7 @@ case "$VPS_PARAM_ACTION" in
     [[ "$code" =~ ^(200|302|303|307|308|401|403)$ ]]
     binary="$(find_controller_binary)"; pid="$(systemctl show --property=MainPID --value komari.service)"
     [[ "$pid" =~ ^[1-9][0-9]*$ && "/proc/${pid}/exe" -ef "$binary" ]]
-    restored_version="$("$binary" --version 2>&1)"
+    restored_version="$("$binary" --help 2>&1)"
     restored_version="$(sed -nE 's/.*Komari Monitor v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' <<<"$restored_version" | head -n 1)"
     [[ -n "$restored_version" ]]
     if [[ "$restore_tunnel" == true ]]; then
@@ -351,7 +351,7 @@ case "$VPS_PARAM_ACTION" in
     ! systemctl is-active --quiet komari.service || { echo 'Controller is still running; upgrade refused.' >&2; exit 1; }
     binary_changed=true
     install -o root -g root -m 0755 "$tmp" "$binary"
-    version_output="$("$binary" --version 2>&1 || true)"; grep -Fq "Komari Monitor ${VPS_PARAM_VERSION}" <<<"$version_output"
+    version_output="$("$binary" --help 2>&1)"; grep -Fq "Komari Monitor ${VPS_PARAM_VERSION}" <<<"$version_output"
     if [[ "$was_active" == true ]]; then systemctl start komari.service; systemctl is-active --quiet komari.service; fi
     verify_controller
     if [[ "$was_enabled" == false ]]; then systemctl disable komari.service >/dev/null 2>&1 || true; fi

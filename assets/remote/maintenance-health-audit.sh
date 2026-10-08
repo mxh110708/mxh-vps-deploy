@@ -131,7 +131,7 @@ result = {
    "SingBoxAnyTls": version(["/usr/local/bin/sing-box-anytls","version"]) if pathlib.Path("/usr/local/bin/sing-box-anytls").exists() else None,
    "SingBox": version(["/usr/local/bin/sing-box","version"]) if pathlib.Path("/usr/local/bin/sing-box").exists() else None,
    "KomariAgent": agent_version,
-   "KomariController": version([komari_controller_binary,"--version"]) if komari_controller_binary else None
+   "KomariController": version([komari_controller_binary,"--help"]) if komari_controller_binary else None
  },
  "Hashes": {name: digest(path) for name,path in paths.items()},
  "Nftables": {"Present": pathlib.Path(nft_path).is_file(), "Valid": nft_valid},

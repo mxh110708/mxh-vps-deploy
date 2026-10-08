@@ -13,6 +13,7 @@ public sealed partial class MainWindow
 {
     private async Task CheckUpdates(bool automatic)
     {
+        if (testSession != null) { Show("后台测试会话不执行应用安装或系统弹窗。", InfoBarSeverity.Warning); return; }
         if (taskCancellation != null) { if (!automatic) Show("请等待当前任务结束后再更新。"); return; }
         updateTask = true;
         try { await RunBackground("正在检查应用更新", async token =>
@@ -98,9 +99,10 @@ public sealed partial class MainWindow
             }
             var dialog = new ContentDialog { XamlRoot = shell.XamlRoot, Title = "隔离界面验证", Content = Column(new TextBox { Header = "文本输入" }, new PasswordBox { Header = "凭据输入" }, new CheckBox { Content = "确认选项" }, new ListView { Items = { "项目一", "项目二" } }), PrimaryButtonText = "确认", CloseButtonText = "取消" };
             var timer = DispatcherQueue.CreateTimer(); timer.Interval = TimeSpan.FromMilliseconds(400); timer.Tick += (_, _) => { timer.Stop(); dialog.Hide(); }; timer.Start(); await ShowDialog(dialog);
-            ArchiveStore.WriteJson(proofPath, new JsonObject { ["winui_loaded"] = true, ["pages"] = pages, ["engine"] = "dotnet", ["runtime"] = RuntimeInformation.FrameworkDescription, ["runtime_paths_local"] = Path.GetDirectoryName(typeof(object).Assembly.Location)!.Equals(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase), ["powershell_loaded"] = AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name == "System.Management.Automation"), ["wpf_loaded"] = AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name == "PresentationFramework"), ["initial_theme"] = initialTheme, ["themes_reviewed"] = review ? new JsonArray("Dark", "Light") : null, ["appearance_preference_verified"] = preferenceVerified, ["initial_font"] = initialFont, ["font_fallback"] = fontFallback, ["font_preference_verified"] = fontPreferenceVerified, ["fonts_reviewed"] = review ? new JsonArray("Route", "WenKai", "Custom") : null });
+            if (backgroundTest && (testActivations != 0 || testForegroundSamples != 0)) throw new OperationException("后台验证窗口发生激活，验证失败。");
+            ArchiveStore.WriteJson(proofPath, new JsonObject { ["background_window"] = BackgroundProof(), ["winui_loaded"] = true, ["pages"] = pages, ["engine"] = "dotnet", ["runtime"] = RuntimeInformation.FrameworkDescription, ["runtime_paths_local"] = Path.GetDirectoryName(typeof(object).Assembly.Location)!.Equals(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase), ["powershell_loaded"] = AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name == "System.Management.Automation"), ["wpf_loaded"] = AppDomain.CurrentDomain.GetAssemblies().Any(a => a.GetName().Name == "PresentationFramework"), ["initial_theme"] = initialTheme, ["themes_reviewed"] = review ? new JsonArray("Dark", "Light") : null, ["appearance_preference_verified"] = preferenceVerified, ["initial_font"] = initialFont, ["font_fallback"] = fontFallback, ["font_preference_verified"] = fontPreferenceVerified, ["fonts_reviewed"] = review ? new JsonArray("Route", "WenKai", "Custom") : null });
         }
-        catch (Exception error) { Program.Trace(launchArguments, "UI fixture stack: " + error.StackTrace); ArchiveStore.WriteJson(proofPath, new JsonObject { ["winui_loaded"] = false, ["error"] = error.GetType().Name, ["safe_message"] = error is OperationException safe ? safe.Message : null }); Environment.ExitCode = 1; }
+        catch (Exception error) { Program.Trace(launchArguments, "UI fixture stack: " + error.StackTrace); ArchiveStore.WriteJson(proofPath, new JsonObject { ["background_window"] = BackgroundProof(), ["winui_loaded"] = false, ["error"] = error.GetType().Name, ["safe_message"] = error is OperationException safe ? safe.Message : null }); Environment.ExitCode = 1; }
         finally { scheme = null; Close(); }
     }
     private static double FontWidth(FontFamily family)

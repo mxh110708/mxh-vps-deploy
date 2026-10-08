@@ -8,10 +8,11 @@ namespace Mxh.VpsDeploy.Desktop;
 public sealed partial class MainWindow
 {
     private UIElement PrivateDirectorySetting() => SettingRow("私人归档", paths.Private, Symbol.Folder, Row(
-        Action("打开目录", () => { SafePath.CheckLinks(paths.Private); Directory.CreateDirectory(paths.Private); System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(paths.Private) { UseShellExecute = true }); return Task.CompletedTask; }),
+        Action("打开目录", () => { if (backgroundTest) throw new OperationException("后台测试不打开资源管理器。"); SafePath.CheckLinks(paths.Private); Directory.CreateDirectory(paths.Private); System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(paths.Private) { UseShellExecute = true }); return Task.CompletedTask; }),
         Action("修改目录", ChangePrivateDirectory)));
     private async Task ChangePrivateDirectory()
     {
+        if (backgroundTest) throw new OperationException("后台测试不打开系统目录选择器；归档迁移由隔离回归验证。");
         if (SchemeChanged && !await ExitScheme(false)) return;
         var picker = new global::Windows.Storage.Pickers.FolderPicker(); picker.FileTypeFilter.Add("*");
         WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));

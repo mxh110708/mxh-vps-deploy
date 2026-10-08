@@ -80,6 +80,7 @@ public sealed partial class MainWindow
         };
         var import = Action("导入字体", async () =>
         {
+            if (backgroundTest) throw new OperationException("后台测试不打开系统文件选择器；字体导入由隔离回归验证。");
             var picker = new global::Windows.Storage.Pickers.FileOpenPicker(); picker.FileTypeFilter.Add(".ttf"); picker.FileTypeFilter.Add(".otf");
             WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
             var file = await picker.PickSingleFileAsync(); if (file == null) return;

@@ -74,6 +74,11 @@ public sealed partial class MainWindow
         "audit" => "系统审计", "management-key" => "准备管理密钥", "deployment-baseline-arm" => "部署基线备份", "bootstrap-access" => "建立管理访问", "base-system" => "系统准备",
         "ssh-transition" => "管理入口切换", "target-audit" => "Reality 目标检查", "certbot-dns-setup" => "证书配置", "local-https-target" => "本机 HTTPS 配置",
         "deployment-commit" => "部署提交", "maintenance-transaction-status" => "事务状态核对", "无需回滚" => "草稿状态核对",
+        "installation-preflight" => "追加安装前核对", "installation-backup" => "组件恢复快照", "component-install" => "安装所选组件",
+        "monitoring-component-install" => "安装监控与访问组件", "component-install-preflight" => "核对组件布局与端口",
+        "installation-firewall" or "component-firewall-add" => "新协议防火墙放行", "installation-validation" => "新增组件验收",
+        "installation-archive" => "更新实例归档", "installation-commit" => "确认追加安装完成", "maintenance-komari" => "监控组件维护",
+        "maintenance-transaction-commit" => "确认维护完成", "protocol-migration-trigger-rollback" => "按组件范围恢复",
         "network-tuning" => "网络调优", "validate" => "独立验收", "health" => "健康检查", "import" => "接入识别", _ => stage
     };
     private static string TaskMessage(TaskRecord record)

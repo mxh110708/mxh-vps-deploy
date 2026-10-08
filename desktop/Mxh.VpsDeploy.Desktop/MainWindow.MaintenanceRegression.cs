@@ -91,6 +91,7 @@ public sealed partial class MainWindow
     }
     private async Task<JsonObject> SelectorWheelRegression()
     {
+        if (backgroundTest) return new JsonObject { ["message_delivery_available"] = false, ["skipped"] = "后台测试不发送鼠标消息；实体滚轮手势需人工检查。" };
         // Send wheel messages only to this QA window and its own input island;
         // never move the system pointer, focus another app or use global input.
         page.Children.Clear(); var model = new JsonObject { ["value"] = "5" }; var choices = Enumerable.Range(0, 12).Select(i => (i.ToString(), "实例 " + i)).ToArray();
