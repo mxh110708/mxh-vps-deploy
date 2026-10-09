@@ -24,6 +24,9 @@ public sealed partial class MainWindow
             status, check);
         void Refresh()
         {
+            // A TextChanged notification can arrive before the generic field
+            // binding is updated. Use the current control value for both.
+            options["PublicUrl"] = url.Text.Trim();
             string? normalized = null;
             try { normalized = TunnelAccess.NormalizeUrl(options.Text("PublicUrl")); } catch (OperationException) { }
             hostname.Text = "主机名：" + (normalized == null ? "填写公开网址后显示" : new Uri(normalized).Host);
@@ -31,7 +34,7 @@ public sealed partial class MainWindow
             var same = normalized != null && normalized == state.Text("TunnelAccess.PublicUrl");
             status.Text = same && state.Text("TunnelAccess.Status") == "Passed" ? "上次已验证：" + LocalTime(state.Text("TunnelAccess.At")) + " · 接口与本机主控版本一致" : same && state.Text("TunnelAccess.Status") == "Failed" ? "公开访问未通过：" + TunnelAccess.Failure(state.Text("TunnelAccess.Code"), state.Number("TunnelAccess.Evidence.HttpStatus")) : "公开访问待配置 / 待验证";
         }
-        url.TextChanged += (_, _) => Refresh(); Refresh();
+        url.TextChanged += (_, _) => Refresh(); url.Loaded += (_, _) => Refresh(); Refresh();
         return Card(panel);
     }
 }

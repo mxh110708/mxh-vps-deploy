@@ -12,6 +12,12 @@ public sealed partial class MainWindow
     {
         if (!File.Exists(paths.Resolve("qa-ui-review.fixture.json"))) throw new OperationException("功能界面验证必须在合成工作区运行。");
         void Require(bool value, string reason) { if (!value) throw new OperationException(reason); }
+        async Task WaitForState(Func<bool> condition, string reason)
+        {
+            var until = DateTimeOffset.UtcNow.AddSeconds(3);
+            while (!condition() && DateTimeOffset.UtcNow < until) { shell.UpdateLayout(); await Task.Delay(25); }
+            Require(condition(), reason);
+        }
         var instances = store.ListInstances().ToArray(); string? createdDirectory = null;
         if (instances.Length == 0)
         {
@@ -87,11 +93,12 @@ public sealed partial class MainWindow
                 tunnelPlan["KomariController"] = new JsonObject { ["Port"] = 25774, ["Version"] = "1.5.1" }; tunnelState["KomariController"] = new JsonObject { ["Installed"] = true }; page.Children.Remove(guide); guide = TunnelAccessPanel(tunnelPlan, tunnelState); page.Children.Add(guide);
                 var publicField = Find<TextBox>(guide).Single(); var publicCheck = Find<Button>(guide).Single(b => b.Content as string == "验证公开访问");
                 publicField.Text = "https://monitor.example.com";
-                await Task.Delay(100); shell.UpdateLayout();
-                Require(publicCheck.IsEnabled && Find<TextBlock>(guide).Any(t => t.Text == "主机名：monitor.example.com") && Find<TextBlock>(guide).Any(t => t.Text == "服务 URL：http://127.0.0.1:25774"), "公开路由字段或前置条件缺失。");
+                await WaitForState(() => publicCheck.IsEnabled && Find<TextBlock>(guide).Any(t => t.Text == "主机名：monitor.example.com"), "公开网址输入后按钮或主机名没有刷新。");
+                Require(Find<TextBlock>(guide).Any(t => t.Text == "服务 URL：http://127.0.0.1:25774"), "公开路由未显示本机服务地址。");
                 mainScroll!.ChangeView(null, mainScroll.ScrollableHeight, null, true); await Task.Delay(100);
                 await Capture(SafePath.Resolve(output, "tunnel-route-guidance-" + theme.ToLowerInvariant() + ".png"), guide);
-                publicField.Text = "http://monitor.example.com"; await Task.Delay(100); Require(!publicCheck.IsEnabled, "公开验证接受无 TLS 网址。");
+                publicField.Text = "http://monitor.example.com"; await WaitForState(() => !publicCheck.IsEnabled, "公开验证接受无 TLS 网址。");
+                publicField.Text = "https://another.example.com"; await WaitForState(() => publicCheck.IsEnabled && Find<TextBlock>(guide).Any(t => t.Text == "主机名：another.example.com"), "修正公开网址后仍显示旧输入状态。");
                 page.Children.Remove(guide);
                 SelectPage("clients"); scheme = ClientSchemes.New(paths); designerStep = 1;
                 foreach (var name in new[] { "入口 A", "入口 B", "入口 C" }) scheme["Nodes"]!.AsArray().Add(new JsonObject { ["name"] = name, ["kind"] = "entry", ["region_group"] = "US-West Entry" });
