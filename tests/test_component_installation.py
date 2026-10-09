@@ -86,6 +86,46 @@ subprocess.run = fixture_run
         result, _ = self.preflight(); self.assertFalse(result['Allowed'])
         self.assertEqual(list(actual.iterdir()), [])
 
+    def test_batch_preserves_existing_service_and_requires_every_selected_service(self):
+        self.write('usr/local/bin/xray', 'existing-binary')
+        old = self.write('usr/local/etc/xray/config.json', 'old-reality')
+        self.write('etc/systemd/system/xray.service', 'old-unit')
+        self.env.update(VPS_PARAM_COMPONENTS='ShadowsocksLanding,KomariController', VPS_PARAM_PORTS='45001,25774')
+        before, _ = self.preflight(); self.assertTrue(before['Allowed'])
+        self.env.update(VPS_PARAM_VERIFY_ONLY='true', VPS_PARAM_BEFORE_JSON=json.dumps(before))
+        self.write('usr/local/bin/sing-box', 'new-ss')
+        self.write('etc/systemd/system/sing-box.service', 'new-ss-unit')
+        result, _ = self.preflight(); self.assertFalse(result['Allowed']); self.assertEqual(result['Code'], 'ComponentNotRunning')
+        self.write('usr/local/bin/komari', 'new-controller')
+        self.write('etc/systemd/system/komari.service', 'new-controller-unit')
+        result, _ = self.preflight(); self.assertTrue(result['Allowed'])
+        old.write_text('changed-existing')
+        result, _ = self.preflight(); self.assertFalse(result['Allowed']); self.assertEqual(result['Code'], 'ExistingComponentChanged')
+
+    def test_batch_rejects_one_collision_before_mutation_and_duplicate_ports(self):
+        keep = self.write('var/lib/komari/private.db', 'keep-controller')
+        self.env.update(VPS_PARAM_COMPONENTS='ShadowsocksLanding,KomariController', VPS_PARAM_PORTS='45001,25774')
+        result, _ = self.preflight(); self.assertFalse(result['Allowed']); self.assertEqual(result['Code'], 'ComponentExists')
+        self.assertEqual(keep.read_text(), 'keep-controller')
+        keep.unlink(); keep.parent.rmdir(); self.env['VPS_PARAM_PORTS'] = '45001,45001'
+        result, _ = self.preflight(); self.assertFalse(result['Allowed'])
+
+    def test_batch_firewall_builds_one_increment_and_refuses_unreviewed_content(self):
+        source = (ROOT / 'assets/remote/component-firewall-add.sh').read_text().split('python3 - "$temporary" <<\'PY\'\n', 1)[1].split('\nPY', 1)[0]
+        source = source.replace("'/etc/nftables.conf'", repr((self.root / 'nftables.conf').as_posix()))
+        baseline = 'table inet filter {\n  chain input {\n    ct state established,related accept\n    tcp dport { 22,443 } accept\n  }\n}\n'
+        original = self.write('nftables.conf', baseline); original.write_bytes(baseline.encode()); destination = self.root / 'proposed-nftables.conf'
+        env = dict(self.env, VPS_PARAM_COMPONENTS_JSON=json.dumps([{'Component': 'AnyTlsEntry', 'Ports': [8443]}, {'Component': 'ShadowsocksLanding', 'Ports': [45001]}]), VPS_PARAM_EXPECTED_SHA256=hashlib.sha256(original.read_bytes()).hexdigest(), VPS_PARAM_ALLOWED_IPV4S='192.0.2.30')
+        result = subprocess.run([sys.executable, '-c', source, str(destination)], env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        proposed = destination.read_text(); self.assertIn('tcp dport { 8443 } accept', proposed)
+        self.assertIn('ip saddr { 192.0.2.30 } tcp dport 45001 accept', proposed)
+        self.assertIn('ip saddr { 192.0.2.30 } udp dport 45001 accept', proposed)
+        self.assertIn('tcp dport { 22,443 } accept', proposed); self.assertEqual(original.read_text(), baseline)
+        destination.unlink(); original.write_text(baseline + '# changed\n')
+        result = subprocess.run([sys.executable, '-c', source, str(destination)], env=env, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0); self.assertFalse(destination.exists())
+
     def coexistence(self, port):
         self.write('usr/local/bin/xray', '#!/usr/bin/env bash\nexit 0\n')
         self.write('usr/local/bin/sing-box-anytls', '#!/usr/bin/env bash\nexit 0\n')

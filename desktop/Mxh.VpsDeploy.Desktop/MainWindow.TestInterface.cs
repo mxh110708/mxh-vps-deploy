@@ -95,6 +95,23 @@ public sealed partial class MainWindow
                 if (TestElement(args) is not ScrollViewer scroll) throw new OperationException("目标不是滚动容器。");
                 scroll.ChangeView(null, Math.Clamp(args.Number("offset"), 0, scroll.ScrollableHeight), null, true); break;
             }
+            case "ui.drag":
+            {
+                if (activeTestDialog != null || taskCancellation != null || scheme == null || currentPage != "clients" || designerStep != 1) throw new OperationException("当前页面不能拖动节点。");
+                if (TestElement(args) is not NodeReorderHandle handle || !int.TryParse((handle.Tag as string)?["NodeDragHandle.".Length..], out var source)) throw new OperationException("请选择当前节点的拖动手柄。");
+                var insertion = args.Number("insertion", -1); if (insertion < 0 || insertion > nodeDropRows.Count) throw new OperationException("拖动目标位置无效。");
+                var origin = nodeDropRows[source].Row.TransformToVisual(mainScroll).TransformPoint(new(20, 30));
+                var targetRow = nodeDropRows[Math.Min(insertion, nodeDropRows.Count - 1)].Row;
+                var target = targetRow.TransformToVisual(mainScroll).TransformPoint(new(20, insertion == nodeDropRows.Count ? targetRow.ActualHeight - 2 : 2));
+                if (!BeginNodeReorder(scheme, nodeDragSession, source, origin)) throw new OperationException("拖动未开始。");
+                UpdateNodeReorder(target);
+                var indicator = nodeDropRows.Any(row => row.Line.Visibility == Visibility.Visible);
+                if (args.Flag("cancel")) { CancelNodeReorder(); return new() { ["cancelled"] = true, ["indicator"] = indicator, ["input"] = "application_pointer_path" }; }
+                return new() { ["moved"] = FinishNodeReorder(), ["indicator"] = indicator, ["input"] = "application_pointer_path" };
+            }
+            case "window.close": Mxh.VpsDeploy.Windows.WindowsWindowLifecycle.RequestClose(WinRT.Interop.WindowNative.GetWindowHandle(this)); return new() { ["accepted"] = true };
+            case "window.restore":
+                if (!minimizedToTray) throw new OperationException("测试窗口未在托盘中。"); RestoreFromTray(); break;
             case "ui.capture":
             {
                 var name = args.Text("name", "page.png"); if (!name.EndsWith(".png", StringComparison.Ordinal)) throw new OperationException("截图输出必须为 PNG。");
@@ -154,7 +171,7 @@ public sealed partial class MainWindow
                 foreach (var child in Walk(VisualTreeHelper.GetChild(root, index), visible)) yield return child;
         }
         shell.UpdateLayout();
-        return Walk(activeTestDialog ?? (DependencyObject)shell, true).Where(e => e is Button or ToggleButton or TextBox or PasswordBox or ComboBox or CheckBox or ToggleSwitch or TextBlock or ScrollViewer);
+        return Walk(activeTestDialog ?? (DependencyObject)shell, true).Where(e => e is Button or ToggleButton or TextBox or PasswordBox or ComboBox or CheckBox or ToggleSwitch or TextBlock or ScrollViewer or NodeReorderHandle);
     }
     private FrameworkElement TestElement(JsonObject args)
     {

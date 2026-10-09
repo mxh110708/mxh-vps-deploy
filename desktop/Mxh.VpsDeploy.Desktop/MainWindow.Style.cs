@@ -29,6 +29,7 @@ public sealed partial class MainWindow
 
     private async Task<ContentDialogResult> ShowDialog(ContentDialog dialog)
     {
+        if (minimizedToTray) RestoreFromTray(false);
         dialog.RequestedTheme = DesktopTheme.IsLight ? ElementTheme.Light : ElementTheme.Dark;
         dialog.FontFamily = InterfaceFont; dialog.Background = Brush(Paint.Surface); dialog.Foreground = Brush(Paint.Text); dialog.CornerRadius = new CornerRadius(12);
         dialog.PrimaryButtonStyle = DialogButton(true); dialog.CloseButtonStyle = DialogButton(false);

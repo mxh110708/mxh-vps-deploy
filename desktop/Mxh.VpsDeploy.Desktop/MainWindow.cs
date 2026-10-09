@@ -78,6 +78,8 @@ public sealed partial class MainWindow : Window, IUserInteraction
         Grid.SetRow(taskBar, 2); shell.Children.Add(taskBar);
         AppWindow.Closing += async (_, e) =>
         {
+            if (!closing && !exitFromTray && settings.Text("CloseBehavior", "Exit") == "Tray") { e.Cancel = true; MinimizeToTray(); return; }
+            exitFromTray = false;
             if (taskCancellation != null) { e.Cancel = true; closing = true; taskCancellation.Cancel(); taskText.Text = "正在安全结束任务，完成后关闭窗口。"; }
             else if (!closing && SchemeChanged)
             {
@@ -86,6 +88,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
                 catch (Exception error) { Show(error is OperationException safe ? safe.Message : "方案未能保存，窗口保持打开。", InfoBarSeverity.Error); }
             }
         };
+        Closed += (_, _) => { CancelNodeReorder(); trayIcon?.Dispose(); trayIcon = null; };
         SetAppearance(settings.Text("Appearance", "Dark"));
         root.Loaded += (_, _) => Program.Trace(arguments, "Root Loaded");
         root.Loaded += async (_, _) => { var scale = root.XamlRoot.RasterizationScale; var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea; AppWindow.Resize(new((int)Math.Min(1280 * scale, area.Width - 32 * scale), (int)Math.Min(850 * scale, area.Height - 32 * scale))); SelectPage("overview"); if (fontFallback) Show("所选字体暂时不可用，已使用内置原版字体。可在设置中重新选择或导入。", InfoBarSeverity.Warning); if (testSession != null) { StartTestSession(); return; } if (arguments.Contains("--verify-installed-update")) { await InstalledUpdateSmoke(); return; } if (arguments.Contains("--ui-smoke") || arguments.Contains("--verify-runtime")) { await UiSmoke(); return; } if (settings.Flag("AutoCheckUpdates")) await CheckUpdates(true); };
@@ -125,6 +128,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
     private void Show(string message, InfoBarSeverity severity = InfoBarSeverity.Informational) { notice.Message = message; notice.Severity = severity; notice.IsOpen = true; }
     private void Navigate(string id)
     {
+        CancelNodeReorder();
         ClearExecution();
         currentPage = id; page.Children.Clear(); disclosures.Clear(); pageAction.Content = null; notice.IsOpen = false; heading.Text = id switch { "overview" => "概述", "instances" => "实例", "deploy" => "部署", "clients" => "配置设计", "network" => "网络调优", "records" => "任务记录", _ => "设置" }; caption.Text = id switch { "overview" => "集中管理你的 VPS 与连接配置。", "instances" => "选择实例，查看归档并进行维护。", "deploy" => "组合选择用途，审阅计划，然后执行。", "clients" => "选择目标，设计连接，校验后导出配置。", "network" => "部署完成后，按需要单独审阅并调整网络参数。", "records" => "查看任务结果和需要处理的恢复记录。", _ => "应用更新、外观设置与私人数据。" };
         try { switch (id) { case "overview": Overview(); break; case "instances": Instances(); break; case "deploy": Deployment(); break; case "clients": Clients(); break; case "network": NetworkPage(); break; case "records": Records(); break; default: Settings(); break; } } catch (Exception error) { Show(error is OperationException safe ? safe.Message : "本地记录暂时无法读取，请核对数据目录。", InfoBarSeverity.Error); }

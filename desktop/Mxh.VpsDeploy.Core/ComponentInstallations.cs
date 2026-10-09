@@ -8,6 +8,18 @@ namespace Mxh.VpsDeploy.Core;
 public static class ComponentInstallations
 {
     public static readonly string[] Components = ["RealityEntry", "AnyTlsEntry", "ShadowsocksLanding", "KomariAgent", "KomariController", "Tunnel"];
+    private static readonly string[] InstallationOrder = ["RealityEntry", "AnyTlsEntry", "ShadowsocksLanding", "KomariController", "KomariAgent", "Tunnel"];
+    public static string[] Selected(JsonObject options)
+    {
+        var selected = options["Components"] is JsonArray array
+            ? array.Select(item => item is JsonValue value && value.TryGetValue<string>(out var name) ? name : "").ToArray()
+            : new[] { options.Text("Component") };
+        if (selected.Length == 0 || selected.Length > Components.Length || selected.Distinct().Count() != selected.Length || selected.Any(name => !Components.Contains(name))) throw new OperationException("请勾选至少一个尚未安装的组件，每个组件只能选择一次。");
+        return InstallationOrder.Where(selected.Contains).ToArray();
+    }
+    public static JsonObject Settings(JsonObject options, string component) => options["Components"] != null ? options["Settings"]![component]!.AsObject() : options["Settings"]!.AsObject();
+    public static string SelectionLabel(JsonObject options) => string.Join(" + ", Selected(options).Select(Label));
+    public static string StepId(JsonObject options, string stage, string component) => Selected(options).Length == 1 ? stage : stage + "-" + component;
     public static string Label(string component) => component switch
     {
         "RealityEntry" => "Reality 入口", "AnyTlsEntry" => "AnyTLS / ECH 入口", "ShadowsocksLanding" => "Shadowsocks 落地",
@@ -17,16 +29,21 @@ public static class ComponentInstallations
     public static bool EntryPortsConflict(JsonObject plan) => new[] { plan.Number("Ports.XrayPrimary"), plan.Number("Ports.XrayBackup") }.Contains(plan.Number("Ports.AnyTlsPrimary"));
     public static void ValidateOptions(JsonObject options)
     {
-        Label(options.Text("Component"));
-        if (options["Settings"] is not JsonObject || options.Any(item => item.Key is not ("Component" or "Settings" or "AssetPin")) || !Regex.IsMatch(options.Text("AssetPin"), "^[a-f0-9]{64}$")) throw new OperationException("追加安装只接受所选组件的参数与已审阅的版本清单。");
-        var allowed = options.Text("Component") switch
+        var selected = Selected(options);
+        var batch = options.ContainsKey("Components");
+        if (options["Settings"] is not JsonObject allSettings || options.Any(item => item.Key is not ("Component" or "Components" or "Settings" or "AssetPin")) || batch && (options["Components"] is not JsonArray || options.ContainsKey("Component")) || !Regex.IsMatch(options.Text("AssetPin"), "^[a-f0-9]{64}$")) throw new OperationException("追加安装只接受所选组件的参数与已审阅的版本清单。");
+        if (batch && (allSettings.Count != selected.Length || allSettings.Any(item => !selected.Contains(item.Key) || item.Value is not JsonObject))) throw new OperationException("组件选择与填写参数不一致，请重新审阅。");
+        foreach (var component in selected)
         {
-            "RealityEntry" => new[] { "RealityTarget", "RealityPort", "RealityBackupPort" },
-            "AnyTlsEntry" => ["AnyTlsName", "EchPublicName", "AnyTlsPort", "ZoneName", "CertbotEmail", "CloudflareTokenFile"],
-            "ShadowsocksLanding" => ["LandingPort", "TrustedEntries", "TransitGroup", "SecondaryIpv6Enabled", "SecondaryIpv6Address", "SecondaryBindInterface"],
-            "KomariAgent" => ["KomariEndpoint"], "KomariController" => ["ControllerPort"], _ => ["PublicUrl"]
-        };
-        if (options["Settings"]!.AsObject().Any(item => !allowed.Contains(item.Key))) throw new OperationException("追加安装参数包含其他组件或连接设置，请重新审阅。");
+            var allowed = component switch
+            {
+                "RealityEntry" => new[] { "RealityTarget", "RealityPort", "RealityBackupPort" },
+                "AnyTlsEntry" => ["AnyTlsName", "EchPublicName", "AnyTlsPort", "ZoneName", "CertbotEmail", "CloudflareTokenFile"],
+                "ShadowsocksLanding" => ["LandingPort", "TrustedEntries", "TransitGroup", "SecondaryIpv6Enabled", "SecondaryIpv6Address", "SecondaryBindInterface"],
+                "KomariAgent" => ["KomariEndpoint"], "KomariController" => ["ControllerPort"], _ => ["PublicUrl"]
+            };
+            if (Settings(options, component).Any(item => !allowed.Contains(item.Key))) throw new OperationException("追加安装参数包含其他组件或连接设置，请重新审阅。");
+        }
     }
     public static int[] ListeningPorts(JsonObject plan, string component) => component switch
     {
@@ -36,9 +53,15 @@ public static class ComponentInstallations
     };
     public static JsonObject Prepare(JsonObject current, JsonObject state, JsonObject options, JsonObject versions)
     {
-        ValidateOptions(options); var component = options.Text("Component"); var settings = options["Settings"]!.AsObject();
+        ValidateOptions(options);
         if (ArchiveStore.Fingerprint(versions) != options.Text("AssetPin")) throw new OperationException("组件版本清单在填写或审阅后发生变化，请重新打开安装表单并审阅。", code: "InstallationVersionsChanged");
         if (!InstanceLifecycle.Describe(current, state, null).Managed) throw new OperationException("请先完成部署或接入，再追加安装。");
+        var prepared = current.DeepClone().AsObject();
+        foreach (var component in Selected(options)) prepared = PrepareOne(prepared, state, component, Settings(options, component), versions);
+        return prepared;
+    }
+    private static JsonObject PrepareOne(JsonObject current, JsonObject state, string component, JsonObject settings, JsonObject versions)
+    {
         if (DeploymentPlans.Roles[..3].Contains(component))
         {
             if (ProtocolInstalled(current, component)) throw new OperationException("此协议已安装，请从协议管理维护。", code: "ComponentAlreadyInstalled");
@@ -87,6 +110,8 @@ public static class ComponentInstallations
         {
             plan["Roles"] = new JsonArray(DeploymentPlans.Roles[..3].Where(role => role == component || ProtocolInstalled(current, role)).Select(role => (JsonNode?)JsonValue.Create(role)).ToArray());
             plan.Put("ProtocolInventory." + component, new JsonObject { ["Installed"] = true, ["Enabled"] = true, ["Active"] = true });
+            if (!DeploymentPlans.Roles[..3].Contains(current.Text("Role"))) plan["Role"] = component;
+            if (component is "RealityEntry" or "AnyTlsEntry" && !new[] { "RealityEntry", "AnyTlsEntry" }.Any(role => ProtocolInstalled(current, role))) plan["ActiveEntry"] = component;
         }
         return plan;
     }

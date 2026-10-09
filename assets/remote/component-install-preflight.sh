@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${VPS_PARAM_COMPONENT:?}"
+[[ -n "${VPS_PARAM_COMPONENTS:-${VPS_PARAM_COMPONENT:-}}" ]]
 python3 <<'PY'
 import base64, hashlib, json, os, pathlib, subprocess
 
-component = os.environ['VPS_PARAM_COMPONENT']
+components = os.environ.get('VPS_PARAM_COMPONENTS', os.environ.get('VPS_PARAM_COMPONENT', '')).split(',')
 definitions = {
  'RealityEntry': ('xray.service', '/usr/local/bin/xray', ['/usr/local/etc/xray', '/usr/local/share/xray', '/etc/systemd/system/xray@.service', '/etc/systemd/system/xray.service.d']),
  'AnyTlsEntry': ('sing-box-anytls.service', '/usr/local/bin/sing-box-anytls', ['/etc/sing-box-anytls', '/var/lib/sing-box-anytls']),
@@ -14,7 +14,7 @@ definitions = {
  'KomariController': ('komari.service', '/usr/local/bin/komari', ['/usr/bin/komari', '/opt/komari', '/var/lib/komari']),
  'Tunnel': ('cloudflared.service', '/usr/local/bin/cloudflared', ['/usr/bin/cloudflared', '/etc/cloudflared', '/root/.cloudflared']),
 }
-if component not in definitions: raise SystemExit('Unsupported installation component')
+if not components or len(set(components)) != len(components) or any(component not in definitions for component in components): raise SystemExit('Unsupported installation components')
 
 def run(*args):
     return subprocess.run(args, capture_output=True, text=True, timeout=15)
@@ -39,25 +39,31 @@ def snapshot(name):
 result = {'Allowed': False, 'Code': 'InstallationCheckIncomplete'}
 try:
     services = {name: snapshot(name) for name in definitions}
-    unit, binary, paths = definitions[component]
-    candidates = [binary, '/etc/systemd/system/' + unit, '/etc/systemd/system/' + unit + '.d', *paths]
-    if component == 'AnyTlsEntry' and os.environ.get('VPS_PARAM_CERTIFICATE_PREPARED') != 'true': candidates += ['/etc/mxh-tls/anytls', '/etc/letsencrypt/live/mxh-anytls', '/etc/letsencrypt/renewal/mxh-anytls.conf']
+    candidates = []
+    for component in components:
+        unit, binary, paths = definitions[component]
+        candidates += [binary, '/etc/systemd/system/' + unit, '/etc/systemd/system/' + unit + '.d', *paths]
+        if component == 'AnyTlsEntry' and os.environ.get('VPS_PARAM_CERTIFICATE_PREPARED') != 'true': candidates += ['/etc/mxh-tls/anytls', '/etc/letsencrypt/live/mxh-anytls', '/etc/letsencrypt/renewal/mxh-anytls.conf']
     if os.environ.get('VPS_PARAM_VERIFY_ONLY') == 'true':
-        before = json.loads(os.environ['VPS_PARAM_BEFORE_JSON'])['Services']
-        preserved = all(services[name] == before[name] for name in definitions if name != component)
-        current = services[component]
+        baseline = json.loads(os.environ['VPS_PARAM_BEFORE_JSON'])
+        if baseline['Components'] != components: raise ValueError('Installation scope changed')
+        before = baseline['Services']
+        preserved = all(services[name] == before[name] for name in definitions if name not in components)
+        running = all(services[name]['Unit'] and services[name]['Enabled'] and services[name]['Active'] and services[name]['BinaryHash'] is not None for name in components)
         result['Code'] = 'ExistingComponentChanged' if not preserved else 'ComponentNotRunning'
-        result['Allowed'] = preserved and current['Unit'] and current['Enabled'] and current['Active'] and current['BinaryHash'] is not None
-    elif services[component]['Unit'] or services[component]['Enabled'] or services[component]['Active'] or any(pathlib.Path(p).exists() or pathlib.Path(p).is_symlink() or any(parent.is_symlink() for parent in pathlib.Path(p).parents) for p in candidates):
+        result['Allowed'] = preserved and running
+        if result['Allowed']: result['Code'] = ''
+    elif any(services[name]['Unit'] or services[name]['Enabled'] or services[name]['Active'] for name in components) or any(pathlib.Path(p).exists() or pathlib.Path(p).is_symlink() or any(parent.is_symlink() for parent in pathlib.Path(p).parents) for p in candidates):
         result['Code'] = 'ComponentExists'
     else:
         ports = [int(port) for port in os.environ.get('VPS_PARAM_PORTS', '').split(',') if port]
-        if any(not 1 <= port <= 65535 for port in ports): raise ValueError('Invalid port')
+        if len(set(ports)) != len(ports) or any(not 1 <= port <= 65535 for port in ports): raise ValueError('Invalid port')
         listeners = [run('ss', '-H', '-lntup', f'sport = :{port}') for port in ports]
         if any(item.returncode != 0 for item in listeners): raise ValueError('Listener check unavailable')
         result['Allowed'] = all(not item.stdout.strip() for item in listeners)
         result['Code'] = 'PortBusy' if not result['Allowed'] else ''
     result['Services'] = services
+    result['Components'] = components
     result['NftablesSha256'] = digest('/etc/nftables.conf') or ''
 except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
     pass

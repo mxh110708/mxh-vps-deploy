@@ -79,7 +79,10 @@ public sealed partial class MainWindow
         "installation-firewall" or "component-firewall-add" => "新协议防火墙放行", "installation-validation" => "新增组件验收",
         "installation-archive" => "更新实例归档", "installation-commit" => "确认追加安装完成", "maintenance-komari" => "监控组件维护",
         "maintenance-transaction-commit" => "确认维护完成", "protocol-migration-trigger-rollback" => "按组件范围恢复",
-        "network-tuning" => "网络调优", "validate" => "独立验收", "health" => "健康检查", "import" => "接入识别", _ => stage
+        "network-tuning" => "网络调优", "validate" => "独立验收", "health" => "健康检查", "import" => "接入识别",
+        _ when stage.StartsWith("component-install-", StringComparison.Ordinal) && ComponentInstallations.Components.Contains(stage[18..]) => "安装 " + ComponentInstallations.Label(stage[18..]),
+        _ when stage.StartsWith("target-audit-", StringComparison.Ordinal) => "审计 Reality 目标",
+        _ when stage.StartsWith("certbot-dns-", StringComparison.Ordinal) => "申请 AnyTLS 可信证书", _ => stage
     };
     private static string TaskMessage(TaskRecord record)
     {

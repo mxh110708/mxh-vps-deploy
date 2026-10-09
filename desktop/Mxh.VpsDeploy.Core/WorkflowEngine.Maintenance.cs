@@ -43,7 +43,7 @@ public sealed partial class WorkflowEngine
         c.Pending = new JsonObject { ["TaskId"] = c.Id, ["Kind"] = c.Request.Kind.ToString(), ["Phase"] = "Arming", ["Components"] = new JsonArray(components.Select(x => (JsonNode?)JsonValue.Create(x)).ToArray()), ["LocalBackup"] = "maintenance-backups/" + c.Id, ["OldPlan"] = c.Plan.DeepClone(), ["OldState"] = c.State.DeepClone() };
         store.WriteSecret(SafePath.Resolve(backup, "secrets.dotnet.private.json"), c.Secrets); c.Save();
         var role = DeploymentPlans.Roles.Contains(c.Plan.Text("Role")) ? c.Plan.Text("Role") : "MonitorOnly";
-        var result = await c.Run("protocol-migration-arm-rollback.sh", new() { ["SOURCE_ROLE"] = role, ["TARGET_ROLE"] = role, ["TIMEOUT_MINUTES"] = "20", ["QUIESCE_KOMARI_CONTROLLER"] = Bool(components.Contains("KomariController")), ["COMPONENTS"] = string.Join(',', components), ["CONTROL_TASK_ID"] = c.Id }, true, 600);
+        var result = await c.Run("protocol-migration-arm-rollback.sh", new() { ["SOURCE_ROLE"] = role, ["TARGET_ROLE"] = role, ["TIMEOUT_MINUTES"] = c.Request.Kind == OperationKind.InstallComponent ? "60" : "20", ["QUIESCE_KOMARI_CONTROLLER"] = Bool(components.Contains("KomariController")), ["COMPONENTS"] = string.Join(',', components), ["CONTROL_TASK_ID"] = c.Id }, true, 600);
         c.Pending["RemoteBackup"] = RemoteAssets.Marker(result.Output, "BACKUP_DIR"); c.Pending["Phase"] = "Armed"; c.Save();
         if (!Regex.IsMatch(c.Pending.Text("RemoteBackup"), @"^/root/vps-deploy-backups/[0-9]{8}-[0-9]{6}/protocol-lifecycle$")) throw new OperationException("远端恢复目录异常。", true);
         await using var session = await c.Session();

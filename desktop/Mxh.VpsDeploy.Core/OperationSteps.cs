@@ -11,13 +11,17 @@ public static class OperationSteps
         void Add(string id, string title, string description) => steps.Add(new(id, title, description));
         if (request.Kind == OperationKind.InstallComponent)
         {
-            var component = request.Options.Text("Component");
+            var selected = ComponentInstallations.Selected(request.Options);
             Add("installation-preflight", "核对现有实例与端口", "核对管理连接、现有服务和归档；确认本次组件尚未安装、端口未占用。");
             Add("installation-backup", "建立组件恢复快照", "只备份本次操作范围，并启用限时回滚保护。");
-            if (component == "RealityEntry") Add("target-audit", "审计 Reality 目标", "验证目标的 TLS 与连接质量。");
-            if (component == "AnyTlsEntry") Add("certbot-dns", "申请 AnyTLS 可信证书", "使用 DNS 验证申请证书，并设置续期。");
-            Add("component-install", "安装 " + ComponentInstallations.Label(component), "安装固定版本及本次组件配置。");
-            if (DeploymentPlans.Roles[..3].Contains(component)) Add("installation-firewall", "更新协议放行规则", "受管防火墙仅补充新协议端口，保留已有规则。");
+            foreach (var component in selected)
+            {
+                string Step(string stage) => ComponentInstallations.StepId(request.Options, stage, component);
+                if (component == "RealityEntry") Add(Step("target-audit"), "审计 Reality 目标", "验证目标的 TLS 与连接质量。");
+                if (component == "AnyTlsEntry") Add(Step("certbot-dns"), "申请 AnyTLS 可信证书", "使用 DNS 验证申请证书，并设置续期。");
+                Add(Step("component-install"), "安装 " + ComponentInstallations.Label(component), "安装固定版本及本次组件配置。");
+            }
+            if (selected.Any(DeploymentPlans.Roles[..3].Contains)) Add("installation-firewall", "更新协议放行规则", "受管防火墙一次补充本轮新协议端口，保留已有规则。");
             Add("installation-validation", "验收新增组件", "检查服务、连接及既有组件是否保留。");
             Add("installation-archive", "更新同一实例归档", "归档新增组件及验收结果。");
             Add("installation-commit", "确认完成", "提交组件事务，解除限时回滚保护。");

@@ -27,6 +27,7 @@ internal sealed partial class BoundaryTests
             "KomariAgent" => new() { ["KomariEndpoint"] = "https://monitor.example.com" }, "KomariController" => new() { ["ControllerPort"] = 25774 }, _ => new() { ["PublicUrl"] = "https://monitor.example.com" }
         };
         JsonObject Options(string component) => new() { ["Component"] = component, ["Settings"] = Settings(component), ["AssetPin"] = ArchiveStore.Fingerprint(f.Versions) };
+        JsonObject Batch(params string[] selected) => new() { ["Components"] = new JsonArray(selected.Select(component => (JsonNode?)JsonValue.Create(component)).ToArray()), ["Settings"] = new JsonObject(selected.Select(component => new KeyValuePair<string, JsonNode?>(component, Settings(component)))), ["AssetPin"] = ArchiveStore.Fingerprint(f.Versions) };
         (JsonObject Plan, string Relative, string Directory, JsonObject State) Managed(string name, bool anyTls = false)
         {
             var plan = f.Plan(name); plan.Put("Ports.XrayBackup", JsonValue.Create(44443));
@@ -75,5 +76,45 @@ internal sealed partial class BoundaryTests
         Check(await f.Engine(ackRemote).ExecuteAsync(new(OperationKind.InstallComponent, lostAck.Relative, Options("ShadowsocksLanding")), ackId, new InlineProgress<TaskProgress>(ackEvents.Add), default) == TaskOutcome.CompletedWithWarnings, "confirmed committed addition was rolled back after lost acknowledgement");
         Check(ackRemote.Commands.Count(asset => asset == "maintenance-transaction-commit.sh") == 1 && !ackRemote.Commands.Contains("protocol-migration-trigger-rollback.sh"), "lost acknowledgement replayed installation or triggered rollback");
         Check(ackEvents.Last().StepId == "installation-commit" && ackEvents.Last().StepState == TaskStepState.Completed && ackEvents.Last().Completed == ackEvents.Last().Total, "reconciled commit remained marked failed in progress");
+        var batchOptions = Batch("Tunnel", "KomariAgent", "ShadowsocksLanding", "AnyTlsEntry", "KomariController");
+        Check(ComponentInstallations.Selected(batchOptions).SequenceEqual(new[] { "AnyTlsEntry", "ShadowsocksLanding", "KomariController", "KomariAgent", "Tunnel" }), "batch dependency order follows input order");
+        var batchFixture = Managed("append-batch"); var batchRemote = new FakeRemote { StatusPhase = "Armed" }; batchRemote.SeedProtocols(batchFixture.Plan);
+        var batchUser = new FakeUser(title => title.Contains("主控管理员") ? "SyntheticStrong123" : title.Contains("Agent Token") ? "synthetic-agent-token" : "synthetic-tunnel-token");
+        var batchEngine = new WorkflowEngine(f.Store, batchRemote, new FakeKeys(), batchUser, new FakeValidation()); var batchId = Guid.NewGuid().ToString("N"); batchRemote.StatusTaskId = batchId; var batchEvents = new List<TaskProgress>();
+        Check(await batchEngine.ExecuteAsync(new(OperationKind.InstallComponent, batchFixture.Relative, batchOptions), batchId, new InlineProgress<TaskProgress>(batchEvents.Add), default) == TaskOutcome.Completed, "combined append failed");
+        var batchPlan = ArchiveStore.ReadJson(SafePath.Resolve(batchFixture.Directory, "deployment-plan.json"));
+        Check(ComponentInstallations.Selected(batchOptions).Take(2).All(component => ComponentInstallations.ProtocolInstalled(batchPlan, component)) && batchPlan.Text("ActiveEntry") == batchFixture.Plan.Text("ActiveEntry") && JsonNode.DeepEquals(batchPlan["Reality"], batchFixture.Plan["Reality"]) && JsonNode.DeepEquals(batchPlan["NetworkTuning"], batchFixture.Plan["NetworkTuning"]), "batch changed existing protocol/default entry/network");
+        Check(batchRemote.Commands.Count(asset => asset == "protocol-migration-arm-rollback.sh") == 1 && batchRemote.Commands.Count(asset => asset == "component-firewall-add.sh") == 1 && batchRemote.Commands.Count(asset => asset == "maintenance-transaction-commit.sh") == 1, "batch split its snapshot/firewall/commit");
+        Check(batchRemote.ArmedComponents.Split(',').ToHashSet().SetEquals(new[] { "AnyTlsEntry", "ShadowsocksLanding", "KomariAgent", "KomariController", "Cloudflared", "TrustedTls", "Firewall" }), "batch snapshot widened or missed a selected component");
+        Check(batchRemote.Commands.IndexOf("monitoring-component-install.sh") < batchRemote.Commands.IndexOf("komari-agent.sh"), "Agent installed before selected controller");
+        var batchExpected = OperationSteps.Create(new(OperationKind.InstallComponent, batchFixture.Relative, batchOptions), batchFixture.Plan).Select(step => step.Id).ToArray();
+        Check(batchExpected.Distinct().Count() == batchExpected.Length && batchEvents.Where(e => e.StepState == TaskStepState.Completed).Select(e => e.StepId).SequenceEqual(batchExpected), "batch progress is not per-component or completes early");
+        var duplicate = Batch("KomariController"); duplicate["Components"]!.AsArray().Add("KomariController"); Refuses(() => ComponentInstallations.ValidateOptions(duplicate), "duplicate append selection accepted");
+        var empty = Batch(); Refuses(() => ComponentInstallations.ValidateOptions(empty), "empty append selection accepted");
+        var mismatched = Batch("KomariController"); mismatched["Settings"]!["Tunnel"] = new JsonObject(); Refuses(() => ComponentInstallations.ValidateOptions(mismatched), "unselected component settings accepted");
+        var portConflict = Batch("AnyTlsEntry", "KomariController"); portConflict["Settings"]!["KomariController"]!["ControllerPort"] = 8443; Refuses(() => ComponentInstallations.Prepare(check.Plan, check.State, portConflict, f.Versions), "new components shared a listener");
+        var noProtocols = check.Plan.DeepClone().AsObject(); noProtocols["Role"] = "MonitorOnly"; noProtocols["Roles"] = new JsonArray("MonitorOnly"); noProtocols["ActiveEntry"] = "";
+        var firstProtocols = Batch("RealityEntry", "AnyTlsEntry"); firstProtocols["Settings"]!["RealityEntry"]!["RealityPort"] = 443;
+        var firstPlan = ComponentInstallations.Prepare(noProtocols, check.State, firstProtocols, f.Versions);
+        Check(firstPlan.Text("Role") == "RealityEntry" && firstPlan.Text("ActiveEntry") == "RealityEntry" && firstPlan.Strings("Roles").SequenceEqual(new[] { "RealityEntry", "AnyTlsEntry" }), "first protocol combination has no default entry");
+        Refuses(() => ComponentInstallations.Prepare(check.Plan, check.State, Batch("RealityEntry", "ShadowsocksLanding"), f.Versions), "batch overwrote an installed component");
+        foreach (var mode in new[] { "fail-second", "cancel-second", "post-check", "lost-commit" })
+        {
+            var item = Managed("batch-" + mode); var remote = new FakeRemote { StatusPhase = mode == "lost-commit" ? "Committed" : "Armed", FailAsset = mode == "fail-second" ? "monitoring-component-install.sh" : mode == "lost-commit" ? "maintenance-transaction-commit.sh" : "", PostInstallationCheckCode = mode == "post-check" ? "ExistingComponentChanged" : "" }; remote.SeedProtocols(item.Plan);
+            using var cancelBatch = new CancellationTokenSource(); if (mode == "cancel-second") remote.ObserveAsset = asset => { if (asset == "monitoring-component-install.sh") cancelBatch.Cancel(); };
+            var task = Guid.NewGuid().ToString("N"); remote.StatusTaskId = task;
+            var engine = new WorkflowEngine(f.Store, remote, new FakeKeys(), new FakeUser(_ => "SyntheticStrong123"), new FakeValidation());
+            var taskRequest = new OperationRequest(OperationKind.InstallComponent, item.Relative, Batch("ShadowsocksLanding", "KomariController"));
+            if (mode == "lost-commit")
+            {
+                Check(await engine.ExecuteAsync(taskRequest, task, new InlineProgress<TaskProgress>(_ => { }), default) == TaskOutcome.CompletedWithWarnings && remote.Commands.Count(asset => asset == "maintenance-transaction-commit.sh") == 1 && !remote.Commands.Contains("protocol-migration-trigger-rollback.sh"), "batch replayed or rolled back committed work");
+            }
+            else
+            {
+                try { await engine.ExecuteAsync(taskRequest, task, new InlineProgress<TaskProgress>(_ => { }), cancelBatch.Token); throw new Exception("batch interruption returned success"); } catch (OperationException) { assertions++; } catch (OperationCanceledException) when (mode == "cancel-second") { assertions++; }
+                Check(remote.Commands.Contains("sing-box-apply-config.sh") && remote.Commands.Contains("protocol-migration-trigger-rollback.sh") && JsonNode.DeepEquals(ArchiveStore.ReadJson(SafePath.Resolve(item.Directory, "deployment-plan.json")), item.Plan), "batch rollback did not undo its earlier successful component: " + mode);
+                Check(ArchiveStore.ReadJson(SafePath.Resolve(item.Directory, "operation-pending.dotnet.json")).Text("Phase") == "RolledBack", "batch rollback remained pending");
+            }
+        }
     }
 }

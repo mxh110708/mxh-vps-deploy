@@ -116,7 +116,7 @@ public sealed partial class MainWindow
         page.Children.Add(Trailing(SectionHeading("添加连接节点", Symbol.Link, "拖动左侧手柄调整顺序；也可使用上下按钮。保存方案和导出的配置沿用此顺序。"), Row(Action("添加受管节点", AddManagedNodes), Action("手动添加", () => EditNode(null)))));
         if (nodes.Count == 0) { page.Children.Add(Card(Column(Text("还没有节点", 18), Text("先添加至少一个入口节点。使用落地时，再添加落地节点并选择它连接的入口组。", 14, true)))); return; }
         var rows = new List<UIElement>();
-        nodeDragSession = Guid.NewGuid().ToString("N");
+        CancelNodeReorder(); nodeDropRows.Clear(); nodeDragSession = Guid.NewGuid().ToString("N");
         for (var i = 0; i < nodes.Count; i++)
         {
             var index = i; var node = nodes[i]!;

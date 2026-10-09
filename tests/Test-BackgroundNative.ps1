@@ -54,6 +54,22 @@ try {
     Check ((Control 'Komari 主控地址' 'TextBox').enabled) 'monitor field appears after purpose selection'
     Toggle 'Komari 监控 Agent' $false
     Check (@((Read-Ui).elements|Where-Object name -eq 'Komari 主控地址').Count -eq 0) 'monitor field hides when disabled'
+    Click '已有实例追加安装'; $null=Wait-Ui {param($ui) $ui.dialog -eq '在已有实例追加安装'}
+    Click '选择组件'; $null=Wait-Ui {param($ui) $ui.dialog -eq '追加安装组件'}
+    Check (-not (Control 'Reality 入口' 'CheckBox').enabled -and -not (Control '填写参数' 'Button').enabled) 'installed component disabled and empty batch blocked'
+    Toggle 'Shadowsocks 落地' $true; Toggle 'Komari 主控' $true
+    Click '填写参数'; $null=Wait-Ui {param($ui) $ui.dialog -eq '填写追加安装参数'}
+    Set-Text '可信入口 IP（逗号分隔）' '192.0.2.30'
+    Check ((Control '主控本机 HTTP 端口' 'TextBox').enabled -and (Control '新落地 TCP / UDP 端口' 'TextBox').enabled) 'combined append shows both components parameters'
+    Click '审阅安装'; $null=Wait-Ui {param($ui) $ui.dialog -eq '审阅追加安装计划'}
+    Check ((@((Read-Ui).elements|Where-Object { $_.name -match '本轮新增|统一验收|安装 Shadowsocks|安装 Komari' }).Count -ge 3)) 'one append review lists components order and shared rollback'
+    Send 'ui.capture' @{name='batch-installation-review.png'} | Out-Null; Click '返回'; $null=Wait-Ui {param($ui) -not $ui.dialog}
+    Click 'settings'; Toggle '最小到托盘' $true
+    Send 'window.close' | Out-Null; $ui=Wait-Ui {param($ui) $ui.window.minimized_to_tray -and $ui.window.tray_registered}
+    Check (-not $ui.busy) 'close registers real shell tray icon and keeps process alive'
+    Send 'window.restore' | Out-Null; $ui=Wait-Ui {param($ui) -not $ui.window.minimized_to_tray -and -not $ui.window.tray_registered}
+    Toggle '关闭应用' $true
+    Check ((Get-Content -Raw -LiteralPath (Join-Path $FixtureRoot 'private/desktop-settings.json')|ConvertFrom-Json).CloseBehavior -eq 'Exit') 'mutually exclusive close choice persists'
     Click 'clients'; Click '创建方案'; $null=Wait-Ui {param($ui) $ui.dialog -eq '创建配置方案'}
     Toggle 'sing-box 生成目标' $false; Toggle 'Clash 生成目标' $false
     Check (-not (Control '开始设计' 'Button').enabled) 'no output disables primary button'
@@ -75,6 +91,13 @@ try {
     [IO.File]::WriteAllText((Join-Path $FixtureRoot 'test-secrets/uuid.txt'),[guid]::NewGuid().ToString())
     Send 'ui.secret' @{name='UUID';reference='uuid.txt'} | Out-Null
     Click '保存'; $null=Wait-Ui {param($ui) -not $ui.dialog -and @($ui.elements|Where-Object name -eq 'synthetic-entry').Count -eq 1}
+    Send 'window.close' | Out-Null; $null=Wait-Ui {param($ui) $ui.dialog -eq '保存方案修改？'}
+    Click '继续编辑'; $null=Wait-Ui {param($ui) -not $ui.dialog}
+    Check ((Control '拖动排序 synthetic-entry' 'NodeReorderHandle').enabled) 'direct close asks about unsaved scheme and cancel preserves editor'
+    $cancelledDrag=Send 'ui.drag' @{id=(Control '拖动排序 synthetic-entry' 'NodeReorderHandle').id;insertion=0;cancel=$true}
+    Check ($cancelledDrag.cancelled -and $cancelledDrag.indicator) 'drag cancel shows insertion feedback without changing order'
+    $moved=Send 'ui.drag' @{id=(Control '拖动排序 synthetic-entry' 'NodeReorderHandle').id;insertion=0}
+    Check ($moved.moved -and $moved.indicator) 'drag press move release follows application pointer path'
     Click '4 · 生成与导出'; $ui=Read-Ui
     Check (-not (Control '审阅并导出' 'Button').enabled -and ($ui.elements.name -join ' ') -match '生成') 'export prerequisites visible and enforced'
     $export=Join-Path $FixtureRoot 'test-artifacts'
@@ -97,7 +120,7 @@ try {
     Check ($ui.window.window_activations -eq 0 -and $ui.window.foreground_samples -eq 0 -and $ui.window.offscreen -and -not $ui.window.shown_in_switchers) 'test instance never activated or appeared in switcher'
     $audit=Get-Content -Raw -LiteralPath (Join-Path $export 'commands.jsonl')
     Check ($audit -notmatch $secret -and $audit -notmatch '"token"') 'command audit omits input values and credentials'
-    $cases.Add(@{name='physical drag wheel system picker UAC';state='unverified';reason='No computer input or OS dialogs used.'})
+    $cases.Add(@{name='physical pointer capture tray menu wheel system picker UAC';state='unverified';reason='Application drag path and real tray lifecycle tested; no global mouse injection or OS dialog control.'})
     @{schema_version=1;state='passed';cases=$cases;window=$ui.window;production_connections=0} | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $export 'native-flow.json') -Encoding utf8
     'PASS: native UI command flow, dialogs, independent storage, no foreground activation.'
 } catch {
