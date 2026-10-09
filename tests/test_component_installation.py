@@ -131,8 +131,10 @@ subprocess.run = fixture_run
         self.write('usr/local/bin/sing-box-anytls', '#!/usr/bin/env bash\nexit 0\n')
         self.write('usr/local/etc/xray/config.json', json.dumps({'inbounds': [{'port': 443}]}))
         self.write('etc/sing-box-anytls/config.json', json.dumps({'inbounds': [{'listen_port': port}]}))
-        for service in ('xray.service', 'sing-box-anytls.service'):
-            self.write('etc/systemd/system/' + service, 'fixture')
+        self.write('etc/systemd/system/xray.service', '[Unit]\nDescription=Existing Reality\n')
+        installer = (ROOT / 'assets/remote/sing-box-anytls-install.sh').read_text()
+        unit = installer.split("sing-box-anytls.service <<'EOF'\n", 1)[1].split('\nEOF', 1)[0]
+        self.write('etc/systemd/system/sing-box-anytls.service', unit)
         self.write('active-xray.service', 'true')
         source = (ROOT / 'assets/remote/protocol-lifecycle-apply-state.sh').read_text()
         source = re.sub(r'(?<![\w/])/(?:usr/local|etc)(?=/|[\'"\s])', lambda m: shell_path(self.root) + m[0], source)
@@ -144,7 +146,11 @@ systemctl(){
   case "$1" in
     cat) [[ -f "$TEST_ROOT/etc/systemd/system/$unit" ]];;
     is-active|is-enabled) [[ -f "$TEST_ROOT/active-$unit" ]];;
-    enable|start) touch "$TEST_ROOT/active-$unit";;
+    enable|start)
+      for conflict in $(awk -F= '$1=="Conflicts" {print $2}' "$TEST_ROOT/etc/systemd/system/$unit"); do
+        rm -f "$TEST_ROOT/active-$conflict"
+      done
+      touch "$TEST_ROOT/active-$unit";;
     disable|stop) rm -f "$TEST_ROOT/active-$unit"; return 0;;
     *) return 0;;
   esac

@@ -36,7 +36,6 @@ Description=sing-box AnyTLS trusted TLS and ECH entry
 Documentation=https://sing-box.sagernet.org/
 Wants=network-online.target
 After=network-online.target
-Conflicts=xray.service
 
 [Service]
 Type=simple

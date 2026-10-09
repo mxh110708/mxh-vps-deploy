@@ -179,7 +179,6 @@ Assert-True ($migrationCommitModule -match 'ShadowsocksSelfTest\.Results' -and $
 $singBoxInstaller = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\sing-box-install.sh')
 Assert-True ($singBoxInstaller -match 'RestrictAddressFamilies=[^\r\n]*AF_NETLINK') 'sing-box systemd sandbox permits route-update netlink'
 $anyTlsInstaller = Get-Content -Raw -LiteralPath (Join-Path $ProjectRoot 'assets\remote\sing-box-anytls-install.sh')
-Assert-True ($anyTlsInstaller -match 'Conflicts=xray\.service') 'AnyTLS and Xray services are mutually exclusive'
 Assert-True ($anyTlsInstaller -match 'RestrictAddressFamilies=[^\r\n]*AF_NETLINK') 'AnyTLS sandbox permits route-update netlink'
 Assert-True ($anyTlsInstaller -match 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE') 'AnyTLS receives only the privileged-port bind capability'
 Assert-True ($anyTlsInstaller -notmatch '(?m)^User=root$') 'AnyTLS never runs as root'
