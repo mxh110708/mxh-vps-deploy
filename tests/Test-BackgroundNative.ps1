@@ -94,6 +94,10 @@ try {
     Send 'window.close' | Out-Null; $null=Wait-Ui {param($ui) $ui.dialog -eq '保存方案修改？'}
     Click '继续编辑'; $null=Wait-Ui {param($ui) -not $ui.dialog}
     Check ((Control '拖动排序 synthetic-entry' 'NodeReorderHandle').enabled) 'direct close asks about unsaved scheme and cancel preserves editor'
+    $nodeScroll=@((Read-Ui).elements | Where-Object kind -eq 'ScrollViewer')
+    Check ($nodeScroll.Count -eq 1) 'node list has one actual scroll viewport'
+    Send 'ui.scroll' @{id=$nodeScroll[0].id;offset=100000} | Out-Null
+    $null=Wait-Ui {param($ui) $scroll=@($ui.elements|Where-Object kind -eq 'ScrollViewer');$scroll.Count -eq 1 -and [Math]::Abs($scroll[0].offset-$scroll[0].extent) -lt 2}
     $startedDrag=Send 'ui.drag' @{id=(Control '拖动排序 synthetic-entry' 'NodeReorderHandle').id;phase='begin'}
     $movingDrag=Send 'ui.drag' @{phase='move';insertion=0}
     Send 'ui.capture' @{name='native-drag-preview.png'} | Out-Null
