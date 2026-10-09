@@ -67,6 +67,11 @@ public static class OperationPolicy
     {
         if (!Enum.IsDefined(request.Kind)) throw new OperationException("未知任务类型。");
         if (request.Kind == OperationKind.InstallComponent) ComponentInstallations.ValidateOptions(request.Options);
+        if (request.Kind == OperationKind.TunnelAccess)
+        {
+            if (request.Options.Count != 1 || !request.Options.ContainsKey("PublicUrl")) throw new OperationException("公开访问检查只接受公开网址。");
+            TunnelAccess.NormalizeUrl(request.Options.Text("PublicUrl"));
+        }
         var names = request.InstanceRelativePath.Split('/');
         if (names.Length != 3 || names[2] != "MXH-VPS-Deploy" || names[0] != AppPaths.Segment(names[0]) || names[1] != AppPaths.Segment(names[1])) throw new OperationException("实例归档路径无效。");
         if (request.Kind == OperationKind.ProtocolState && request.Options.Text("Action") is not ("Enable" or "Disable" or "Switch" or "Uninstall")) throw new OperationException("未知协议操作。");
@@ -85,6 +90,7 @@ public static class OperationPolicy
     public static string TargetLabel(OperationRequest request) => request.Kind switch
     {
         OperationKind.InstallComponent => "追加安装 · " + ComponentInstallations.SelectionLabel(request.Options),
+        OperationKind.TunnelAccess => "Cloudflare Tunnel · 公开访问验证",
         OperationKind.Upgrade => request.Options.Text("Protocol") switch { "RealityEntry" => "Xray · Reality 入口", "AnyTlsEntry" => "sing-box · AnyTLS / ECH 入口", "ShadowsocksLanding" => "sing-box · Shadowsocks 落地", _ => "代理核心" },
         OperationKind.Komari => (request.Options.Text("Scope") switch { "KomariAgent" => "Komari Agent", "KomariController" => "Komari 主控", _ => "Cloudflare Tunnel" }) + " · " + (request.Options.Text("Action") switch { "Upgrade" => "升级", "Remove" => "卸载", "Backup" => "一致性备份", "Restore" => "恢复备份", _ => "Token 轮换" }),
         _ => ""
@@ -95,6 +101,7 @@ public static class OperationPolicy
         OperationKind.ResumeImport => "继续接入草稿：重新只读识别现有配置，完成应用内归档。",
         OperationKind.Deploy => "新机部署：先审计系统与已有服务，建立备份后配置双 SSH 入口和所选用途；最后独立验收。网络调优由部署后另行手动发起。",
         OperationKind.HealthAudit => "只读健康与漂移检查；不重启或修改服务。",
+        OperationKind.TunnelAccess => "从 VPS 核对 Tunnel 已连接、主控本机接口与公开 HTTPS 接口的响应和版本；保存检查结果，不修改 Cloudflare 路由或重启服务。\n公开网址：" + request.Options.Text("PublicUrl"),
         OperationKind.InstallComponent => "在现有实例上追加安装 " + ComponentInstallations.SelectionLabel(request.Options) + "。统一核对未安装状态和端口、建立本轮恢复快照，再逐项安装并统一验收；本轮失败或取消一并恢复新增组件，保留已有协议、SSH 和网络参数。",
         OperationKind.TuneNetwork => "只修改部署器自己的网络参数文件，不重放协议、SSH 或防火墙。\n套餐标称带宽：" + request.Options.Number("BandwidthMbps") + " Mbps\n参考 RTT：" + (request.Options.Number("ReferenceRttMs") == 0 ? "不启用自适应估算" : request.Options.Number("ReferenceRttMs") + " ms") + "。",
         OperationKind.Recover => "先核对未完成事务的真实状态，再按明确范围恢复。",

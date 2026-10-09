@@ -120,8 +120,8 @@ public sealed partial class MainWindow
         for (var i = 0; i < nodes.Count; i++)
         {
             var index = i; var node = nodes[i]!;
-            var up = Action("↑", () => { if (index > 0 && ClientSchemes.MoveNode(scheme!, index, index - 1)) Navigate("clients"); return Task.CompletedTask; }); AutomationProperties.SetName(up, "上移节点"); up.IsEnabled = i > 0;
-            var down = Action("↓", () => { if (index < nodes.Count - 1 && ClientSchemes.MoveNode(scheme!, index, index + 2)) Navigate("clients"); return Task.CompletedTask; }); AutomationProperties.SetName(down, "下移节点"); down.IsEnabled = i < nodes.Count - 1;
+            var up = Action("↑", () => { if (index > 0 && ClientSchemes.MoveNode(scheme!, index, index - 1)) RefreshNodeOrder(); return Task.CompletedTask; }); AutomationProperties.SetName(up, "上移节点"); up.IsEnabled = i > 0;
+            var down = Action("↓", () => { if (index < nodes.Count - 1 && ClientSchemes.MoveNode(scheme!, index, index + 2)) RefreshNodeOrder(); return Task.CompletedTask; }); AutomationProperties.SetName(down, "下移节点"); down.IsEnabled = i < nodes.Count - 1;
             rows.Add(ReorderableNodeRow(scheme!, nodes, index, Row(up, down, Action("编辑", () => EditNode(index)), Action("移除", () => { nodes.RemoveAt(index); DirtyScheme(); return Task.CompletedTask; }))));
         }
         page.Children.Add(SettingsGroup(rows.ToArray()));

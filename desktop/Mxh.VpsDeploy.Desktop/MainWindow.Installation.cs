@@ -38,7 +38,7 @@ public sealed partial class MainWindow
             var box = Flag(ComponentInstallations.Label(component), selection, component); box.IsEnabled = !installed && !verify; boxes.Add(box);
             panel.Children.Add(Row(box, Text(installed ? "已安装 · 从维护入口管理" : verify ? "历史状态待核验 · 先运行健康检查" : "可追加", 13, true)));
         }
-        panel.Children.Add(Text("新协议使用独立端口；主控先于 Agent 与 Tunnel 安装。Agent 的主控地址和 Token、Tunnel 的连接 Token 各自填写。", 14, true));
+        panel.Children.Add(Text("新协议使用独立端口；监控按主控、Tunnel、Agent 的顺序安装所选组件。Agent 的主控地址和 Token、Tunnel 的连接 Token 各自填写。", 14, true));
         var dialog = OperationDialog(protocolsOnly ? "添加代理协议" : "追加安装组件", DialogScroll(panel), "填写参数");
         dialog.IsPrimaryButtonEnabled = false;
         foreach (var box in boxes) { box.Checked += (_, _) => dialog.IsPrimaryButtonEnabled = boxes.Any(item => item.IsEnabled && item.IsChecked == true); box.Unchecked += (_, _) => dialog.IsPrimaryButtonEnabled = boxes.Any(item => item.IsEnabled && item.IsChecked == true); }
@@ -90,16 +90,16 @@ public sealed partial class MainWindow
                     panel.Children.Add(Text("仅允许所填可信入口连接落地。已有入口继续运行。", 14, true)); break;
                 case "KomariAgent":
                     panel.Children.Add(Field("Komari 主控完整地址", settings, "KomariEndpoint"));
-                    panel.Children.Add(Text("Agent 采集本机指标并发送到主控。请先在主控创建节点；该节点的 Agent Token 在执行时输入。", 14, true)); break;
+                    panel.Children.Add(Text(components.Contains("KomariController") ? "Agent 采集本机指标并发送到主控。先填写计划使用的主控地址；本轮主控安装完成后再创建节点，该节点的 Agent Token 届时输入。" : "Agent 采集本机指标并发送到主控。请先在主控创建节点；该节点的 Agent Token 在执行时输入。", 14, true)); break;
                 case "KomariController":
                     settings["ControllerPort"] = Port(25774); panel.Children.Add(Field("主控本机 HTTP 端口", settings, "ControllerPort", numeric: true));
                     panel.Children.Add(Text("主控独立保存监控数据。安装后监听 127.0.0.1，可经 SSH 转发或另行安装 Tunnel 访问。管理员用户名为 admin，密码在执行时输入，并验证登录。", 14, true)); break;
                 case "Tunnel":
                     panel.Children.Add(Field("公开访问网址（可选，用于归档）", settings, "PublicUrl"));
-                    panel.Children.Add(Text("先在 Cloudflare 创建 Tunnel，并将公开域名指向本机主控地址。这里安装连接器，执行时填写 Tunnel Token；不自动创建 Tunnel、域名或 DNS。", 14, true));
+                    panel.Children.Add(Text("第一步：在 Cloudflare 创建 Tunnel 并取得 Token，先在这里安装连接器。连接成功后，Cloudflare 才能继续配置公开路由。公开网址现在可以留空；安装后在实例页完成路由配置与访问验证。", 14, true));
                     var controllerPort = allSettings.Number("KomariController.ControllerPort", plan.Number("KomariController.Port"));
                     if (controllerPort > 0) panel.Children.Add(Text("主控服务地址：http://127.0.0.1:" + controllerPort, 14));
-                    panel.Children.Add(Text("执行中会检查连接器已连接 Cloudflare。公开网址的访问规则仍由 Cloudflare 控制台管理。", 14, true)); break;
+                    panel.Children.Add(Text("本次验收连接器已连接 Cloudflare；这不表示公开主控已经可访问。公开网址的路由和 Access 规则在 Cloudflare 控制台配置。", 14, true)); break;
             }
         }
         var dialog = OperationDialog(components.Length == 1 ? "安装 " + ComponentInstallations.Label(components[0]) : "填写追加安装参数", DialogScroll(panel), "审阅安装");

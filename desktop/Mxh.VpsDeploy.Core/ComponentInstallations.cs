@@ -8,7 +8,7 @@ namespace Mxh.VpsDeploy.Core;
 public static class ComponentInstallations
 {
     public static readonly string[] Components = ["RealityEntry", "AnyTlsEntry", "ShadowsocksLanding", "KomariAgent", "KomariController", "Tunnel"];
-    private static readonly string[] InstallationOrder = ["RealityEntry", "AnyTlsEntry", "ShadowsocksLanding", "KomariController", "KomariAgent", "Tunnel"];
+    private static readonly string[] InstallationOrder = ["RealityEntry", "AnyTlsEntry", "ShadowsocksLanding", "KomariController", "Tunnel", "KomariAgent"];
     public static string[] Selected(JsonObject options)
     {
         var selected = options["Components"] is JsonArray array

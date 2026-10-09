@@ -77,11 +77,12 @@ internal sealed partial class BoundaryTests
         Check(ackRemote.Commands.Count(asset => asset == "maintenance-transaction-commit.sh") == 1 && !ackRemote.Commands.Contains("protocol-migration-trigger-rollback.sh"), "lost acknowledgement replayed installation or triggered rollback");
         Check(ackEvents.Last().StepId == "installation-commit" && ackEvents.Last().StepState == TaskStepState.Completed && ackEvents.Last().Completed == ackEvents.Last().Total, "reconciled commit remained marked failed in progress");
         var batchOptions = Batch("Tunnel", "KomariAgent", "ShadowsocksLanding", "AnyTlsEntry", "KomariController");
-        Check(ComponentInstallations.Selected(batchOptions).SequenceEqual(new[] { "AnyTlsEntry", "ShadowsocksLanding", "KomariController", "KomariAgent", "Tunnel" }), "batch dependency order follows input order");
+        Check(ComponentInstallations.Selected(batchOptions).SequenceEqual(new[] { "AnyTlsEntry", "ShadowsocksLanding", "KomariController", "Tunnel", "KomariAgent" }), "batch dependency order follows input order");
         var batchFixture = Managed("append-batch"); var batchRemote = new FakeRemote { StatusPhase = "Armed" }; batchRemote.SeedProtocols(batchFixture.Plan);
         var batchUser = new FakeUser(title => title.Contains("主控管理员") ? "SyntheticStrong123" : title.Contains("Agent Token") ? "synthetic-agent-token" : "synthetic-tunnel-token");
         var batchEngine = new WorkflowEngine(f.Store, batchRemote, new FakeKeys(), batchUser, new FakeValidation()); var batchId = Guid.NewGuid().ToString("N"); batchRemote.StatusTaskId = batchId; var batchEvents = new List<TaskProgress>();
         Check(await batchEngine.ExecuteAsync(new(OperationKind.InstallComponent, batchFixture.Relative, batchOptions), batchId, new InlineProgress<TaskProgress>(batchEvents.Add), default) == TaskOutcome.Completed, "combined append failed");
+        Check(batchUser.Decisions.Any(d => d.Title == "准备 Agent 连接" && d.Description.Contains("主控已初始化") && d.Description.Contains("Tunnel 已连接") && d.Description.Contains("http://127.0.0.1:25774")) && batchRemote.Commands.Take(batchRemote.Commands.IndexOf("komari-agent.sh")).Count(asset => asset == "monitoring-component-install.sh") == 2, "Agent requested before controller and connector or route guidance missing");
         var batchPlan = ArchiveStore.ReadJson(SafePath.Resolve(batchFixture.Directory, "deployment-plan.json"));
         Check(ComponentInstallations.Selected(batchOptions).Take(2).All(component => ComponentInstallations.ProtocolInstalled(batchPlan, component)) && batchPlan.Text("ActiveEntry") == batchFixture.Plan.Text("ActiveEntry") && JsonNode.DeepEquals(batchPlan["Reality"], batchFixture.Plan["Reality"]) && JsonNode.DeepEquals(batchPlan["NetworkTuning"], batchFixture.Plan["NetworkTuning"]), "batch changed existing protocol/default entry/network");
         Check(batchRemote.Commands.Count(asset => asset == "protocol-migration-arm-rollback.sh") == 1 && batchRemote.Commands.Count(asset => asset == "component-firewall-add.sh") == 1 && batchRemote.Commands.Count(asset => asset == "maintenance-transaction-commit.sh") == 1, "batch split its snapshot/firewall/commit");
@@ -98,6 +99,14 @@ internal sealed partial class BoundaryTests
         var firstPlan = ComponentInstallations.Prepare(noProtocols, check.State, firstProtocols, f.Versions);
         Check(firstPlan.Text("Role") == "RealityEntry" && firstPlan.Text("ActiveEntry") == "RealityEntry" && firstPlan.Strings("Roles").SequenceEqual(new[] { "RealityEntry", "AnyTlsEntry" }), "first protocol combination has no default entry");
         Refuses(() => ComponentInstallations.Prepare(check.Plan, check.State, Batch("RealityEntry", "ShadowsocksLanding"), f.Versions), "batch overwrote an installed component");
+        var cancelledGuide = Managed("batch-route-guide-cancel"); var guideRemote = new FakeRemote { StatusPhase = "Armed" }; guideRemote.SeedProtocols(cancelledGuide.Plan);
+        var guideId = Guid.NewGuid().ToString("N"); guideRemote.StatusTaskId = guideId;
+        var guideUser = new FakeUser(title => title.Contains("主控管理员") ? "SyntheticStrong123" : "synthetic-tunnel-token", decision => decision.Title != "准备 Agent 连接");
+        var guideEngine = new WorkflowEngine(f.Store, guideRemote, new FakeKeys(), guideUser, new FakeValidation());
+        try { await guideEngine.ExecuteAsync(new(OperationKind.InstallComponent, cancelledGuide.Relative, Batch("KomariController", "Tunnel", "KomariAgent")), guideId, new InlineProgress<TaskProgress>(_ => { }), default); throw new Exception("cancelled route preparation returned success"); }
+        catch (OperationCanceledException) { assertions++; }
+        Check(!guideRemote.Commands.Contains("komari-agent.sh") && guideRemote.Commands.Contains("protocol-migration-trigger-rollback.sh") && ArchiveStore.ReadJson(SafePath.Resolve(cancelledGuide.Directory, "operation-pending.dotnet.json")).Text("Phase") == "RolledBack" && JsonNode.DeepEquals(ArchiveStore.ReadJson(SafePath.Resolve(cancelledGuide.Directory, "deployment-plan.json")), cancelledGuide.Plan), "cancelled route guide left controller/tunnel installed or changed original plan");
+
         foreach (var mode in new[] { "fail-second", "cancel-second", "post-check", "lost-commit" })
         {
             var item = Managed("batch-" + mode); var remote = new FakeRemote { StatusPhase = mode == "lost-commit" ? "Committed" : "Armed", FailAsset = mode == "fail-second" ? "monitoring-component-install.sh" : mode == "lost-commit" ? "maintenance-transaction-commit.sh" : "", PostInstallationCheckCode = mode == "post-check" ? "ExistingComponentChanged" : "" }; remote.SeedProtocols(item.Plan);

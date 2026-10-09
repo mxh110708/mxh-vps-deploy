@@ -60,6 +60,7 @@ public sealed partial class WorkflowEngine
                 if (protocol) { c.Secrets.Remove(component == "RealityEntry" ? "Xray" : component == "AnyTlsEntry" ? "AnyTls" : "Shadowsocks"); await InstallProtocol(c, component, false, versions); }
                 else if (component == "KomariAgent")
                 {
+                    if (selected.Contains("KomariController") && selected.Contains("Tunnel") && !await user.ConfirmAsync(new("准备 Agent 连接", "本轮主控已初始化，Tunnel 已连接 Cloudflare。Agent 计划连接地址：" + c.Plan.Text("Komari.Endpoint") + "。若 Agent 连接此主控，请先在 Cloudflare 添加已发布应用程序路由：填写计划使用的公开主机名，服务 URL 填 " + TunnelAccess.ServiceUrl(c.Plan) + "，路径留空。打开公开主控，以 admin 和刚设置的密码登录并创建节点，取得 Agent Token 后继续。若连接其他已有主控，请从该主控取得节点 Token。"), c.Cancellation)) throw new OperationCanceledException();
                     var token = await user.SecretAsync("Komari Agent Token（从主控中创建节点后取得）", c.Cancellation) ?? throw new OperationCanceledException();
                     if (token == "" || token.Any(char.IsWhiteSpace)) throw new OperationException("Agent Token 不能为空或含空白。");
                     var v = versions;

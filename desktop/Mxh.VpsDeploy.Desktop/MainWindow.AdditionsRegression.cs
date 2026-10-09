@@ -40,6 +40,7 @@ public sealed partial class MainWindow
                         await Task.Delay(180); shell.UpdateLayout();
                         Require(ComponentInstallations.Selected(form.Options).Single() == component && Find<TextBlock>(form.Dialog).Any(t => t.Text.StartsWith("沿用管理连接")), "安装表单缺少固定实例连接信息。");
                         if (component == "AnyTlsEntry") Require(form.Options.Number("Settings.AnyTlsEntry.AnyTlsPort") == 8443 && !Find<PasswordBox>(form.Dialog).Any(), "追加 AnyTLS 默认端口冲突或把凭据混入表单。");
+                        if (component == "Tunnel") Require(Find<TextBlock>(form.Dialog).Any(t => t.Text.Contains("连接成功后") && t.Text.Contains("公开网址现在可以留空")), "Tunnel 安装要求先配置尚不能创建的公开路由。");
                         var frame = Find<Border>(form.Dialog).Where(b => b.ActualWidth >= 250 && b.ActualWidth < shell.ActualWidth - 40 && b.ActualHeight > 100).OrderByDescending(b => b.ActualWidth * b.ActualHeight).First();
                         await Capture(SafePath.Resolve(output, "installation-" + component + "-" + theme.ToLowerInvariant() + ".png"), frame);
                     }
@@ -79,24 +80,22 @@ public sealed partial class MainWindow
                     Require(executionRows.Values.Count(row => row.State == TaskStepState.Completed) == 3 && executionRows.Values.Count(row => row.State == TaskStepState.Failed) == 1, "失败把待完成步骤改成完成。");
                 });
                 RefreshTaskResultPage(); Require(ShowingExecution && Find<Button>(page).Any(b => b.Content as string == "返回实例"), "执行结果未保留。");
+                SelectPage("instances");
+                var tunnelPlan = instance.Plan.DeepClone().AsObject(); tunnelPlan["Cloudflared"] = new JsonObject { ["PublicUrl"] = "", ["TokenFile"] = "/etc/cloudflared/mxh-token", ["MetricsPort"] = 20241 };
+                var tunnelState = new JsonObject(); var guide = TunnelAccessPanel(tunnelPlan, tunnelState); page.Children.Add(guide);
+                Require(!Find<Button>(guide).Single(b => b.Content as string == "验证公开访问").IsEnabled && Find<TextBlock>(guide).Any(t => t.Text.Contains("先安装本机")), "没有主控时错误开放公开访问验证。");
+                tunnelPlan["KomariController"] = new JsonObject { ["Port"] = 25774, ["Version"] = "1.5.1" }; tunnelState["KomariController"] = new JsonObject { ["Installed"] = true }; page.Children.Remove(guide); guide = TunnelAccessPanel(tunnelPlan, tunnelState); page.Children.Add(guide);
+                var publicField = Find<TextBox>(guide).Single(); var publicCheck = Find<Button>(guide).Single(b => b.Content as string == "验证公开访问");
+                publicField.Text = "https://monitor.example.com";
+                await Task.Delay(100); shell.UpdateLayout();
+                Require(publicCheck.IsEnabled && Find<TextBlock>(guide).Any(t => t.Text == "主机名：monitor.example.com") && Find<TextBlock>(guide).Any(t => t.Text == "服务 URL：http://127.0.0.1:25774"), "公开路由字段或前置条件缺失。");
+                mainScroll!.ChangeView(null, mainScroll.ScrollableHeight, null, true); await Task.Delay(100);
+                await Capture(SafePath.Resolve(output, "tunnel-route-guidance-" + theme.ToLowerInvariant() + ".png"), guide);
+                publicField.Text = "http://monitor.example.com"; await Task.Delay(100); Require(!publicCheck.IsEnabled, "公开验证接受无 TLS 网址。");
+                page.Children.Remove(guide);
                 SelectPage("clients"); scheme = ClientSchemes.New(paths); designerStep = 1;
                 foreach (var name in new[] { "入口 A", "入口 B", "入口 C" }) scheme["Nodes"]!.AsArray().Add(new JsonObject { ["name"] = name, ["kind"] = "entry", ["region_group"] = "US-West Entry" });
-                Navigate("clients"); await Task.Delay(120);
-                Require(Find<NodeReorderHandle>(page).Count() == 3, "节点指针拖动手柄未接上。");
-                shell.UpdateLayout();
-                var sourcePosition = nodeDropRows[2].Row.TransformToVisual(mainScroll).TransformPoint(new(20, 30));
-                var targetPosition = nodeDropRows[0].Row.TransformToVisual(mainScroll).TransformPoint(new(20, 2));
-                scheme["Candidate"] = new JsonObject { ["ValidationStatus"] = "Passed" };
-                Require(BeginNodeReorder(scheme, nodeDragSession, 2, sourcePosition), "拖动按下未开始。");
-                UpdateNodeReorder(targetPosition);
-                Require(nodeDropRows[0].Line.Visibility == Visibility.Visible && FinishNodeReorder() && scheme["Candidate"] == null, "拖动移动或释放未重排/失效候选。");
-                Require(scheme["Nodes"]!.AsArray()[0]!.Text("name") == "入口 C", "重排顺序没有保存到方案。");
-                await Capture(SafePath.Resolve(output, "node-order-" + theme.ToLowerInvariant() + ".png"));
-                var savedCandidate = new JsonObject { ["ValidationStatus"] = "Passed" }; scheme["Candidate"] = savedCandidate;
-                shell.UpdateLayout(); var click = nodeDropRows[0].Row.TransformToVisual(mainScroll).TransformPoint(new(20, 30));
-                Require(BeginNodeReorder(scheme, nodeDragSession, 0, click) && !FinishNodeReorder() && scheme["Candidate"] == savedCandidate, "点击手柄意外改变顺序或校验状态。");
-                var staleSession = nodeDragSession;
-                Navigate("clients"); Require(!BeginNodeReorder(scheme, staleSession, 0, click), "旧页面手柄可以修改新页面。");
+                await NodeReorderRegression(output, theme, Require);
                 scheme["Candidate"] = null;
                 designerStep = 3; Navigate("clients");
                 Require(!((Button)pageAction.Content).IsEnabled && Find<TextBlock>(page).Any(t => t.Tag as string == "ExportPrerequisiteHint" && t.Text.Contains("生成配置")), "未生成时缺少导出指引。");
@@ -118,6 +117,6 @@ public sealed partial class MainWindow
             if (createdDirectory != null) { SafePath.CheckTree(createdDirectory); Directory.Delete(createdDirectory, true); }
             SelectPage("instances");
         }
-        return new JsonObject { ["inline_execution"] = true, ["explicit_completion_and_failure"] = true, ["drag_handles_and_scheme_order"] = true, ["generation_validation_export_guidance"] = true, ["separate_component_installation"] = true, ["themes"] = new JsonArray("Dark", "Light"), ["remote_connections"] = 0 };
+        return new JsonObject { ["inline_execution"] = true, ["explicit_completion_and_failure"] = true, ["drag_handles_and_scheme_order"] = true, ["drag_preview_cancel_scroll_and_keys"] = true, ["generation_validation_export_guidance"] = true, ["separate_component_installation"] = true, ["themes"] = new JsonArray("Dark", "Light"), ["remote_connections"] = 0 };
     }
 }

@@ -21,6 +21,7 @@ internal sealed partial class BoundaryTests(string repository)
         await PrivateDirectoryExperience();
         await ManagedKeyDeployment(f);
         await AdditionsExperience(f);
+        await TunnelAccessExperience(f);
         await BackgroundTestTransport(f);
         var sshPython = Environment.GetEnvironmentVariable("MXH_TEST_SSH_PYTHON"); if (!string.IsNullOrEmpty(sshPython)) await LocalSshConfirmation(f, sshPython);
         var python = Environment.GetEnvironmentVariable("MXH_TEST_PYTHON"); if (!string.IsNullOrEmpty(python)) await RealClientWorkbench(f, python);

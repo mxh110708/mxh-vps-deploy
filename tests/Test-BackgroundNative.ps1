@@ -94,10 +94,13 @@ try {
     Send 'window.close' | Out-Null; $null=Wait-Ui {param($ui) $ui.dialog -eq '保存方案修改？'}
     Click '继续编辑'; $null=Wait-Ui {param($ui) -not $ui.dialog}
     Check ((Control '拖动排序 synthetic-entry' 'NodeReorderHandle').enabled) 'direct close asks about unsaved scheme and cancel preserves editor'
-    $cancelledDrag=Send 'ui.drag' @{id=(Control '拖动排序 synthetic-entry' 'NodeReorderHandle').id;insertion=0;cancel=$true}
-    Check ($cancelledDrag.cancelled -and $cancelledDrag.indicator) 'drag cancel shows insertion feedback without changing order'
+    $startedDrag=Send 'ui.drag' @{id=(Control '拖动排序 synthetic-entry' 'NodeReorderHandle').id;phase='begin'}
+    $movingDrag=Send 'ui.drag' @{phase='move';insertion=0}
+    Send 'ui.capture' @{name='native-drag-preview.png'} | Out-Null
+    $cancelledDrag=Send 'ui.drag' @{phase='cancel'}
+    Check ($startedDrag.started -and $movingDrag.preview -and $movingDrag.indicator -and $cancelledDrag.cancelled) 'incremental handle gesture renders row preview and cancellation preserves order'
     $moved=Send 'ui.drag' @{id=(Control '拖动排序 synthetic-entry' 'NodeReorderHandle').id;insertion=0}
-    Check ($moved.moved -and $moved.indicator) 'drag press move release follows application pointer path'
+    Check ($moved.moved -and $moved.indicator -and $moved.preview) 'drag press move release follows application pointer handlers'
     Click '4 · 生成与导出'; $ui=Read-Ui
     Check (-not (Control '审阅并导出' 'Button').enabled -and ($ui.elements.name -join ' ') -match '生成') 'export prerequisites visible and enforced'
     $export=Join-Path $FixtureRoot 'test-artifacts'

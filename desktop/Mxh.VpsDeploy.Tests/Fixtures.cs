@@ -24,11 +24,12 @@ internal sealed class Fixture : IDisposable
 internal sealed class TestProtector : ISecretProtector { public string Format => "TEST-ONLY"; public byte[] Protect(ReadOnlySpan<byte> data) => data.ToArray().Select(b => (byte)(b ^ 0x73)).ToArray(); public byte[] Unprotect(ReadOnlySpan<byte> data) => Protect(data); }
 internal sealed class NoopKeyAccess : IPrivateKeyAccess { public void PrepareManagedCopy(string path) { } }
 internal sealed class FakeWorkflow(Func<CancellationToken, Task<TaskOutcome>> run) : IOperationWorkflow { public Task<TaskOutcome> ExecuteAsync(OperationRequest request, string taskId, IProgress<TaskProgress> progress, CancellationToken cancellationToken) => run(cancellationToken); }
-internal sealed class FakeUser(Func<string, string?>? secret = null) : IUserInteraction
+internal sealed class FakeUser(Func<string, string?>? secret = null, Func<UserDecision, bool>? confirm = null) : IUserInteraction
 {
     public List<string> SecretPrompts { get; } = new();
+    public List<UserDecision> Decisions { get; } = new();
     public Task<bool> ConfirmHostAsync(HostIdentity identity, CancellationToken cancellationToken) => Task.FromResult(true);
-    public Task<bool> ConfirmAsync(UserDecision decision, CancellationToken cancellationToken) => Task.FromResult(true);
+    public Task<bool> ConfirmAsync(UserDecision decision, CancellationToken cancellationToken) { Decisions.Add(decision); return Task.FromResult(confirm?.Invoke(decision) ?? true); }
     public Task<string?> SecretAsync(string title, CancellationToken cancellationToken) { SecretPrompts.Add(title); return Task.FromResult(secret == null ? "synthetic-password" : secret(title)); }
 }
 internal sealed class FakeKeys : IManagedKeyStore { public string Prepare(string directory, string source, string? passphrase = null) { Directory.CreateDirectory(directory); var file = SafePath.Resolve(directory, "id_vps_management"); File.WriteAllText(file, "fixture"); File.WriteAllText(file + ".pub", "fixture-public"); return file; } }
@@ -49,6 +50,7 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
     public bool MonitoringPresent { get; set; } = true;
     public JsonObject HealthAudit { get; set; } = new() { ["SchemaVersion"] = 2, ["CollectedAt"] = DateTimeOffset.UtcNow, ["ChecksIncomplete"] = new JsonArray(), ["Services"] = new JsonObject { ["KomariAgent"] = HealthService(false), ["KomariController"] = HealthService(false), ["Cloudflared"] = HealthService(false) } };
     public JsonObject AgentConfiguration { get; set; } = new() { ["endpoint"] = "https://monitor.example.com", ["token"] = "synthetic-agent-token" };
+    public JsonObject TunnelAccessAudit { get; set; } = new() { ["Passed"] = true, ["ConnectorReady"] = true, ["LocalVersion"] = "1.5.1", ["PublicVersion"] = "1.5.1", ["Code"] = "" };
     public static JsonObject HealthService(bool installed, bool enabled = false, bool active = false, bool supported = true) => new() { ["Installed"] = installed, ["Enabled"] = enabled, ["Active"] = active, ["SupportedLayout"] = supported };
     public Task<IRemoteSession> OpenAsync(SshEndpoint endpoint, IUserInteraction interaction, CancellationToken cancellationToken) { cancellationToken.ThrowIfCancellationRequested(); Endpoints.Add(endpoint); return Task.FromResult<IRemoteSession>(this); }
     public Task<CommandResult> RunAsync(string command, TimeSpan timeout, CancellationToken cancellationToken) => Task.FromResult(new CommandResult(0, ArchiveStore.Digest(Encoding.UTF8.GetBytes("fixture-archive")) + "  file", ""));
@@ -66,6 +68,7 @@ internal sealed class FakeRemote : IRemoteSessionFactory, IRemoteSession
         }
         if (asset == "maintenance-komari.sh") return Task.FromResult(new CommandResult(0, Parameter("ACTION") == "Status" ? string.Join('\n', new[] { "komari-agent.service", "komari.service", "cloudflared.service" }.Select(service => service + "=" + (MonitoringPresent ? "true,true,true" : "false,false,false"))) : "VPSDEPLOY_KOMARI_LIFECYCLE_OK\n", ""));
         if (asset == "maintenance-health-audit.sh") return Task.FromResult(new CommandResult(0, Marker("HEALTH_AUDIT", HealthAudit.ToJsonString()), ""));
+        if (asset == "tunnel-public-audit.sh") return Task.FromResult(new CommandResult(0, Marker("TUNNEL_ACCESS", TunnelAccessAudit.ToJsonString()) + "VPSDEPLOY_TUNNEL_ACCESS_OK\n", ""));
         if (asset == "component-install-preflight.sh")
         {
             var code = Parameter("VERIFY_ONLY") == "true" ? PostInstallationCheckCode : InstallationCheckCode;

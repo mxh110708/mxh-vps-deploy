@@ -19,7 +19,7 @@ public static class OperationSteps
                 string Step(string stage) => ComponentInstallations.StepId(request.Options, stage, component);
                 if (component == "RealityEntry") Add(Step("target-audit"), "审计 Reality 目标", "验证目标的 TLS 与连接质量。");
                 if (component == "AnyTlsEntry") Add(Step("certbot-dns"), "申请 AnyTLS 可信证书", "使用 DNS 验证申请证书，并设置续期。");
-                Add(Step("component-install"), "安装 " + ComponentInstallations.Label(component), "安装固定版本及本次组件配置。");
+                Add(Step("component-install"), "安装 " + ComponentInstallations.Label(component), component == "Tunnel" ? "安装连接器并验证 Cloudflare 连接；公开路由随后配置与验证。" : "安装固定版本及本次组件配置。");
             }
             if (selected.Any(DeploymentPlans.Roles[..3].Contains)) Add("installation-firewall", "更新协议放行规则", "受管防火墙一次补充本轮新协议端口，保留已有规则。");
             Add("installation-validation", "验收新增组件", "检查服务、连接及既有组件是否保留。");

@@ -98,16 +98,32 @@ public sealed partial class MainWindow
             case "ui.drag":
             {
                 if (activeTestDialog != null || taskCancellation != null || scheme == null || currentPage != "clients" || designerStep != 1) throw new OperationException("当前页面不能拖动节点。");
-                if (TestElement(args) is not NodeReorderHandle handle || !int.TryParse((handle.Tag as string)?["NodeDragHandle.".Length..], out var source)) throw new OperationException("请选择当前节点的拖动手柄。");
-                var insertion = args.Number("insertion", -1); if (insertion < 0 || insertion > nodeDropRows.Count) throw new OperationException("拖动目标位置无效。");
-                var origin = nodeDropRows[source].Row.TransformToVisual(mainScroll).TransformPoint(new(20, 30));
+                var phase = args.Text("phase", "complete");
+                if (phase is not ("begin" or "move" or "end" or "cancel" or "complete")) throw new OperationException("拖动阶段无效。");
+                NodeReorderHandle handle;
+                if (phase is "begin" or "complete")
+                {
+                    if (TestElement(args) is not NodeReorderHandle selectedHandle) throw new OperationException("请选择当前节点的拖动手柄。");
+                    handle = selectedHandle;
+                    var origin = handle.TransformToVisual(mainScroll).TransformPoint(new(handle.ActualWidth / 2, handle.ActualHeight / 2));
+                    if (origin.Y < 0 || origin.Y > mainScroll!.ActualHeight || !handle.IsLoaded || !handle.IsHitTestVisible) throw new OperationException("请先滚动到可见的拖动手柄。");
+                    // Invoke the handlers wired to the native routed events, without
+                    // synthesizing OS input or pretending to test OS pointer capture.
+                    if (handle.Press?.Invoke(origin, 1, () => true) != true) throw new OperationException("拖动未开始。");
+                    if (phase == "begin") return new() { ["started"] = true, ["input"] = "application_pointer_handlers" };
+                }
+                else handle = nodePointerDrag is { } active ? nodeDropRows[active.Source].Handle : throw new OperationException("没有正在进行的拖动。");
+                if (phase == "cancel") { handle.Cancel?.Invoke(1); return new() { ["cancelled"] = true }; }
+                var insertion = args.Number("insertion", -1); if (insertion < 0 || insertion > nodeDropRows.Count) { handle.Cancel?.Invoke(1); throw new OperationException("拖动目标位置无效。"); }
                 var targetRow = nodeDropRows[Math.Min(insertion, nodeDropRows.Count - 1)].Row;
-                var target = targetRow.TransformToVisual(mainScroll).TransformPoint(new(20, insertion == nodeDropRows.Count ? targetRow.ActualHeight - 2 : 2));
-                if (!BeginNodeReorder(scheme, nodeDragSession, source, origin)) throw new OperationException("拖动未开始。");
-                UpdateNodeReorder(target);
+                var originX = handle.TransformToVisual(mainScroll).TransformPoint(new(handle.ActualWidth / 2, 0)).X;
+                var target = targetRow.TransformToVisual(mainScroll).TransformPoint(new(0, insertion == nodeDropRows.Count ? targetRow.ActualHeight - 2 : 2)); target.X = originX;
+                handle.Move?.Invoke(target, 1);
                 var indicator = nodeDropRows.Any(row => row.Line.Visibility == Visibility.Visible);
-                if (args.Flag("cancel")) { CancelNodeReorder(); return new() { ["cancelled"] = true, ["indicator"] = indicator, ["input"] = "application_pointer_path" }; }
-                return new() { ["moved"] = FinishNodeReorder(), ["indicator"] = indicator, ["input"] = "application_pointer_path" };
+                var preview = nodeDragPreview != null;
+                if (phase == "move") return new() { ["indicator"] = indicator, ["preview"] = preview, ["input"] = "application_pointer_handlers" };
+                if (args.Flag("cancel")) { handle.Cancel?.Invoke(1); return new() { ["cancelled"] = true, ["indicator"] = indicator, ["preview"] = preview, ["input"] = "application_pointer_handlers" }; }
+                return new() { ["moved"] = handle.Release?.Invoke(target, 1) == true, ["indicator"] = indicator, ["preview"] = preview, ["input"] = "application_pointer_handlers" };
             }
             case "window.close": Mxh.VpsDeploy.Windows.WindowsWindowLifecycle.RequestClose(WinRT.Interop.WindowNative.GetWindowHandle(this)); return new() { ["accepted"] = true };
             case "window.restore":

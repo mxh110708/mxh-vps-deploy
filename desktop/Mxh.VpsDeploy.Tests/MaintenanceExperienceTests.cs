@@ -44,6 +44,28 @@ internal sealed partial class BoundaryTests
         await RefusesAsync(() => f.Engine(missingRemote).ExecuteAsync(agentRequest, Guid.NewGuid().ToString("N"), new InlineProgress<TaskProgress>(_ => { }), default), "missing remote monitor accepted");
         Check(missingRemote.Mutations == 0, "missing monitor armed mutation before preflight");
 
+        foreach (var failCommit in new[] { false, true })
+        {
+            var tunnelPlan = f.Plan(failCommit ? "Tunnel-Token-Rollback" : "Tunnel-Token-Commit"); f.SaveInstance(tunnelPlan);
+            var tunnelRelative = f.Relative(tunnelPlan); var tunnelDirectory = f.Paths.Instance(tunnelRelative);
+            var tunnelStateFile = SafePath.Resolve(tunnelDirectory, "deployment-state.json");
+            var tunnelState = ArchiveStore.ReadJson(tunnelStateFile); tunnelState["Cloudflared"] = FakeRemote.HealthService(true, true, true); ArchiveStore.WriteJson(tunnelStateFile, tunnelState);
+            var tunnelSecretsFile = SafePath.Resolve(tunnelDirectory, "secrets.dotnet.private.json");
+            var oldSecrets = f.Store.ReadSecret(tunnelSecretsFile); oldSecrets["Cloudflared"] = new JsonObject { ["Token"] = "synthetic-old-tunnel-token", ["Preserved"] = "fixture" }; f.Store.WriteSecret(tunnelSecretsFile, oldSecrets);
+            var taskId = Guid.NewGuid().ToString("N");
+            var tunnelRemote = new FakeRemote { StatusTaskId = taskId, StatusPhase = "Armed", FailAsset = failCommit ? "maintenance-transaction-commit.sh" : "" };
+            tunnelRemote.HealthAudit.Put("Services.Cloudflared", FakeRemote.HealthService(true, true, true)); tunnelRemote.SeedProtocols(tunnelPlan);
+            var tunnelEngine = new WorkflowEngine(f.Store, tunnelRemote, new FakeKeys(), new FakeUser(_ => "synthetic-updated-tunnel-token"), new FakeValidation());
+            var tokenRequest = new OperationRequest(OperationKind.Komari, tunnelRelative, new() { ["Scope"] = "Tunnel", ["Action"] = "RotateToken" });
+            if (failCommit) await RefusesAsync(() => tunnelEngine.ExecuteAsync(tokenRequest, taskId, new InlineProgress<TaskProgress>(_ => { }), default), "failed Tunnel commit was accepted");
+            else Check(await tunnelEngine.ExecuteAsync(tokenRequest, taskId, new InlineProgress<TaskProgress>(_ => { }), default) == TaskOutcome.Completed, "Tunnel Token update failed");
+            var archived = f.Store.ReadSecret(tunnelSecretsFile);
+            Check(archived.Text("Cloudflared.Token") == (failCommit ? "synthetic-old-tunnel-token" : "synthetic-updated-tunnel-token"), "Tunnel Token archive disagrees with committed or rolled-back value");
+            Check(archived.Text("Cloudflared.Preserved") == "fixture" && archived["Xray"]!.ToJsonString() == oldSecrets["Xray"]!.ToJsonString(), "Tunnel update changed other private fields");
+            Check(tunnelRemote.ArmedComponents == "Cloudflared", "Tunnel credential snapshot included unrelated components");
+            if (failCommit) Check(ArchiveStore.ReadJson(SafePath.Resolve(tunnelDirectory, "operation-pending.dotnet.json")).Text("Phase") == "RolledBack" && tunnelRemote.Commands.Count(asset => asset == "maintenance-transaction-commit.sh") == 1, "Tunnel failure replayed commit or failed to verify rollback");
+        }
+
         var history = new TaskHistory(f.Store); var started = DateTimeOffset.UtcNow;
         var recoveryFile = SafePath.Resolve(f.Paths.Instance(relative), "operation-pending.dotnet.json");
         ArchiveStore.WriteJson(recoveryFile, new JsonObject { ["TaskId"] = "recovery-fixture", ["Phase"] = "Armed" });

@@ -42,6 +42,7 @@ public sealed partial class WorkflowEngine(ArchiveStore store, IRemoteSessionFac
                 case OperationKind.Deploy:
                 case OperationKind.Resume: await Deploy(context); break;
                 case OperationKind.HealthAudit: await Health(context); break;
+                case OperationKind.TunnelAccess: await VerifyTunnelAccess(context); break;
                 case OperationKind.Recover: await Recover(context); break;
                 case OperationKind.InstallComponent: await InstallComponent(context); break;
                 default: await Maintain(context); break;

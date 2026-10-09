@@ -351,8 +351,14 @@ public sealed partial class WorkflowEngine
                 if (action == "Backup") return;
             }
         }
-        if (action == "RotateToken") parameters["TUNNEL_TOKEN"] = await user.SecretAsync("Tunnel Token", c.Cancellation) ?? throw new OperationCanceledException();
+        if (action == "RotateToken")
+        {
+            var token = await user.SecretAsync("Tunnel Token", c.Cancellation) ?? throw new OperationCanceledException();
+            if (token == "" || token.Any(char.IsWhiteSpace)) throw new OperationException("Tunnel Token 不能为空或含空白。");
+            parameters["TUNNEL_TOKEN"] = token;
+        }
         await c.Run("maintenance-komari.sh", parameters, true, 1200, "KOMARI_LIFECYCLE_OK");
+        if (action == "RotateToken") c.Secrets.Put("Cloudflared.Token", JsonValue.Create(parameters["TUNNEL_TOKEN"]));
         if (scope == "KomariAgent" && action == "Upgrade") c.Plan.Put("Komari.AgentVersion", JsonValue.Create(version.Text("komari_agent.version")));
         if (scope == "KomariAgent" && action == "Remove") { c.Plan.Put("Komari.Enabled", JsonValue.Create(false)); c.State["KomariInstalled"] = false; }
         if (scope == "KomariController" && action == "Upgrade")

@@ -2,11 +2,13 @@
 
 面向个人 Debian VPS 的中文部署与运维工具，由 Windows 控制端统一管理部署计划、远端操作、私有归档和客户端配置。
 
-正式版为 [v0.9.9](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.9.9)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
+正式版为 [v0.9.10](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.9.10)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
+
+v0.9.10 调整 Tunnel 流程：先安装并连接，再按实例页指引配置公开路由、验证 HTTPS 访问；组合安装先启动主控与 Tunnel，再提示创建节点并提供 Agent Token。重做节点拖动排序，扩大手柄，整行跟随并显示序号与落点高亮，支持边缘滚动和取消；修正 Tunnel 更新后未同步本地加密 Token 的问题。专用 Tunnel 的公开访问、登录退出、WebSocket 持续指标、主控恢复与错误 Token 回滚已实测，详见[结果与边界](docs/TESTING-0.9.10.zh-CN.md)。
 
 v0.9.8 支持一次勾选多个组件追加安装，统一审阅与恢复、逐项显示进度；修复节点手柄拖动排序，并可设置关闭窗口时最小到托盘或直接退出。已有受管实例可追加 Reality、AnyTLS / ECH、Shadowsocks、Komari Agent、Komari 主控和 Cloudflare Tunnel，保留既有服务与管理连接；端口冲突先停止，本轮失败或取消一并恢复新增组件。详见[追加安装与部署过程说明](docs/COMPONENT-INSTALLATION-2026-10-08.zh-CN.md)。
 
-v0.9.7 加入 [B 方案后台实测接口](docs/BACKGROUND-TESTING.zh-CN.md)，以独立原生实例驱动实际表单、审阅与部署，不占鼠标或前台窗口。v0.9.8 完成组合追加 SS 与主控及取消恢复实测；v0.9.9 修复 AnyTLS 服务与 Xray 的冲突定义，并补做真实 DNS 证书、续期、ECH 与双核心联网验收。Tunnel 缺少专属测试 Token，联网项目仍明确未测。详见[最新实测记录与边界](docs/TESTING-0.9.9.zh-CN.md)。
+v0.9.7 加入 [B 方案后台实测接口](docs/BACKGROUND-TESTING.zh-CN.md)，以独立原生实例驱动实际表单、审阅与部署，不占鼠标或前台窗口。v0.9.8 完成组合追加 SS 与主控及取消恢复实测；v0.9.9 修复 AnyTLS 服务与 Xray 的冲突定义，并补做真实 DNS 证书、续期、ECH 与双核心联网验收。各轮结果分别见 [v0.9.8](docs/TESTING-0.9.8.zh-CN.md) 和 [v0.9.9](docs/TESTING-0.9.9.zh-CN.md)。
 
 v0.9.6 修正 Windows 管理密钥权限准备失败，普通账号即可完成；密钥准备提前到远端变更之前。已有待恢复基线需在实例页核对恢复状态，明确恢复部署前基线后再继续草稿；恢复使用当时实际可用的登录方式。任务结束立即刷新实例状态，避免继续显示旧错误。
 
@@ -62,7 +64,7 @@ dotnet run --project .\desktop\Mxh.VpsDeploy.Tests -c Release -- $PWD
 
 ### 3. 启动工具
 
-在正式发行页下载 `mxh-vps-deploy-v0.9.9-windows-amd64-setup.exe`，按同页 `SHA256SUMS.txt` 核对后安装，通过桌面／开始菜单启动。便携 ZIP 解压后双击 `MXH-VPS-Deploy.exe`；需要应用内原位更新时使用安装版。源码可先构建预览：
+在正式发行页下载 `mxh-vps-deploy-v0.9.10-windows-amd64-setup.exe`，按同页 `SHA256SUMS.txt` 核对后安装，通过桌面／开始菜单启动。便携 ZIP 解压后双击 `MXH-VPS-Deploy.exe`；需要应用内原位更新时使用安装版。源码可先构建预览：
 
 ```powershell
 pwsh -NoProfile -File .\scripts\New-VpsReleasePackage.ps1 -Development -Destination '<预览输出目录>'

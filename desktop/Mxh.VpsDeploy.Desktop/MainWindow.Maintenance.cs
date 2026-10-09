@@ -52,7 +52,8 @@ public sealed partial class MainWindow
                 : Action(target.Scope == "KomariAgent" ? "安装 Agent" : target.Scope == "KomariController" ? "安装主控" : "安装 Tunnel", () => InstallationDialog(plan, target.Scope));
             return SettingRow(target.Name, target.Status + " · " + target.Description, target.Scope == "Tunnel" ? Symbol.Link : Symbol.View, button);
         }).ToArray();
-        return SettingsGroup(rows);
+        var group = SettingsGroup(rows);
+        return MaintenanceTargets.Monitoring(plan, state).Single(t => t.Scope == "Tunnel").Installed ? Column(group, TunnelAccessPanel(plan, state)) : group;
     }
     private (ContentDialog Dialog, JsonObject Options) MonitoringDialog(JsonObject plan, JsonObject state, string scope)
     {
