@@ -2,7 +2,9 @@
 
 面向个人 Debian VPS 的中文部署与运维工具，由 Windows 控制端统一管理部署计划、远端操作、私有归档和客户端配置。
 
-正式版为 [v0.9.10](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.9.10)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
+正式版为 [v0.9.11](https://github.com/mxh110708/mxh-vps-deploy/releases/tag/v0.9.11)，提供 Windows EXE 安装包。此前的 WPF 原生入口 v0.7.0 已撤销发行，源提交保留。
+
+v0.9.11 默认以标准大小在屏幕中央打开，并可在设置中记住关闭时的窗口位置和大小；显示器变化时调整到可见区域。修正节点拖动交换的阈值：按预览行中心选择位置，相邻交换无需额外拖出目标行，手柄不同按下位置沿用同一判定。补充原生窗口、拖动与正常保存导出验证，以及专用 VPS 的组合安装与恢复实测，详见[结果与边界](docs/TESTING-0.9.11.zh-CN.md)。
 
 v0.9.10 调整 Tunnel 流程：先安装并连接，再按实例页指引配置公开路由、验证 HTTPS 访问；组合安装先启动主控与 Tunnel，再提示创建节点并提供 Agent Token。重做节点拖动排序，扩大手柄，整行跟随并显示序号与落点高亮，支持边缘滚动和取消；修正 Tunnel 更新后未同步本地加密 Token 的问题。专用 Tunnel 的公开访问、登录退出、WebSocket 持续指标、主控恢复与错误 Token 回滚已实测，详见[结果与边界](docs/TESTING-0.9.10.zh-CN.md)。
 
@@ -64,7 +66,7 @@ dotnet run --project .\desktop\Mxh.VpsDeploy.Tests -c Release -- $PWD
 
 ### 3. 启动工具
 
-在正式发行页下载 `mxh-vps-deploy-v0.9.10-windows-amd64-setup.exe`，按同页 `SHA256SUMS.txt` 核对后安装，通过桌面／开始菜单启动。便携 ZIP 解压后双击 `MXH-VPS-Deploy.exe`；需要应用内原位更新时使用安装版。源码可先构建预览：
+在正式发行页下载 `mxh-vps-deploy-v0.9.11-windows-amd64-setup.exe`，按同页 `SHA256SUMS.txt` 核对后安装，通过桌面／开始菜单启动。便携 ZIP 解压后双击 `MXH-VPS-Deploy.exe`；需要应用内原位更新时使用安装版。源码可先构建预览：
 
 ```powershell
 pwsh -NoProfile -File .\scripts\New-VpsReleasePackage.ps1 -Development -Destination '<预览输出目录>'

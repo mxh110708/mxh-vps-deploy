@@ -29,7 +29,7 @@ public sealed partial class MainWindow
         async Task Shot(string name) { shell.UpdateLayout(); await Task.Delay(120); await Capture(SafePath.Resolve(outputDirectory, name + ".png")); }
         try
         {
-            scheme = null; SelectPage("settings"); var toggle = Find<ToggleSwitch>(shell).Single(); toggle.IsOn = true;
+            scheme = null; SelectPage("settings"); var toggle = Find<ToggleSwitch>(shell).Single(item => item.Tag as string == "AutoCheckUpdates"); toggle.IsOn = true;
             var appearance = Find<ComboBox>(shell).Single(c => c.Tag as string == "Appearance"); var colors = new JsonArray();
             foreach (var mode in new[] { "Light", "Dark", "Light", "Dark" })
             {
@@ -96,6 +96,7 @@ public sealed partial class MainWindow
             Require(fill != null && fill.Color.Equals(DesktopTheme.Color(Paint.Accent)), "用途选框未使用当前主题色。"); await Shot("deploy-multiple-purposes");
             SelectPage("network"); Require(page.Children.Count > 0 && heading.Text == "网络调优", "网络调优入口不可用。"); await Shot("network-independent"); proof["manual_network_boundary"] = true; proof["multiple_purposes"] = true;
             proof["deployment_experience"] = await DeploymentRegression(outputDirectory);
+            proof["window_placement"] = await WindowPlacementRegression(outputDirectory);
             return proof;
         }
         finally

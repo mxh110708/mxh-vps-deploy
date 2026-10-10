@@ -146,7 +146,7 @@ public sealed partial class MainWindow
                     try
                     {
                         var directory = Path.GetDirectoryName(testSession.Artifact("suite.json"))!;
-                        var result = new JsonObject { ["deployment"] = await DeploymentRegression(directory), ["maintenance"] = await MaintenanceRegression(directory), ["additions"] = await AdditionsRegression(directory) };
+                        var result = new JsonObject { ["deployment"] = await DeploymentRegression(directory), ["maintenance"] = await MaintenanceRegression(directory), ["additions"] = await AdditionsRegression(directory), ["window_placement"] = await WindowPlacementRegression(directory) };
                         if (testActivations != 0 || testForegroundSamples != 0) throw new OperationException("界面回归获得前台焦点。");
                         testSuiteResult = result; testSuiteState = "passed";
                     }

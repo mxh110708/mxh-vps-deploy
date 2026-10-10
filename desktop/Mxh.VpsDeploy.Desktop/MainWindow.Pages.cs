@@ -153,8 +153,9 @@ public sealed partial class MainWindow
         appearance.SelectionChanged += (_, _) => SetAppearance(settings.Text("Appearance"), true);
         page.Children.Add(SettingsGroup(SettingRow("颜色模式", "切换深色与浅色界面", Symbol.Setting, appearance), FontSetting()));
         page.Children.Add(GroupLabel("文字大小")); page.Children.Add(TypographySettings());
+        page.Children.Add(GroupLabel("窗口启动")); page.Children.Add(WindowPlacementSetting());
         page.Children.Add(GroupLabel("关闭设置")); page.Children.Add(CloseBehaviorSetting());
-        var check = new ToggleSwitch { IsOn = settings.Flag("AutoCheckUpdates"), OnContent = "", OffContent = "", MinWidth = 0, Width = 48 }; check.Toggled += (_, _) => { settings["AutoCheckUpdates"] = check.IsOn; SaveSettings(); };
+        var check = new ToggleSwitch { Tag = "AutoCheckUpdates", IsOn = settings.Flag("AutoCheckUpdates"), OnContent = "", OffContent = "", MinWidth = 0, Width = 48 }; check.Toggled += (_, _) => { settings["AutoCheckUpdates"] = check.IsOn; SaveSettings(); };
         page.Children.Add(GroupLabel("更新"));
         page.Children.Add(SettingsGroup(
             SettingRow("自动检查更新", "在启动应用时检查正式版本", Symbol.Sync, check),

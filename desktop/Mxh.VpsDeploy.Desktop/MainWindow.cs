@@ -52,7 +52,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
         DesktopTypography.Load(settings); DesktopTypography.Mark(heading, TypeRole.Title, 27); DesktopTypography.Mark(caption, TypeRole.Note, 13); DesktopTypography.Mark(taskText, TypeRole.Note, 13);
         try { SetFont(settings.Text("FontId", "Route")); }
         catch (OperationException) { SetFont("Route"); fontFallback = true; }
-        Title = "MXH VPS Deploy"; AppWindow.Resize(new global::Windows.Graphics.SizeInt32(1320, 880)); ExtendsContentIntoTitleBar = true;
+        Title = "MXH VPS Deploy"; ExtendsContentIntoTitleBar = true;
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "assets", "gui", "app.ico"));
         AppWindow.TitleBar.ButtonForegroundColor = ColorHelper.FromArgb(255, 230, 233, 238); AppWindow.TitleBar.ButtonBackgroundColor = ColorHelper.FromArgb(0, 0, 0, 0); AppWindow.TitleBar.ButtonInactiveBackgroundColor = ColorHelper.FromArgb(0, 0, 0, 0);
         Application.Current.Resources["ContentDialogMaxWidth"] = 760d; Application.Current.Resources["ContentDialogMinWidth"] = 400d; Application.Current.Resources["ContentDialogCornerRadius"] = new CornerRadius(12);
@@ -78,6 +78,7 @@ public sealed partial class MainWindow : Window, IUserInteraction
         Grid.SetRow(taskBar, 2); shell.Children.Add(taskBar);
         AppWindow.Closing += async (_, e) =>
         {
+            SaveWindowPlacementForClose();
             if (!closing && !exitFromTray && settings.Text("CloseBehavior", "Exit") == "Tray") { e.Cancel = true; MinimizeToTray(); return; }
             exitFromTray = false;
             if (taskCancellation != null) { e.Cancel = true; closing = true; taskCancellation.Cancel(); taskText.Text = "正在安全结束任务，完成后关闭窗口。"; }
@@ -90,8 +91,9 @@ public sealed partial class MainWindow : Window, IUserInteraction
         };
         Closed += (_, _) => { CancelNodeReorder(); trayIcon?.Dispose(); trayIcon = null; };
         SetAppearance(settings.Text("Appearance", "Dark"));
+        InitializeWindowPlacement();
         root.Loaded += (_, _) => Program.Trace(arguments, "Root Loaded");
-        root.Loaded += async (_, _) => { var scale = root.XamlRoot.RasterizationScale; var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea; AppWindow.Resize(new((int)Math.Min(1280 * scale, area.Width - 32 * scale), (int)Math.Min(850 * scale, area.Height - 32 * scale))); SelectPage("overview"); if (fontFallback) Show("所选字体暂时不可用，已使用内置原版字体。可在设置中重新选择或导入。", InfoBarSeverity.Warning); if (testSession != null) { StartTestSession(); return; } if (arguments.Contains("--verify-installed-update")) { await InstalledUpdateSmoke(); return; } if (arguments.Contains("--ui-smoke") || arguments.Contains("--verify-runtime")) { await UiSmoke(); return; } if (settings.Flag("AutoCheckUpdates")) await CheckUpdates(true); };
+        root.Loaded += async (_, _) => { SelectPage("overview"); if (fontFallback) Show("所选字体暂时不可用，已使用内置原版字体。可在设置中重新选择或导入。", InfoBarSeverity.Warning); if (testSession != null) { StartTestSession(); return; } if (arguments.Contains("--verify-installed-update")) { await InstalledUpdateSmoke(); return; } if (arguments.Contains("--ui-smoke") || arguments.Contains("--verify-runtime")) { await UiSmoke(); return; } if (settings.Flag("AutoCheckUpdates")) await CheckUpdates(true); };
     }
     private static SolidColorBrush Brush(Paint role) => DesktopTheme.Brush(role);
     private static TextBlock Text(string value, int size = 14, bool muted = false) => DesktopTypography.Mark(new TextBlock { Text = value, FontFamily = InterfaceFont, TextWrapping = TextWrapping.Wrap, Foreground = Brush(muted ? Paint.Muted : Paint.Text) }, size >= 30 ? TypeRole.Metric : size >= 16 ? TypeRole.Title : muted ? TypeRole.Note : TypeRole.Body, size);

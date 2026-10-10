@@ -31,8 +31,62 @@ public sealed partial class MainWindow
             await WaitForState(() => nodeDropRows.All(row => row.Handle.IsLoaded && row.Row.ActualHeight > 0), "节点手柄布局未就绪。");
             // A compact desktop can clip the third row. Scroll the real viewport
             // before checking hit testing or starting a pointer gesture.
-            mainScroll!.ChangeView(null, Math.Clamp(mainScroll.VerticalOffset + Before(0).Y - 14, 0, mainScroll.ScrollableHeight), null, true);
-            await WaitForState(() => Before(0).Y >= 0 && Grip(2).Y < mainScroll.ActualHeight - 12, "拖动起点与落点没有进入实际可视区域。");
+            var initialOffset = Math.Clamp(mainScroll!.VerticalOffset + Before(0).Y - 14, 0, mainScroll.ScrollableHeight);
+            mainScroll.ChangeView(null, initialOffset, null, true);
+            await WaitForState(() => Math.Abs(mainScroll.VerticalOffset - initialOffset) < 1 && Before(0).Y >= 0 && Grip(2).Y < mainScroll.ActualHeight - 12, "拖动起点与落点没有进入实际可视区域。");
+            // Scroll offset, transforms and the compositor do not settle in the
+            // same dispatcher turn. Measure drag geometry after presentation.
+            await Task.Delay(100); shell.UpdateLayout();
+            // Reproduce adjacent swaps at the halfway boundary between slots,
+            // including both ends of the grip. Use actual rendered geometry.
+            var adjacentRow = nodeDropRows[1].Row;
+            var adjacentGrip = nodeDropRows[1].Handle;
+            var adjacentOrigin = adjacentGrip.TransformToVisual(mainScroll).TransformPoint(new(22, 50));
+            var adjacentTop = adjacentRow.TransformToVisual(mainScroll).TransformPoint(new(0, 0)).Y;
+            var neighbour = nodeDropRows[0].Row;
+            var neighbourCentre = neighbour.TransformToVisual(mainScroll).TransformPoint(new(0, neighbour.ActualHeight / 2)).Y;
+            var boundary = (neighbourCentre + adjacentTop + adjacentRow.ActualHeight / 2) / 2;
+            var adjacentTarget = new Point(adjacentOrigin.X, boundary - 4 + adjacentOrigin.Y - adjacentTop - adjacentRow.ActualHeight / 2);
+            require(adjacentGrip.Press?.Invoke(adjacentOrigin, 1, () => true) == true, "相邻交换按下未开始。");
+            adjacentGrip.Move?.Invoke(adjacentTarget, 1); shell.UpdateLayout();
+            var renderedTop = nodeDragPreview!.TransformToVisual(mainScroll).TransformPoint(new(0, 0)).Y;
+            require(Math.Abs(renderedTop - (adjacentTarget.Y - (adjacentOrigin.Y - adjacentTop))) < 1, "预览实际位置与指针偏移不一致：" + renderedTop.ToString("F1"));
+            require(nodePointerDrag?.Insertion == 0 && nodeDropRows[0].Line.Visibility == Visibility.Visible, "预览已越过相邻交换位置，仍要求额外上拖才能交换。");
+            await Task.Delay(60); // Let the compositor present the moved preview.
+            var previewGeometry = new JsonObject { ["scroll_offset"] = mainScroll!.VerticalOffset, ["grab"] = nodePointerDrag!.GrabY, ["pointer"] = adjacentTarget.Y, ["boundary"] = boundary, ["row_height"] = adjacentRow.ActualHeight, ["preview_top_scroll"] = renderedTop, ["preview_top_shell"] = nodeDragPreview.TransformToVisual(shell).TransformPoint(new(0, 0)).Y, ["neighbour_centre_shell"] = neighbour.TransformToVisual(shell).TransformPoint(new(0, neighbour.ActualHeight / 2)).Y, ["source_centre_shell"] = adjacentRow.TransformToVisual(shell).TransformPoint(new(0, adjacentRow.ActualHeight / 2)).Y, ["canvas_top"] = Canvas.GetTop(nodeDragPreview), ["viewport_top_shell"] = mainScroll.TransformToVisual(shell).TransformPoint(new(0, 0)).Y, ["overlay_top_shell"] = nodeDragOverlay!.TransformToVisual(shell).TransformPoint(new(0, 0)).Y };
+            ArchiveStore.WriteJson(SafePath.Resolve(output, "node-adjacent-geometry-" + theme.ToLowerInvariant() + ".json"), previewGeometry);
+            await Capture(SafePath.Resolve(output, "node-adjacent-" + theme.ToLowerInvariant() + ".png"));
+            CancelNodeReorder();
+            foreach (var gripY in new[] { 2.0, 26.0, 50.0 })
+            {
+                foreach (var sourceIndex in new[] { 1, 0 })
+                {
+                    var otherIndex = 1 - sourceIndex;
+                    var row = nodeDropRows[sourceIndex].Row; var other = nodeDropRows[otherIndex].Row;
+                    var gripHandle = nodeDropRows[sourceIndex].Handle;
+                    var originPoint = gripHandle.TransformToVisual(mainScroll).TransformPoint(new(22, gripY));
+                    var rowTop = row.TransformToVisual(mainScroll).TransformPoint(new(0, 0)).Y;
+                    var rowCentre = rowTop + row.ActualHeight / 2;
+                    var otherCentre = other.TransformToVisual(mainScroll).TransformPoint(new(0, other.ActualHeight / 2)).Y;
+                    var midpoint = (rowCentre + otherCentre) / 2;
+                    var direction = sourceIndex == 1 ? -1 : 1;
+                    Point At(double offset) => new(originPoint.X, midpoint + offset + originPoint.Y - rowTop - row.ActualHeight / 2);
+                    var expectedNames = scheme!["Nodes"]!.AsArray().Select(n => n!.Text("name")).ToArray();
+                    (expectedNames[0], expectedNames[1]) = (expectedNames[1], expectedNames[0]);
+                    var candidate = new JsonObject { ["ValidationStatus"] = "Passed" }; scheme["Candidate"] = candidate;
+                    require(gripHandle.Press?.Invoke(originPoint, 1, () => true) == true, "临界相邻交换未开始。");
+                    gripHandle.Move?.Invoke(At(-direction * 3), 1); shell.UpdateLayout();
+                    require(nodePointerDrag!.Insertion is var same && (same == sourceIndex || same == sourceIndex + 1) && nodeDropRows.All(item => item.Line.Visibility == Visibility.Collapsed), "未越过交换位置就改变落点。");
+                    gripHandle.Move?.Invoke(At(0), 1); shell.UpdateLayout();
+                    require(nodeDropRows.All(item => item.Line.Visibility == Visibility.Collapsed), "恰好位于交换边界时没有保留原位置。");
+                    gripHandle.Move?.Invoke(At(direction * 3), 1); shell.UpdateLayout();
+                    var previewCentre = nodeDragPreview!.TransformToVisual(mainScroll).TransformPoint(new(0, row.ActualHeight / 2)).Y;
+                    require(Math.Abs(previewCentre - midpoint - direction * 3) < 1 && nodeDropRows.Any(item => item.Line.Visibility == Visibility.Visible), "普通拖动的实际预览与交换提示不一致：" + sourceIndex + "/" + gripY + "，预览 " + previewCentre.ToString("F1") + "，临界 " + midpoint.ToString("F1") + "，允许 " + nodePointerDrag!.DropAllowed);
+                    var adjacentOffset = mainScroll!.VerticalOffset;
+                    require(gripHandle.Release?.Invoke(At(direction * 3), 1) == true && scheme["Candidate"] == null && scheme["Nodes"]!.AsArray().Select(n => n!.Text("name")).SequenceEqual(expectedNames), "相邻交换释放未保存顺序或失效候选。");
+                    await WaitForState(() => nodeDropRows.All(item => item.Handle.IsLoaded && item.Row.ActualHeight > 0) && Math.Abs(mainScroll.VerticalOffset - adjacentOffset) < 1 && Before(0).Y >= 0 && Grip(2).Y < mainScroll.ActualHeight - 12, "相邻交换后控件或滚动位置未就绪。");
+                }
+            }
             string Names() => string.Join("|", scheme!["Nodes"]!.AsArray().Select(n => n!.Text("name")));
             bool Press(int index, uint id = 1, bool capture = true) => nodeDropRows[index].Handle.Press?.Invoke(Grip(index), id, () => capture) == true;
             var handle = nodeDropRows[2].Handle;

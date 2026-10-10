@@ -69,7 +69,7 @@ public sealed partial class MainWindow
         var grip = Text("≡", 22, true); grip.HorizontalAlignment = HorizontalAlignment.Center; grip.VerticalAlignment = VerticalAlignment.Center;
         var handle = new NodeReorderHandle { Content = grip, Tag = "NodeDragHandle." + index, Width = 44, Height = 52, Background = Brush(Paint.Surface), VerticalAlignment = VerticalAlignment.Center, ManipulationMode = ManipulationModes.None, IsTabStop = true };
         AutomationProperties.SetName(handle, "拖动排序 " + node.Text("name")); ToolTipService.SetToolTip(handle, "按住拖动；上下方向键调整顺序，Esc 取消");
-        handle.Position = args => args.GetCurrentPoint(mainScroll).Position;
+        handle.Position = args => shell.TransformToVisual(mainScroll).TransformPoint(args.GetCurrentPoint(shell).Position);
         handle.Press = (position, pointerId, capture) =>
         {
             if (nodePointerDrag != null) return false;
@@ -133,18 +133,25 @@ public sealed partial class MainWindow
         foreach (var item in nodeDropRows) { item.Line.Visibility = Visibility.Collapsed; item.Row.Background = null; }
         if (!drag.Moved || mainScroll == null || nodeDropRows.Count == 0) return;
         ShowNodeDragPreview(drag);
-        var viewport = mainScroll.TransformToVisual(shell).TransformPoint(new(0, 0));
+        var viewport = mainScroll.TransformToVisual(nodeDragOverlay).TransformPoint(new(0, 0));
         var source = nodeDropRows[drag.Source].Row.TransformToVisual(mainScroll).TransformPoint(new(0, 0));
         nodeDragOverlay!.Clip = new RectangleGeometry { Rect = new Rect(viewport.X, viewport.Y, mainScroll.ActualWidth, mainScroll.ActualHeight) };
         Canvas.SetLeft(nodeDragPreview!, viewport.X + source.X); Canvas.SetTop(nodeDragPreview!, viewport.Y + position.Y - drag.GrabY);
         drag.DropAllowed = position.X >= source.X && position.X <= source.X + nodeDropRows[drag.Source].Row.ActualWidth && position.Y >= 0 && position.Y <= mainScroll.ActualHeight;
         if (!drag.DropAllowed) return;
-        var insertion = nodeDropRows.Count;
+        // Choose the slot nearest the centre of the visible dragged row.
+        // Using the pointer makes the threshold depend on where the grip was
+        // pressed and requires moving past an entire neighbour to swap it.
+        var centre = position.Y - drag.GrabY + nodeDropRows[drag.Source].Row.ActualHeight / 2;
+        var nearest = drag.Source;
+        var distance = Math.Abs(centre - (source.Y + nodeDropRows[drag.Source].Row.ActualHeight / 2));
         for (var index = 0; index < nodeDropRows.Count; index++)
         {
             var row = nodeDropRows[index].Row; var top = row.TransformToVisual(mainScroll).TransformPoint(new(0, 0)).Y;
-            if (position.Y < top + row.ActualHeight / 2) { insertion = index; break; }
+            var candidate = Math.Abs(centre - (top + row.ActualHeight / 2));
+            if (candidate < distance - .01) { nearest = index; distance = candidate; }
         }
+        var insertion = nearest > drag.Source ? nearest + 1 : nearest;
         drag.Insertion = insertion;
         if (insertion == drag.Source || insertion == drag.Source + 1) return;
         var target = nodeDropRows[Math.Min(insertion, nodeDropRows.Count - 1)]; target.Row.Background = Brush(Paint.InputHover); target.Line.VerticalAlignment = insertion == nodeDropRows.Count ? VerticalAlignment.Bottom : VerticalAlignment.Top; target.Line.Visibility = Visibility.Visible;
