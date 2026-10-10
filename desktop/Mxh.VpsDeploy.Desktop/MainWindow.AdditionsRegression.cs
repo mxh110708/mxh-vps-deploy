@@ -111,8 +111,22 @@ public sealed partial class MainWindow
                 scheme["Candidate"]!["ValidationStatus"] = "Passed"; Navigate("clients");
                 var fields = Find<TextBox>(page).Where(box => (box.Header as string ?? "").EndsWith("文件")).ToArray();
                 Require(fields.Length == 2 && !((Button)pageAction.Content).IsEnabled, "空导出路径没有被提示。");
+                await WaitForState(() => fields.All(box => box.IsLoaded && box.ActualHeight > 0), "导出位置字段未加载。");
+                var exportOffset = Math.Clamp(mainScroll!.VerticalOffset + fields[0].TransformToVisual(mainScroll).TransformPoint(new(0, 0)).Y - 24, 0, mainScroll.ScrollableHeight);
+                mainScroll.ChangeView(null, exportOffset, null, true);
+                await WaitForState(() => Math.Abs(mainScroll.VerticalOffset - exportOffset) < 1 && fields[0].TransformToVisual(mainScroll).TransformPoint(new(0, 0)).Y >= 0 && fields[1].TransformToVisual(mainScroll).TransformPoint(new(0, fields[1].ActualHeight)).Y <= mainScroll.ActualHeight, "两个导出位置字段未进入可视区域。");
                 fields[0].Text = "C:\\fixture\\example.yaml"; fields[1].Text = "C:\\fixture\\example.json";
-                await Task.Delay(140);
+                // TextChanged follows native text rendering asynchronously; a
+                // fixed delay does not prove that both field events completed.
+                await WaitForState(() => scheme.Text("Targets.Clash") == fields[0].Text && scheme.Text("Targets.SingBox") == fields[1].Text && ((Button)pageAction.Content).IsEnabled, "填写导出位置后字段或按钮未刷新。");
+                ArchiveStore.WriteJson(SafePath.Resolve(output, "export-field-state-" + theme.ToLowerInvariant() + ".json"), new JsonObject
+                {
+                    ["button_enabled"] = ((Button)pageAction.Content).IsEnabled,
+                    ["candidate_status"] = scheme.Text("Candidate.ValidationStatus"),
+                    ["model_clash"] = scheme.Text("Targets.Clash"), ["model_sing_box"] = scheme.Text("Targets.SingBox"),
+                    ["fields"] = new JsonArray(fields.Select(box => (JsonNode?)new JsonObject { ["header"] = box.Header as string, ["text"] = box.Text, ["loaded"] = box.IsLoaded, ["height"] = box.ActualHeight }).ToArray()),
+                    ["window_width"] = shell.ActualWidth, ["window_height"] = shell.ActualHeight
+                });
                 Require(((Button)pageAction.Content).IsEnabled, "填写导出位置后按钮未刷新。");
                 await Task.Delay(140); await Capture(SafePath.Resolve(output, "export-guidance-" + theme.ToLowerInvariant() + ".png"));
                 scheme = null;
