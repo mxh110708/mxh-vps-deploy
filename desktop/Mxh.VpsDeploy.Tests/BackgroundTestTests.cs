@@ -6,6 +6,11 @@ using Mxh.VpsDeploy.Infrastructure;
 
 internal sealed partial class BoundaryTests
 {
+    public async Task RunBackgroundTests()
+    {
+        using var f = new Fixture(repository); await BackgroundTestTransport(f);
+        Console.WriteLine($"PASS: {assertions} background session boundary assertions; no production connections.");
+    }
     private async Task BackgroundTestTransport(Fixture f)
     {
         var root = f.Paths.Resolve("background-test"); Directory.CreateDirectory(root);
@@ -30,6 +35,26 @@ internal sealed partial class BoundaryTests
         Check(fake.Endpoints.Count == 0, "remote scope rejection happened after connecting");
         await using (await restricted.OpenAsync(new("192.0.2.10", 22022, "root", null), new FakeUser(), default)) { }
         Check(fake.Endpoints.Count == 1, "explicit test endpoint blocked");
+        var plan = new JsonObject { ["Server"] = new JsonObject { ["IPv4"] = "192.0.2.10", ["BootstrapSshPort"] = 22022 },
+            ["Ports"] = new JsonObject { ["SshPrimary"] = 23022, ["SshRescue"] = 33022 } };
+        Refuses(() => session.PrepareReviewedDeployment(plan), "default session silently expanded management ports");
+        await RefusesAsync(() => restricted.OpenAsync(new("192.0.2.10", 23022, "root", null), new FakeUser(), default), "rejected plan changed endpoint scope");
+        config["AllowManagementPortTransition"] = true; ArchiveStore.WriteJson(manifest, config);
+        var transition = BackgroundTestSession.Load(manifest, app); var migrating = transition.Restrict(fake);
+        var wrongHost = (JsonObject)plan.DeepClone(); wrongHost["Server"]!["IPv4"] = "192.0.2.11";
+        Refuses(() => transition.PrepareReviewedDeployment(wrongHost), "review authorized unlisted host");
+        var wrongBootstrap = (JsonObject)plan.DeepClone(); wrongBootstrap["Server"]!["BootstrapSshPort"] = 22;
+        Refuses(() => transition.PrepareReviewedDeployment(wrongBootstrap), "review authorized unlisted bootstrap port");
+        var invalid = (JsonObject)plan.DeepClone(); invalid["Ports"]!["SshRescue"] = 65536;
+        Refuses(() => transition.PrepareReviewedDeployment(invalid), "invalid management port accepted");
+        await RefusesAsync(() => migrating.OpenAsync(new("192.0.2.10", 23022, "root", null), new FakeUser(), default), "invalid review partly expanded scope");
+        transition.PrepareReviewedDeployment(plan);
+        foreach (var port in new[] { 23022, 33022 }) await using (await migrating.OpenAsync(new("192.0.2.10", port, "root", null), new FakeUser(), default)) { }
+        Check(fake.Endpoints.Count == 3, "reviewed management ports remained blocked");
+        await RefusesAsync(() => migrating.OpenAsync(new("192.0.2.10", 24022, "root", null), new FakeUser(), default), "unrelated same-host port accepted");
+        wrongBootstrap["Server"]!["BootstrapSshPort"] = 23022;
+        Refuses(() => transition.PrepareReviewedDeployment(wrongBootstrap), "derived port authorized another transition");
+        Check(Directory.GetFiles(Path.Combine(root, "test-artifacts"), "reviewed-management-*.private.json").Length == 1, "reviewed port scope evidence missing");
         var count = 0;
         await using var server = new BackgroundTestPipe(session, (command, args) =>
         {

@@ -47,7 +47,9 @@ public sealed partial class MainWindow
             var primary = request.Kind switch { OperationKind.ConnectExisting => "开始接入", OperationKind.ResumeImport => "继续接入", OperationKind.Resume => "继续部署", _ => "开始部署" };
             var stateFile = SafePath.Resolve(paths.Instance(request.InstanceRelativePath), "deployment-state.json");
             var state = request.Kind is OperationKind.Resume or OperationKind.ResumeImport && File.Exists(stateFile) ? ArchiveStore.ReadJson(stateFile) : null;
-            return await ShowDialog(OperationDialog(title, ReviewContent(plan, request.Kind, state), primary)) == ContentDialogResult.Primary;
+            var accepted = await ShowDialog(OperationDialog(title, ReviewContent(plan, request.Kind, state), primary)) == ContentDialogResult.Primary;
+            if (accepted && request.Kind is OperationKind.Deploy or OperationKind.Resume) testSession?.PrepareReviewedDeployment(plan);
+            return accepted;
         }
         return await ConfirmAsync(new("审阅并执行", request.InstanceRelativePath.Replace("/MXH-VPS-Deploy", "") + "\n\n" + review.Summary), CancellationToken.None);
     }

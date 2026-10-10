@@ -6,6 +6,7 @@ using Mxh.VpsDeploy.Infrastructure;
 var repository = Path.GetFullPath(args.Length == 0 ? Path.Combine(AppContext.BaseDirectory, "../../../../../") : args[0]);
 if (args.Contains("--fonts-only")) new BoundaryTests(repository).RunFontTests();
 else if (args.Contains("--deployment-only")) await new BoundaryTests(repository).RunDeploymentTests();
+else if (args.Contains("--background-only")) await new BoundaryTests(repository).RunBackgroundTests();
 else await new BoundaryTests(repository).Run();
 
 internal sealed partial class BoundaryTests(string repository)
