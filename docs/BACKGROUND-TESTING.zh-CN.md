@@ -79,7 +79,7 @@ MXH-VPS-Deploy.exe --test-command <会话清单> <请求 JSON 文件> <响应 JS
 
 `window.close` 向测试实例自己的窗口发送关闭消息，经过正常关闭设置和未保存方案检查；`window.restore` 恢复测试实例且不激活前台。托盘图标创建和移除使用真实 Windows Shell 接口，系统托盘菜单点击仍须单独验收。
 
-联网结果及剩余项目见 [v0.9.12 空白系统部署与重启实测](TESTING-0.9.12.zh-CN.md)、[v0.9.11 拖动修正与补充实测](TESTING-0.9.11.zh-CN.md)、[v0.9.10 Tunnel 实测与排序回归](TESTING-0.9.10.zh-CN.md)、[v0.9.9 AnyTLS/ECH 实测记录](TESTING-0.9.9.zh-CN.md)、[v0.9.8 组合追加记录](TESTING-0.9.8.zh-CN.md)与 [v0.9.7 实测记录](TESTING-0.9.7.zh-CN.md)。Tunnel 使用用户为测试创建的专属 Token 与路由；没有复用正式监控 Tunnel。
+联网结果及剩余项目见 [v0.9.13 IPv6 与恢复补测](TESTING-0.9.13.zh-CN.md)、[v0.9.12 空白系统部署与重启实测](TESTING-0.9.12.zh-CN.md)、[v0.9.11 拖动修正与补充实测](TESTING-0.9.11.zh-CN.md)、[v0.9.10 Tunnel 实测与排序回归](TESTING-0.9.10.zh-CN.md)、[v0.9.9 AnyTLS/ECH 实测记录](TESTING-0.9.9.zh-CN.md)、[v0.9.8 组合追加记录](TESTING-0.9.8.zh-CN.md)与 [v0.9.7 实测记录](TESTING-0.9.7.zh-CN.md)。Tunnel 使用用户为测试创建的专属 Token 与路由；没有复用正式监控 Tunnel。
 
 Tunnel 公开访问验证可通过实例页的正常控件调用，检查实际 VPS 的连接器、本机主控和公开 HTTPS 接口并保存结果。该检查不接收管理员凭据、不修改 Cloudflare 路由或重启服务；连接成功与公开路由验证分别记录。
 

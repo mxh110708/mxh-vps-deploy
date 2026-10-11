@@ -1734,6 +1734,8 @@ Write-Host "All tests passed: $passed assertions" -ForegroundColor Green
 & (Join-Path $ProjectRoot 'tests/Test-AppUpdate.ps1') -ProjectRoot $ProjectRoot
 if($IsWindows){& (Join-Path $ProjectRoot 'tests/Test-Gui.ps1') -ProjectRoot $ProjectRoot}
 if($pythonCommandForClient){
+    & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_certbot_source.py')
+    if($LASTEXITCODE -ne 0){throw 'Certbot scoped DNS API source tests failed.'}
     & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_client_compatibility.py')
     if($LASTEXITCODE -ne 0){throw 'Client template compatibility tests failed.'}
     & $pythonCommandForClient.Source (Join-Path $ProjectRoot 'tests/test_health_audit.py')

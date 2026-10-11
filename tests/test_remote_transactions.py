@@ -43,6 +43,8 @@ class TransactionTests(unittest.TestCase):
             source = source.split('stamp="$(date', 1)[0] + "\nprintf 'GUARD_PASSED\\n'\n"
         source = source.replace('/var/lib/mxh-vps-deploy', shell_path(self.state))
         source = source.replace('/root/vps-deploy-backups', shell_path(self.root / 'backups'))
+        source = source.replace('/etc/systemd/system', shell_path(self.root / 'units'))
+        source = source.replace('/usr/local/libexec', shell_path(self.root / 'helpers'))
         preamble = r'''
 flock() { return "${MOCK_LOCK_FAIL:-0}"; }
 install() { mkdir -p "${@: -1}"; }
@@ -51,6 +53,7 @@ systemctl() {
   case "$1" in
     is-active) [[ -n "$MOCK_ACTIVE" && "$*" == *"$MOCK_ACTIVE"* ]];;
     is-failed) return 1;;
+    disable) if [[ "$*" == *--now* && "$*" == *"$MOCK_ACTIVE"* ]]; then MOCK_ACTIVE=''; fi; return 0;;
     *) return 0;;
   esac
 }
@@ -137,6 +140,42 @@ systemctl() {
         result = self.run_script('maintenance-transaction-status.sh', action='ReleaseUnarmed', active='mxh-ssh-maintenance-rollback.timer')
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(self.owner.exists())
+
+    def test_unowned_arming_is_verified_without_releasing_a_lock(self):
+        self.owner.unlink()
+        result = self.run_script('maintenance-transaction-status.sh', action='VerifyUnowned')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('VPSDEPLOY_UNOWNED_TRANSACTION_CLEAR', result.stdout)
+
+    def test_unowned_verification_refuses_owner_active_rollback_and_lock_failure(self):
+        self.assertNotEqual(self.run_script('maintenance-transaction-status.sh', action='VerifyUnowned').returncode, 0)
+        self.assertTrue(self.owner.exists())
+        self.owner.unlink()
+        for unit in ['mxh-protocol-migration-rollback.timer', 'mxh-protocol-migration-rollback.service', 'mxh-ssh-maintenance-rollback.timer', 'mxh-ssh-maintenance-rollback.service']:
+            self.assertNotEqual(self.run_script('maintenance-transaction-status.sh', action='VerifyUnowned', active=unit).returncode, 0)
+        self.assertNotEqual(self.run_script('maintenance-transaction-status.sh', action='VerifyUnowned', lock_fail=True).returncode, 0)
+
+    def completed_rollback(self, matching=True):
+        self.owner.unlink()
+        (self.backup / 'rollback-executed').touch()
+        units = self.root / 'units'
+        units.mkdir()
+        directory = shell_path(self.backup) if matching else '/unknown/transaction'
+        (units / 'mxh-protocol-migration-rollback.service').write_text('ExecStart=' + shell_path(self.root / 'helpers') + '/mxh-protocol-migration-rollback ' + directory + ' --transaction\n')
+
+    def test_completed_rollback_disarms_only_its_own_elapsed_timer(self):
+        self.completed_rollback()
+        result = self.run_script('protocol-migration-trigger-rollback.sh', active='mxh-protocol-migration-rollback.timer')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.root / 'calls').read_text()
+        self.assertIn('disable --now mxh-protocol-migration-rollback.timer', calls)
+        self.assertNotIn('start mxh-protocol-migration-rollback.service', calls)
+
+    def test_completed_rollback_refuses_another_timer_owner(self):
+        self.completed_rollback(matching=False)
+        result = self.run_script('protocol-migration-trigger-rollback.sh', active='mxh-protocol-migration-rollback.timer')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('disable --now', (self.root / 'calls').read_text())
 
     def mutation(self, *, expired=False, changed_owner=False):
         source=(ROOT/'assets/remote/maintenance-mutation-guard.sh').read_text()

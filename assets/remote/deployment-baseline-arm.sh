@@ -52,6 +52,7 @@ paths=(
   etc/systemd/system/sing-box-anytls.service
   etc/letsencrypt
   etc/mxh-tls
+  usr/local/libexec/mxh-certbot-dns
   usr/local/libexec/mxh-certbot-deploy
   etc/systemd/system/mxh-certbot-renew.service
   etc/systemd/system/mxh-certbot-renew.timer

@@ -70,15 +70,25 @@ public sealed partial class WorkflowEngine
             var result = await c.Run("maintenance-transaction-status.sh", parameters);
             var remote = RemoteAssets.Marker(result.Output, "TRANSACTION_BACKUP");
             var task = RemoteAssets.Marker(result.Output, "CONTROL_TASK_ID", false);
-            if (remote == "" || task != c.Pending.Text("TaskId")) throw new OperationException("远端事务与本地任务身份不匹配，未自动恢复。", true);
             var phase = RemoteAssets.Marker(result.Output, "TRANSACTION_PHASE");
+            if (c.Pending.Text("Phase") == "Arming" && c.Pending.Text("RemoteBackup") == "" && remote == "" && task == "" && phase == "None")
+            {
+                // The snapshot command may fail before it acquires a remote owner.
+                // Verify absence under the remote lock; never replay or release another transaction.
+                await c.Run("maintenance-transaction-status.sh", new() { ["ACTION"] = "VerifyUnowned" }, marker: "UNOWNED_TRANSACTION_CLEAR");
+                ApplyLocalRollback(c);
+                await c.VerifySsh(c.Port, "root");
+                c.Pending["Phase"] = "RolledBack"; c.Pending["CompletedAt"] = DateTimeOffset.UtcNow; c.Save();
+                c.Report("恢复核对", "远端没有本次快照或活动回滚任务，本地未建立的事务已核对关闭。"); return;
+            }
+            if (remote == "" || task != c.Pending.Text("TaskId")) throw new OperationException("远端事务与本地任务身份不匹配，未自动恢复。", true);
             if (phase == "Committed")
             {
                 if (c.Pending.Text("Phase") != "LocalPrepared") throw new OperationException("远端提交与本地记录不一致。", true);
                 c.Pending["Phase"] = "Committed"; c.Save(); return;
             }
             if (phase == "Preparing") throw new OperationException("远端快照尚未完成，请保留记录核对，未擅自清除锁。", true);
-            if (phase != "RolledBack") await c.Run("protocol-migration-trigger-rollback.sh", new() { ["EXPECTED_BACKUP"] = remote, ["SOURCE_ROLE"] = c.Pending.Text("OldPlan.Role", "MonitorOnly") }, true, 300, "MIGRATION_ROLLBACK_OK");
+            await c.Run("protocol-migration-trigger-rollback.sh", new() { ["EXPECTED_BACKUP"] = remote, ["SOURCE_ROLE"] = c.Pending.Text("OldPlan.Role", "MonitorOnly") }, true, 300, "MIGRATION_ROLLBACK_OK");
             ApplyLocalRollback(c);
             await c.VerifySsh(c.Port, "root");
             c.Pending["Phase"] = "RolledBack"; c.Pending["CompletedAt"] = DateTimeOffset.UtcNow; c.Save();

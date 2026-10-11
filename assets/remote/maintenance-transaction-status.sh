@@ -8,7 +8,16 @@ if [[ "$action" == 'Status' && -n "${VPS_PARAM_EXPECTED_BACKUP:-}" ]]; then
   [[ "$VPS_PARAM_EXPECTED_BACKUP" =~ ^/root/vps-deploy-backups/[0-9]{8}-[0-9]{6}/(protocol-lifecycle|ssh-maintenance)$ ]]
   current="$VPS_PARAM_EXPECTED_BACKUP"
 fi
-if [[ "$action" == 'ReleaseUnarmed' ]]; then
+if [[ "$action" == 'VerifyUnowned' ]]; then
+  exec 9>/var/lib/mxh-vps-deploy/transaction.lock
+  flock -n 9 || exit 1
+  [[ ! -e "$owner" ]]
+  for unit in mxh-protocol-migration-rollback.timer mxh-protocol-migration-rollback.service mxh-ssh-maintenance-rollback.timer mxh-ssh-maintenance-rollback.service; do
+    ! systemctl is-active --quiet "$unit" || exit 1
+  done
+  printf '%s\n' 'VPSDEPLOY_UNOWNED_TRANSACTION_CLEAR'
+  exit 0
+elif [[ "$action" == 'ReleaseUnarmed' ]]; then
   : "${VPS_PARAM_EXPECTED_BACKUP:?}"
   exec 9>/var/lib/mxh-vps-deploy/transaction.lock
   flock -n 9 || exit 1

@@ -21,6 +21,25 @@ public static class SafeFailures
     }
     public static OperationException Remote(CommandResult result, string description)
     {
+        try
+        {
+            var phase = RemoteAssets.Marker(result.Output, "MONITORING_FAILURE_PHASE", false);
+            var detail = phase switch
+            {
+                "download" => "监控组件下载或摘要校验失败。",
+                "binary-check" => "监控组件程序版本或安装路径检查失败。",
+                "service-start" => "监控服务启动失败。",
+                "service-process" => "监控服务的运行进程尚未通过核对。",
+                "controller-guide" => "主控首次初始化接口尚未就绪。",
+                "controller-initialization" => "主控管理员初始化失败。",
+                "controller-login" => "主控管理员登录验收失败。",
+                "tunnel-readiness" => "Tunnel 连接器未能在限定时间内连接 Cloudflare。",
+                "readiness" => "监控组件接口就绪检查失败。",
+                _ => ""
+            };
+            if (detail != "") return new(detail, code: "MonitoringStepFailed", nextAction: "核对本步骤的服务日志、网络与组件配置；本轮新增内容按事务范围恢复。");
+        }
+        catch (FormatException) { }
         var installation = RemoteAssets.Marker(result.Output, "INSTALLATION_CHECK", false);
         if (installation != "")
         {

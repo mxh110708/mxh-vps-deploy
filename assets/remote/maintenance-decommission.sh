@@ -12,7 +12,7 @@ if [[ "$VPS_PARAM_SCOPE" == 'RemoveManaged' ]]; then
   rm -rf /etc/systemd/system/xray.service.d /etc/systemd/system/sing-box.service.d
   rm -f /etc/nginx/sites-enabled/mxh-reality-target /etc/nginx/sites-available/mxh-reality-target
   rm -rf /var/www/mxh-reality-target /etc/mxh-tls
-  rm -f /etc/systemd/system/mxh-certbot-renew.timer /etc/systemd/system/mxh-certbot-renew.service /usr/local/libexec/mxh-certbot-deploy
+  rm -f /etc/systemd/system/mxh-certbot-renew.timer /etc/systemd/system/mxh-certbot-renew.service /usr/local/libexec/mxh-certbot-dns /usr/local/libexec/mxh-certbot-deploy
   systemctl daemon-reload
 fi
 if [[ "$remove_controller" == 'true' ]]; then

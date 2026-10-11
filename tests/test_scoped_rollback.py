@@ -124,7 +124,11 @@ class ScopedRollbackTests(unittest.TestCase):
         self.assertEqual(len(list(self.backup.glob('failed-komari-data-*/**/metrics.db'))),1)
 
     def test_historical_full_protocol_restore_filters_monitor_files(self):
+        runner=self.root/'usr/local/libexec/mxh-certbot-dns'
+        runner.parent.mkdir(parents=True,exist_ok=True)
+        runner.write_text('old-api-transport')
         self.arm('Protocols,KomariController')
+        runner.write_text('changed-api-transport')
         (self.root/'opt/komari/data/komari.db').write_text('new-monitor')
         (self.root/'etc/sing-box/config.json').write_text('new-protocol')
         (self.root/'calls').write_text('')
@@ -132,6 +136,7 @@ class ScopedRollbackTests(unittest.TestCase):
         self.assertEqual((self.root/'etc/sing-box/config.json').read_text(),'old-protocol')
         self.assertEqual((self.root/'opt/komari/data/komari.db').read_text(),'new-monitor')
         self.assertNotIn('komari.service',(self.root/'calls').read_text())
+        self.assertEqual(runner.read_text(),'old-api-transport')
 
     def test_controller_rollback_refuses_to_replace_live_database(self):
         self.arm('KomariController')
@@ -188,6 +193,15 @@ class ScopedRollbackTests(unittest.TestCase):
         calls=(self.root/'calls').read_text()
         self.assertNotIn('sing-box.service',calls)
         self.assertNotIn('komari.service',calls)
+
+    def test_new_certbot_runner_is_removed_only_with_trusted_tls_scope(self):
+        self.arm('AnyTlsEntry,TrustedTls')
+        runner=self.root/'usr/local/libexec/mxh-certbot-dns'
+        runner.write_text('new-private-dns-transport')
+        self.restore()
+        self.assertFalse(runner.exists())
+        self.assertEqual((self.root/'etc/sing-box/config.json').read_text(),'old-protocol')
+        self.assertEqual((self.root/'opt/komari/data/komari.db').read_text(),'old-monitor')
 
     def test_new_tunnel_rollback_removes_private_token_only_in_tunnel_scope(self):
         self.arm('Cloudflared')

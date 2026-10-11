@@ -34,15 +34,39 @@ work="$(mktemp -d)"
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
 zone_json="$work/zone.json"
+runner_path=/usr/local/libexec/mxh-certbot-dns
+if [[ -e "$runner_path" || -L "$runner_path" ]]; then
+  if [[ ! -f "$runner_path" || -L "$runner_path" ]] || ! grep -Fxq '# MXH managed Cloudflare DNS API transport' "$runner_path"; then
+    emit_safe_error 'DNS API 执行器路径已被其他文件占用，未覆盖。'
+    exit 22
+  fi
+fi
 phase='cloudflare-zone-api'
-set +e
-zone_meta="$(curl --silent --show-error --get --output "$zone_json" \
-  --write-out $'%{http_code}\t%{local_ip}' \
-  --header "Authorization: Bearer ${VPS_PARAM_CLOUDFLARE_TOKEN}" \
-  --data-urlencode "name=${VPS_PARAM_ZONE_NAME}" \
-  'https://api.cloudflare.com/client/v4/zones')"
-zone_curl_status="$?"
-set -e
+# Prefer IPv4, then try IPv6. A dual-stack machine may have several IPv6
+# addresses while the token permits only one. Keep the successful source for
+# issuance and renewal rather than letting each Python request choose again.
+zone_curl_status=1
+for api_family in -4 -6; do
+  set +e
+  zone_meta="$(curl "$api_family" --silent --show-error --get --output "$zone_json" \
+    --connect-timeout 15 --max-time 45 --write-out $'%{http_code}\t%{local_ip}' \
+    --header "Authorization: Bearer ${VPS_PARAM_CLOUDFLARE_TOKEN}" \
+    --data-urlencode "name=${VPS_PARAM_ZONE_NAME}" \
+    'https://api.cloudflare.com/client/v4/zones')"
+  zone_curl_status="$?"
+  set -e
+  if [[ "$zone_curl_status" -eq 0 ]] && python3 - "$zone_json" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        body = json.load(handle)
+    ok = body.get("success") and len(body.get("result") or []) == 1
+except (OSError, ValueError, AttributeError):
+    ok = False
+raise SystemExit(0 if ok else 1)
+PY
+  then break; fi
+done
 if [[ "$zone_curl_status" -ne 0 ]]; then
   safe_error='Cloudflare Zone API 连接失败；请检查 VPS 的 DNS、IPv4/IPv6 出口和到 api.cloudflare.com 的 HTTPS 连通性。'
   emit_safe_error "$safe_error"
@@ -86,6 +110,7 @@ backup_dir="/root/vps-deploy-backups/${stamp}/certbot-dns"
 install -d -m 0700 "$backup_dir"
 for existing in \
   /etc/letsencrypt/cloudflare.ini \
+  /usr/local/libexec/mxh-certbot-dns \
   /usr/local/libexec/mxh-certbot-deploy \
   /etc/systemd/system/mxh-certbot-renew.service \
   /etc/systemd/system/mxh-certbot-renew.timer; do
@@ -132,6 +157,50 @@ install -o root -g root -m 0600 "$credentials_tmp" "$credentials_path"
 
 if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
 install -d -o root -g root -m 0755 /usr/local/libexec
+[[ ! -L /usr/local/libexec/mxh-certbot-dns ]]
+api_source_json="$(python3 - "$zone_local_ip" <<'PY'
+import ipaddress, json, sys
+print(json.dumps(str(ipaddress.ip_address(sys.argv[1]))))
+PY
+)"
+certbot_runner="$work/mxh-certbot-dns"
+printf '#!/usr/bin/python3\n# MXH managed Cloudflare DNS API transport\nDNS_API_SOURCE = %s\n' "$api_source_json" > "$certbot_runner"
+cat >> "$certbot_runner" <<'RUNNER'
+import ipaddress
+import socket
+import sys
+from urllib3.util import connection
+
+source = ipaddress.ip_address(DNS_API_SOURCE)
+source_family = socket.AF_INET6 if source.version == 6 else socket.AF_INET
+getaddrinfo = socket.getaddrinfo
+create_connection = connection.create_connection
+
+def is_cloudflare_api(host):
+    if isinstance(host, bytes):
+        host = host.decode("ascii")
+    return isinstance(host, str) and host.rstrip(".").lower() == "api.cloudflare.com"
+
+def resolve(host, port, family=0, type=0, proto=0, flags=0):
+    return getaddrinfo(host, port, source_family if is_cloudflare_api(host) else family,
+                       type, proto, flags)
+
+def connect(address, *args, **kwargs):
+    if is_cloudflare_api(address[0]):
+        if len(args) >= 2:
+            args = (args[0], (str(source), 0), *args[2:])
+        else:
+            kwargs["source_address"] = (str(source), 0)
+    return create_connection(address, *args, **kwargs)
+
+# This process alone pins Cloudflare's DNS API. ACME traffic, certificate
+# validation, DNS resolution for other services and global routing are unchanged.
+socket.getaddrinfo = resolve
+connection.create_connection = connect
+from certbot.main import main
+sys.exit(main())
+RUNNER
+install -o root -g root -m 0750 "$certbot_runner" /usr/local/libexec/mxh-certbot-dns
 cat > /usr/local/libexec/mxh-certbot-deploy <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -182,7 +251,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/certbot renew --quiet --no-random-sleep-on-renew --deploy-hook /usr/local/libexec/mxh-certbot-deploy
+ExecStart=/usr/local/libexec/mxh-certbot-dns renew --quiet --no-random-sleep-on-renew --deploy-hook /usr/local/libexec/mxh-certbot-deploy
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
@@ -216,7 +285,7 @@ issue_certificate() {
 
   phase='certificate-issuance'
   if declare -F vps_transaction_check >/dev/null; then vps_transaction_check; fi
-  certbot certonly \
+  /usr/local/libexec/mxh-certbot-dns certonly \
     --non-interactive --agree-tos --email "$VPS_PARAM_EMAIL" \
     --dns-cloudflare --dns-cloudflare-credentials "$credentials_path" \
     --dns-cloudflare-propagation-seconds "$propagation_seconds" \
@@ -228,7 +297,7 @@ issue_certificate() {
   RENEWED_LINEAGE="/etc/letsencrypt/live/$cert_name" \
     RENEWED_DOMAINS="$domains_csv" /usr/local/libexec/mxh-certbot-deploy
   phase='certificate-renewal-dry-run'
-  certbot renew --cert-name "$cert_name" --dry-run --quiet --no-random-sleep-on-renew >/dev/null
+  /usr/local/libexec/mxh-certbot-dns renew --cert-name "$cert_name" --dry-run --quiet --no-random-sleep-on-renew >/dev/null
 }
 
 if [[ "$anytls_enabled" == 'true' ]]; then

@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+phase='parameters'
+report_failure() {
+  local status="$?"
+  trap - ERR
+  printf 'VPSDEPLOY_MONITORING_FAILURE_PHASE_B64=%s\n' "$(printf '%s' "$phase" | base64 | tr -d '\n')"
+  exit "$status"
+}
+trap report_failure ERR
 : "${VPS_PARAM_COMPONENT:?}"
 : "${VPS_PARAM_VERSION:?}"
 : "${VPS_PARAM_ASSET_NAME:?}"
@@ -22,9 +30,11 @@ case "$VPS_PARAM_COMPONENT" in
 esac
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+phase='download'
 curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 300 \
   "https://github.com/${repository}/releases/download/${VPS_PARAM_VERSION}/${VPS_PARAM_ASSET_NAME}" -o "$work/binary"
 printf '%s  %s\n' "$VPS_PARAM_SHA256" "$work/binary" | sha256sum -c - >/dev/null
+phase='binary-check'
 chmod 0755 "$work/binary"
 if [[ "$VPS_PARAM_COMPONENT" == KomariController ]]; then
   # Komari 1.5 prints its version banner before parsing flags and has no
@@ -48,7 +58,7 @@ Description=Komari monitoring controller
 After=network-online.target
 Wants=network-online.target
 [Service]
-Type=simple
+Type=exec
 User=komari
 Group=komari
 WorkingDirectory=/var/lib/komari
@@ -92,18 +102,24 @@ WantedBy=multi-user.target
 EOF
 fi
 chmod 0644 "/etc/systemd/system/$service"
+phase='service-start'
 systemctl daemon-reload
 systemctl enable --now "$service" >/dev/null
 systemctl is-active --quiet "$service"
+phase='service-process'
 pid="$(systemctl show "$service" -p MainPID --value)"
 [[ "$pid" =~ ^[1-9][0-9]*$ && "/proc/$pid/exe" -ef "$binary" ]]
+phase='readiness'
 python3 <<'PY'
-import http.cookiejar, json, os, time, urllib.error, urllib.request
+import base64, http.cookiejar, json, os, time, urllib.error, urllib.request
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 base = 'http://127.0.0.1:' + os.environ['VPS_PARAM_PORT']
 def request(path, body=None):
     req = urllib.request.Request(base + path, data=json.dumps(body).encode() if body is not None else None, headers={'Content-Type': 'application/json'})
     with opener.open(req, timeout=10) as response: return response.read()
+def fail(phase):
+    print('VPSDEPLOY_MONITORING_FAILURE_PHASE_B64=' + base64.b64encode(phase.encode()).decode())
+    raise SystemExit(1)
 if os.environ['VPS_PARAM_COMPONENT'] == 'KomariController':
     for attempt in range(30):
         try:
@@ -111,10 +127,10 @@ if os.environ['VPS_PARAM_COMPONENT'] == 'KomariController':
             if status.get('data', {}).get('required') is True: break
         except (OSError, ValueError): pass
         time.sleep(1)
-    else: raise SystemExit('Controller installation guide is not ready')
+    else: fail('controller-guide')
     body = {'username': 'admin', 'password': os.environ['VPS_PARAM_SECRET'], 'sitename': 'MXH Monitor', 'description': '', 'metric_dsn': './data/metrics.db'}
     try: request('/api/install/complete', body)
-    except (OSError, ValueError): raise SystemExit('Controller initialization failed')
+    except (OSError, ValueError): fail('controller-initialization')
     for attempt in range(30):
         try:
             result = json.loads(request('/api/login', {'username': 'admin', 'password': os.environ['VPS_PARAM_SECRET']}))
@@ -122,11 +138,11 @@ if os.environ['VPS_PARAM_COMPONENT'] == 'KomariController':
                 request('/api/logout'); break
         except (OSError, ValueError): pass
         time.sleep(1)
-    else: raise SystemExit('Controller administrator login verification failed')
+    else: fail('controller-login')
 else:
     for attempt in range(30):
         try: request('/ready'); break
         except OSError: time.sleep(1)
-    else: raise SystemExit('Tunnel did not establish a Cloudflare connection')
+    else: fail('tunnel-readiness')
 PY
 printf '%s\n' 'VPSDEPLOY_MONITORING_INSTALLED'
