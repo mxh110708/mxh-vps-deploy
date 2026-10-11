@@ -12,7 +12,7 @@ RUNNER = SCRIPT.split("<<'RUNNER'\n", 1)[1].split("\nRUNNER\n", 1)[0]
 
 
 class CertbotSourceTests(unittest.TestCase):
-    def run_runner(self, source):
+    def run_runner(self, source, invalid=False):
         calls = {"resolve": [], "connect": []}
         def resolve(*args):
             calls["resolve"].append(args)
@@ -39,9 +39,13 @@ class CertbotSourceTests(unittest.TestCase):
         modules = {"urllib3.util": util, "urllib3.util.connection": connection,
                    "certbot": types.ModuleType("certbot"), "certbot.main": certbot_main}
         with patch.dict(sys.modules, modules), patch.object(socket, "getaddrinfo", resolve):
-            with self.assertRaises(SystemExit) as stopped:
-                exec(compile(RUNNER, "mxh-certbot-dns", "exec"), {"DNS_API_SOURCE": source})
-            self.assertEqual(stopped.exception.code, 0)
+            if invalid:
+                with self.assertRaises(ValueError):
+                    exec(compile(RUNNER, "mxh-certbot-dns", "exec"), {"DNS_API_SOURCE": source})
+            else:
+                with self.assertRaises(SystemExit) as stopped:
+                    exec(compile(RUNNER, "mxh-certbot-dns", "exec"), {"DNS_API_SOURCE": source})
+                self.assertEqual(stopped.exception.code, 0)
         return calls
 
     def test_ipv4_preflight_source_is_used_for_dns_api(self):
@@ -67,8 +71,8 @@ class CertbotSourceTests(unittest.TestCase):
         self.assertEqual(calls["connect"][3][1:3], (10, ("192.0.2.10", 0)))
 
     def test_invalid_source_is_rejected_before_any_request(self):
-        with self.assertRaises(ValueError):
-            exec(compile(RUNNER, "mxh-certbot-dns", "exec"), {"DNS_API_SOURCE": "not-an-address"})
+        calls = self.run_runner("not-an-address", invalid=True)
+        self.assertEqual(calls, {"resolve": [], "connect": []})
 
 
 if __name__ == "__main__":
